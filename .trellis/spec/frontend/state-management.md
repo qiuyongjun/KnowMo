@@ -34,7 +34,7 @@ fun isPending(p: Page): Boolean = p is Page.TermPage && when (p.mode) {
 
 由 `pages` / `taught` / `revealed` 推导，作答与教读后随重组自动更新。凡是「还剩多少没做」「完成没有」这类判断，一律走这个口径，不要另立一套。
 
-## Gotcha：`LaunchedEffect` 的两条规矩（v5 R7 两次踩坑）
+## Gotcha：effect 与播报的三条规矩（v5 R7 三次踩坑）
 
 ### (1) 在闭包里读派生值，必须写成局部函数
 
@@ -49,32 +49,38 @@ LaunchedEffect(pagerState) {
     snapshotFlow { pagerState.currentPage to pagerState.isScrollInProgress }
         .collect { (idx, scrolling) -> /* ... 用的是这次 composition 的 pending */ }
 }
-```
 
-### (2) key 里不能放 effect 体内会改写的 state
-
-**症状**：卡片被回收 / 追加了，但那次播报没发生——声音莫名其妙丢了。
-
-**原因**：`LaunchedEffect(pagerState, pages)` 以 `pages` 为 key，而 effect 体内（前向消化回收、教读追加考核卡）会改 `pages` → effect 执行到一半被自己重启并取消。
-
-**判定规则**：**effect 体内写过的 state，不要作为自己的 key**。key 只留真正的外部触发源，需要读的 state 在 `collect` 体内读。
-
-**修法**：写成局部函数。函数体每次调用都走 State 委托 getter，读到当前值：
-
-```kotlin
 // ✅ 对：每次调用读当前值
 fun pendingTaskCount(): Int = pages.count(::isPending)
 ```
 
-**代价**：Kotlin 局部函数不能前向引用，必须声明在首个使用点之前（本项目里要放在 `spokenKey` / `cardSpeech` 之上）。
+**代价**：Kotlin 局部函数不能前向引用，必须声明在首个使用点之前（本项目里放在 `spokenKey` / `cardSpeech` 之上）。
 
 **替代方案**（择一，不要混用）：把 `revealed` / `taught` 也加进 effect 的 key（effect 会频繁重启，重播判定需另做）；或用 `derivedStateOf`（读取须发生在 composition 内，闭包外仍要函数包装）。
+
+### (2) key 里不能放 effect 体内会改写的 state
+
+**症状**：卡片被教读 / 追加 / 插入完成卡了，但那次播报没发生——声音莫名其妙丢了。
+
+**原因**：`LaunchedEffect(pagerState, pages)` 以 `pages` 为 key，而 effect 体内（教读追加考核卡、`syncDonePage()` 插入完成卡）会改 `pages` → effect 执行到一半被自己重启并取消。
+
+**判定规则**：**effect 体内写过的 state，不要作为自己的 key**。key 只留真正的外部触发源，需要读的 state 在 `collect` 体内读。
+
+### (3) 同一次交互里的两处播报语义，必须合并成一句
+
+**症状**：前向拦截的越界解释语只播出了前几个字。
+
+**原因**：`TTSSpeaker.speak` 是 `QUEUE_FLUSH`。退回动画结束后，目标页会再触发一次停稳并播 `cardSpeech`，把解释语冲掉——把 `speak` 挪到动画之后也不行，200ms 的停稳去抖不构成足够间隔。
+
+**修法**：把解释语挂到 `blockHint` state，在落点停稳时与 `cardSpeech` **拼成一句** utterance 播出；落点卡此前已播报过时只补解释、不重复念词。**推论**：换频道语 + 卡片播报同理（现有实现即 `announce + text` 拼接）。
+
+**附注**：`snapshotFlow` 是 conflated 的——collector 挂在 `animateScrollToPage` 期间的状态变化不会被逐个 emit，只在 collector 空出来时重读一次，因此退回动画自身的 `scrolling == true` 通常**不会**触发 `tts.stop()` 掐断解释语。但这条时序未经源码核实（本机无 Compose 源码），**不要依赖它**——合并成一句才是稳的。
 
 ## 播报去重键按「页身份」
 
 `spokenKeys` 的键必须绑在**页实例**上（`"$channel:seq:${p.seq}"`），完成卡用常量 `"$channel:done"`。
 
-**不要**把下标（`currentPage` / feed 序号）放进键：前向消化会把卡移到队尾，同一张卡的序号会变，含序号的键会被当成新卡而**重复播报**。同理，也别让键依赖会反复变动的派生值（上一版用过 `done:<pending>`，随完成度变化，属多余）。
+**不要**把下标放进键：追加（考核卡 / 完成卡 / 自由刷页）会让同一张卡在不同时刻对应不同下标，绑 `seq` 才能让「页身份」与「列表位置」解耦。同理也别让键依赖会反复变动的派生值。完成卡用常量键是安全的——`pending == 0` 之后不可能再产生待处理卡，它一旦出现就不会消失。
 
 ## 完成度不由「进度」表达
 
@@ -91,8 +97,9 @@ fun pendingTaskCount(): Int = pages.count(::isPending)
 | 症状 | 根因 | 修法 |
 |---|---|---|
 | 播报内容比屏幕文案旧一拍 | 派生值写成 `val`，被 `LaunchedEffect` 闭包捕获 | 改写为局部函数，见 Gotcha (1) |
-| 回收 / 追加后该次播报丢失 | effect 的 key 含它自己会改写的 `pages` | key 只留外部触发源，见 Gotcha (2) |
+| 追加 / 插入完成卡后该次播报丢失 | effect 的 key 含它自己会改写的 `pages` | key 只留外部触发源，见 Gotcha (2) |
 | 同一词的多张考核卡一起展开 | 用词 id 而非 `seq` 记录展开态 | 按页出现（`seq`）记录；队列用 `answered[i]` |
 | 一张卡没答也能看到「任务完成」 | 用「滑到底」当完成判定 | 完成卡改为条件出现，判定走 `pendingTaskCount()` |
-| 卡被回收后再滑到时重复播报 | 去重键含下标或会变动的派生值 | 键绑页身份 `seq`；完成卡用常量 |
+| 卡在列表里换了位置后重复播报 | 去重键含下标 | 键绑页身份 `seq`；完成卡用常量 |
+| 越界解释语只播出前几个字 | 解释语当场 `speak`，被落点卡的播报 FLUSH | 挂 `blockHint`，与 `cardSpeech` 拼成一句（Gotcha (3)） |
 | 重启后战果变成 0 | 用会话计数表达当日成绩 | 计数落 `DayState`，装载时从 repo 初始化 |

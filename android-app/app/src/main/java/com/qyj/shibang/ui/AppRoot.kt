@@ -47,6 +47,10 @@ private const val SETTLE_SPEECH_DELAY_MS = 200L
 /** v5 防泄题：考试态（复习/温故）未作答且未 peek 时，点卡片只播这句提示语——不念词、不念提示 */
 private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
 
+/** v5 R7 前向拦截提示语：不能越过未处理的卡 */
+private const val BLOCK_HINT_EXAM = "先回答这张卡，再往上滑。认识点 √，想不起来点 ×。"
+private const val BLOCK_HINT_NEW = "先听一遍这张新词卡，听完就能往上滑。"
+
 /**
  * 根界面：抖音式垂直 feed（v4 第三轮定稿：连击 + 间隔双层模型，design.md §9）。
  * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.3）：
@@ -69,11 +73,14 @@ private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
  * 8. 完成卡「真做完才出现」（v5 R7，§5.1）：`Page.Done` 仅在**待处理数 == 0** 时存在于 feed 尾；
  *    未做完时队尾就是最后一张待处理卡，feed 里没有任何含完成语义的页。文案与播报回到**单一形态**，
  *    战果用当日持久计数（§5.3，跨重启不归零）。
- *    **前向消化**（§5.2）：向前停稳时把 `[lastSettled, 当前页)` 里仍待处理的卡回收队尾，
- *    于是用户身前永远是没答完的卡、一路往上滑就能做完、不需要回看；回收**不写任何学习状态**、
- *    不调 repo（与数据上的「跳过」完全等价——跳过是「稍后」，不是「放弃」）。
- *    **滑动全程开放**：不因未作答而设 userScrollEnabled=false 或任何拦截——锁定会把「跳过」
- *    逼成「乱答」，污染连击层与 lapses（design.md §1 决策，prd 中「经评审否决」）
+ *    **前向拦截**（§5.2）：向前停稳到某页时，若其前方仍存在待处理卡，则退回**最靠前的那一张**并播
+ *    一句语音解释，然后 return（本次不播 cardSpeech）。`pages` 顺序**完全不动**——不回收、不重排、
+ *    不写任何学习状态（不碰 revealed / peeked / results，不调 repo）；被拦的不是用户当前页，其
+ *    `spokenKey` 也不入 `spokenKeys`。退回后动画会再触发一次停稳，此时该页前方已无待处理卡 → 正常播报，
+ *    解释语与该卡播报**拼成一句**播出（`tts.speak` 是 QUEUE_FLUSH，两句分开播会互相掐断）。
+ *    **只拦前向**：下滑回看与完成卡之后的自由刷不受限制——**不得**设 `userScrollEnabled = false`
+ *    （全向开关会把回看一起锁死，且卡片静止不动会被高龄用户误读为卡死）。
+ *    **不存在「跳过 / 延后」这个动作**：待处理卡的唯一出口是 √ / ×（可先「👀 想看答案」再作答）。
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
@@ -92,8 +99,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
     var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 自由刷池：顺序抽取，池空重洗
     var restoreTo by remember { mutableStateOf<Int?>(null) }             // 断点/频道切换的目标页
-    var lastSettled by remember { mutableStateOf(0) }                    // v5 R7 回收锚点：上一次停稳的页下标（§5.2）
     var pendingAnnounce by remember { mutableStateOf<String?>(null) }    // 频道播报（与首卡合并成一句播）
+    var blockHint by remember { mutableStateOf<String?>(null) }          // v5 R7 越界解释语（与退回目标卡的播报合并成一句，§5.2）
     var firstChannelLoad by remember { mutableStateOf(true) }
 
     val pagerState = rememberPagerState(pageCount = { pages.size })
@@ -125,13 +132,22 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     fun pendingTaskCount(): Int = pages.count { isPending(it) }
 
     /** frontier = 第一张待处理卡的下标（无待处理卡时取完成卡下标；都没有则 0）。
-     *  不变量（§5.2）：frontier 之前全是已处理卡、frontier 起全是待处理卡，用户永远站在 frontier 上。
-     *  断点与回收锚点都用它——本模型里「在哪儿」就等于「做到哪儿了」。 */
+     *  不变量（§5.2）：列表**只追加不重排**且不允许越过未处理的卡，所以「在哪儿」就等于「做到哪儿了」
+     *  ——断点（restoreTo / saveQueuePosition）直接取它即可，不再需要回收锚点。 */
     fun frontierIndex(): Int {
         val firstPending = pages.indexOfFirst { isPending(it) }
         if (firstPending >= 0) return firstPending
         val doneIdx = pages.indexOfFirst { it is Page.Done }
         return if (doneIdx >= 0) doneIdx else 0
+    }
+
+    /** v5 R7 前向拦截（§5.2）：返回「该被拦回的页下标」——若当前位置 idx 之前仍存在待处理卡，
+     *  取最靠前的那一张；否则返回 -1（不拦）。写成局部函数的原因同 pendingTaskCount()：每次读 pages 的委托 getter。
+     *  与 `isPending` 共用同一口径，故「完成卡何时出现」与「何时拦人」永不漂移；
+     *  `isPending(FREE)` 恒 false，所以自由刷区永不拦。 */
+    fun blockingIndex(idx: Int): Int {
+        val first = pages.indexOfFirst { isPending(it) }
+        return if (first >= 0 && first < idx) first else -1
     }
 
     /** 任务区去重词数 = 完成卡战果里的 N（§5.3：N = 任务区去重词数）。自由刷页不计入。 */
@@ -155,26 +171,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         }
     }
 
-    /** v5 R7 前向消化（§5.2）：把 `[from, to)` 里**仍待处理**的卡按原相对顺序移到队尾（完成卡之前）。
-     *  只改 `pages` 顺序：不碰 `revealed` / `peeked` / `results`（状态按 seq 跟着卡走），
-     *  不调 repo（连击、间隔、answered、持久化队列顺序全不动）——「滑过」与「跳过」数据上完全等价。
-     *  返回回收张数（回收后当前页下标会前移这么多）。 */
-    fun recycleSkipped(from: Int, to: Int): Int {
-        if (to <= from) return 0
-        val moved = ArrayList<Page>()
-        val kept = ArrayList<Page>(pages.size)
-        pages.forEachIndexed { idx, p ->
-            if (idx >= from && idx < to && isPending(p)) moved.add(p) else kept.add(p)
-        }
-        if (moved.isEmpty()) return 0
-        val doneIdx = kept.indexOfFirst { it is Page.Done }
-        val insertAt = if (doneIdx >= 0) doneIdx else kept.size
-        pages = kept.toMutableList().apply { addAll(insertAt, moved) }
-        return moved.size
-    }
-
-    /** 自动朗读去重键：按**页身份**（seq）而非下标——回收/追加会改变下标，用下标入键会重复播报。
-     *  完成卡回到单一形态（§5.1），故用 `channel:done` 即可（完成卡一旦出现就不会再消失）。 */
+    /** 自动朗读去重键：按**页身份**（seq）而非下标——追加（考核卡 / 完成卡 / 自由刷页）会改变下标，
+     *  绑 seq 让「页身份」与「列表位置」解耦。完成卡回到单一形态（§5.1），故用 `channel:done` 即可
+     *  （完成卡一旦出现就不会再消失）。 */
     fun spokenKey(p: Page) = "$channel:" + when (p) {
         is Page.TermPage -> "seq:${p.seq}"
         Page.Done -> "done"
@@ -211,16 +210,14 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
             if (mode == CardMode.NEW && repo.wasSeenToday(id)) taught[seq] = true
             Page.TermPage(t, mode, seq, i)
         }
-        // v5 R7 稳定分区（§5.2，Kotlin partition 稳定）：已处理在前、待处理在后（各自保持原相对顺序），
-        // 把上次会话里「被滑过但未回收」的卡归位到 frontier 之后——否则重启后身后留着待处理卡，
-        // 用户走到队尾真的卡死（身后有活但走不回去）
-        val (processed, pending) = taskPages.partition { !isPending(it) }
-        pages = processed + pending
+        // v5 R7：列表只追加不重排，`taskPages` 的顺序就是队列顺序——不再需要上一版的「稳定分区」
+        // （前向拦截保证了待处理卡不会被留在身后，且用户总会被放到第一张待处理卡上）
+        pages = taskPages
         freePool = emptyList()
         spokenKeys.clear()
+        blockHint = null                     // 队列已重建，丢弃上一队列未播出的越界解释语
         syncDonePage()                       // 完成卡条件出现：pending == 0 才有收尾页
-        lastSettled = frontierIndex()        // 回收锚点 = frontier
-        restoreTo = lastSettled              // 断点 = frontier
+        restoreTo = frontierIndex()          // 断点 = frontier（第一张待处理卡；都做完了则是完成卡）
         session = SessionStats(repo.todayKnown(), repo.todayForgot())   // 战果当日持久口径（§5.3）
         if (announce) pendingAnnounce = "换到${sceneName(channel)}频道。"
     }
@@ -311,9 +308,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         syncDonePage()
     }
 
-    // 滑动即播（design.md §9 契约）+ v5 R7 前向消化（§5.2）。
-    // ⚠️ key 只有 pagerState（**去掉 pages**）：回收与追加都在本 effect 体内改 `pages`，
-    //    若 `pages` 还是 key，effect 会执行到一半被自己重启掉（回收了但没播报）。
+    // 滑动即播（design.md §9 契约）+ v5 R7 前向拦截（§5.2）。
+    // ⚠️ key 只有 pagerState（**去掉 pages**）：教读追加考核卡、完成卡条件出现都在本 effect 体内改
+    //    `pages`，若 `pages` 还是 key，effect 会执行到一半被自己重启掉（改了但没播报）。
     //    `pages` 在 collect 体内读 State 委托 getter 即最新值。
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage to pagerState.isScrollInProgress }
@@ -326,12 +323,31 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 if (pagerState.isScrollInProgress) return@collect   // 200ms 内又开始滑了
                 if (pagerState.currentPage != idx) return@collect   // 迟到的旧页事件（跳页/连滑已完成）：交给新事件播报，防错位闪播
                 if (restoreTo != null) return@collect               // 断点跳页完成前不播，防错位闪播
-                // 回收会移动列表项使下标失效，但页对象身份不变 → 先取页对象，后回收（§5.2）
+                // v5 R7 前向拦截（§5.2）：不能越过未处理的卡——退回最靠前的那张 + 播一句解释，
+                // 列表顺序完全不动（不回收、不重排、不写任何状态、不调 repo）。
+                // 不用 userScrollEnabled=false：那是全向开关，会把「下滑回看」一起锁死，且静止不动会被误读为卡死。
+                // ⚠️ 提示语**不能在这里当场** `tts.speak`：`TTSSpeaker.speak` 是 QUEUE_FLUSH，而退回动画结束
+                //    后会在目标页再触发一次停稳并播 cardSpeech，当场播会被那句 FLUSH 掐断（只播出一两个字；
+                //    把 speak 挪到动画之后只会把掐断点从 ~500ms 提到 ~200ms，不能解决问题）。
+                //    故挂到 `blockHint`，与目标卡那句播报拼成**一句** utterance——视觉先解释、语音后解释。
+                //    动画自身的 `scrolling == true` 不会掐断它：collect 此刻正挂在 `animateScrollToPage` 里，
+                //    而 snapshotFlow 是 conflated 的——采集中途的状态变化不逐个 emit，只在 collect 空出来时
+                //    重读一次 `block()`，那时动画已结束、`isScrollInProgress` 已回到 false。
+                val block = blockingIndex(idx)
+                if (block >= 0) {
+                    blockHint = if ((pages.getOrNull(block) as? Page.TermPage)?.mode == CardMode.NEW) BLOCK_HINT_NEW
+                    else BLOCK_HINT_EXAM
+                    pagerState.animateScrollToPage(block.coerceIn(0, pages.lastIndex))
+                    return@collect
+                }
                 val p = pages.getOrNull(idx) ?: return@collect
-                // v5 R7 前向消化：向前停稳 → 把 [lastSettled, idx) 里仍待处理的卡回收队尾；
-                // 往回滑（idx < lastSettled）与跳页只移动锚点、不回收（身后只可能是已处理卡）
-                lastSettled = if (idx > lastSettled) idx - recycleSkipped(lastSettled, idx) else idx
-                if (!spokenKeys.add(spokenKey(p))) return@collect
+                val hint = blockHint                // 越界解释语（若有）只消费一次
+                blockHint = null
+                if (!spokenKeys.add(spokenKey(p))) {
+                    // 目标卡此前已播报过（如站在未作答的复习卡上往前划被退回）：只补解释，不重复念词
+                    if (hint != null) tts.speak(hint)
+                    return@collect
+                }
                 // 新词卡首次停稳播报 = 当日首次教读：markSeen 幂等，返回 true 才追加该词的
                 // 复习卡到队尾（开始当日连击考核，design.md §9.2）；教读不写 TermState。
                 // 无论 markSeen 返回什么都标记本页已教读——v5 R7 待处理口径看的是「是否教读过」
@@ -344,7 +360,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 val announce = pendingAnnounce
                 pendingAnnounce = null
                 val text = cardSpeech(p)
-                tts.speak(if (announce != null) announce + text else text)
+                // 换频道播报 + 越界解释语都与本卡播报拼成**一句**：分开 speak 会互相 FLUSH 掉
+                val prefix = (announce ?: "") + (hint ?: "")
+                tts.speak(if (prefix.isEmpty()) text else prefix + text)
             }
     }
 
@@ -363,8 +381,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 .fillMaxWidth()
                 .weight(1f)
                 .background(AppSurface),
-            // v5 R7：必须传 key（§5.2）——回收会把列表项移走/追加，没有稳定 key 时 pager 按 index
-            // 定位，会把用户正在看的卡换成别的卡（错位）。TermPage -> 页身份 seq；Done -> "done"；
+            // v5 R7（§5.2）：列表只追加不重排，index 其实已足够；保留 key 是为了让「页身份」与
+            // 「列表位置」解耦——TermPage -> 页身份 seq、Done -> "done"，将来若再引入重排不必重踩坑。
             // 取不到页（列表刚被重建）时给一个不会撞的兜底 key
             key = { idx ->
                 when (val pg = pages.getOrNull(idx)) {
