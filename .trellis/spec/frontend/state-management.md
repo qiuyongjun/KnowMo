@@ -34,7 +34,7 @@ fun isPending(p: Page): Boolean = p is Page.TermPage && when (p.mode) {
 
 由 `pages` / `taught` / `revealed` 推导，作答与教读后随重组自动更新。凡是「还剩多少没做」「完成没有」这类判断，一律走这个口径，不要另立一套。
 
-## Gotcha：effect 与播报的三条规矩（v5 R7 三次踩坑）
+## Gotcha：effect 与播报的三条规矩（v5 R7 / R8）
 
 ### (1) 在闭包里读派生值，必须写成局部函数
 
@@ -60,21 +60,42 @@ fun pendingTaskCount(): Int = pages.count(::isPending)
 
 ### (2) key 里不能放 effect 体内会改写的 state
 
-**症状**：卡片被教读 / 追加 / 插入完成卡了，但那次播报没发生——声音莫名其妙丢了。
+**症状**：卡片被教读 / 追加 / 插入完成卡了但那次播报没发生（声音莫名其妙丢了）；或者**翻页动画刚开始就被取消**（v5 R8 自动前进实际踩到的形态，表现为「作答后不翻页」或停在两页之间）。
 
 **原因**：`LaunchedEffect(pagerState, pages)` 以 `pages` 为 key，而 effect 体内（教读追加考核卡、`syncDonePage()` 插入完成卡）会改 `pages` → effect 执行到一半被自己重启并取消。
 
 **判定规则**：**effect 体内写过的 state，不要作为自己的 key**。key 只留真正的外部触发源，需要读的 state 在 `collect` 体内读。
 
-### (3) 同一次交互里的两处播报语义，必须合并成一句
+⚠️ **推论：即使 key 就是「这次任务的身份」，复位也必须排在挂起动画之后。** R8 的自动前进 effect 以 `advanceAfterSpeechSeq` 为 key，最初把复位写在 `animateScrollToPage` **之前** → 复位使 key 变化 → effect 被自己重启 → `animateScrollToPage` 在跨帧挂起中被取消，翻页胎死腹中。
 
-**症状**：前向拦截的越界解释语只播出了前几个字。
+对照：`LaunchedEffect(pages, restoreTo)` 里也是「先置 key 再滚」，却一直没问题——因为它用的是**非动画**的 `scrollToPage`，同一次 dispatch 内就跑完了，取消来临时工作已完成；`animateScrollToPage` 必然 `withFrameNanos` 挂起，躲不过。
 
-**原因**：`TTSSpeaker.speak` 是 `QUEUE_FLUSH`。退回动画结束后，目标页会再触发一次停稳并播 `cardSpeech`，把解释语冲掉——把 `speak` 挪到动画之后也不行，200ms 的停稳去抖不构成足够间隔。
+**修法**：复位放进 `finally`（用户抢方向打断动画时也能归位），且**比较后再清**：
 
-**修法**：把解释语挂到 `blockHint` state，在落点停稳时与 `cardSpeech` **拼成一句** utterance 播出；落点卡此前已播报过时只补解释、不重复念词。**推论**：换频道语 + 卡片播报同理（现有实现即 `announce + text` 拼接）。
+```kotlin
+} finally {
+    if (advanceAfterSpeechSeq == seq) advanceAfterSpeechSeq = -1
+}
+```
 
-**附注**：`snapshotFlow` 是 conflated 的——collector 挂在 `animateScrollToPage` 期间的状态变化不会被逐个 emit，只在 collector 空出来时重读一次，因此退回动画自身的 `scrolling == true` 通常**不会**触发 `tts.stop()` 掐断解释语。但这条时序未经源码核实（本机无 Compose 源码），**不要依赖它**——合并成一句才是稳的。
+否则用户答下一张时（key 已换成新 seq）会被这次收尾一并抹掉，下一次自动前进就丢了。注意 `delay` / `awaitQuiet()` **不要**包进同一个 `try`——同理。
+
+### (3) 播报完成信号：靠 `speaking` 标志，且 `onStart` 必须置位
+
+**症状**：作答播报被掐断——卡片在「词 + 提示 + 反馈」念完前就自动翻走。
+
+**原因**：`TTSSpeaker.speak` 是 `QUEUE_FLUSH`；抢在播报结束前翻页，落点卡的 `cardSpeech` 会把整句冲掉。而判断「念完没有」用的是 `speaking` 标志——它有两处**必须**置位，少一处就会出现「`awaitQuiet()` 立刻返回」：
+
+1. **`speak()` 里必须同步置 `true`**（不能只靠 listener 的 `onStart`）：否则「`speak()` 之后立刻 `awaitQuiet()`」会读到还没置位的 `false`；
+2. **listener 的 `onStart` 也必须置 `true`**：`QUEUE_FLUSH` 冲掉上一句时会先给**上一句**发 `onStop`（"flushed from the queue" 也走 `onStop`），那一瞬间标志被清成 `false`；若新那句的 `onStart` 不置回，它**整段播放期间** `speaking` 都是 false。
+
+清除点：`onDone` / `onError`（两个重载）/ `onStop` / `stop()` / `shutdown()`。`!ready` 的 pending 分支**不置位**（只入队，没有实际播报）。
+
+**修法**：`awaitQuiet()` = `withTimeoutOrNull(20_000) { while (speaking) delay(100) }`（上限兜住 TTS 引擎异常不回调）。
+
+**未核实（写在代码注释里了）**：flush 的 `onStop` 与下一句 `onStart` 的到达顺序，依据是同一条回调 binder 上的顺序消息。若真机实测顺序相反（表现仍是播报被掐断），升级为强版本——每次 `speak` 生成唯一 utteranceId，listener 按**身份过滤**（`if (id != currentId) return`）。
+
+**通用结论（仍然成立）**：同一次交互里两处需要播报的语义——换频道语 + 卡片播报——一律拼成一句 `speak`（现有实现即 `announce + text`），分开 `speak` 会互相 FLUSH。
 
 ## 播报去重键按「页身份」
 
@@ -101,5 +122,6 @@ fun pendingTaskCount(): Int = pages.count(::isPending)
 | 同一词的多张考核卡一起展开 | 用词 id 而非 `seq` 记录展开态 | 按页出现（`seq`）记录；队列用 `answered[i]` |
 | 一张卡没答也能看到「任务完成」 | 用「滑到底」当完成判定 | 完成卡改为条件出现，判定走 `pendingTaskCount()` |
 | 卡在列表里换了位置后重复播报 | 去重键含下标 | 键绑页身份 `seq`；完成卡用常量 |
-| 越界解释语只播出前几个字 | 解释语当场 `speak`，被落点卡的播报 FLUSH | 挂 `blockHint`，与 `cardSpeech` 拼成一句（Gotcha (3)） |
+| 作答后翻页动画刚起步就被取消 | 复位写在了 `animateScrollToPage` 之前（key 被自己改写） | 复位放 `finally` 且比较后再清，见 Gotcha (2) |
+| 作答播报被掐断、卡片提前翻走 | `speaking` 没在 `onStart` 置位，`QUEUE_FLUSH` 的 `onStop` 把它清成 false | `speak()` 与 `onStart` 都置位，见 Gotcha (3) |
 | 重启后战果变成 0 | 用会话计数表达当日成绩 | 计数落 `DayState`，装载时从 repo 初始化 |

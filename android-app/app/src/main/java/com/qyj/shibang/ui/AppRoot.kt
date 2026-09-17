@@ -44,16 +44,16 @@ private const val FREE_BATCH = 2
 /** 停稳判定后的播报去抖（ms）：滑动进行中不播，停稳后再等这么久，快速连滑不闪播 */
 private const val SETTLE_SPEECH_DELAY_MS = 200L
 
+/** v5 R8 作答后自动前进的最短停留（ms）：答案与反馈至少在屏幕上停这么久再翻页，
+ *  TTS 不可用时也不至于瞬间翻走（§5.5 两段式等待的第一段） */
+private const val AUTO_ADVANCE_MIN_MS = 1500L
+
 /** v5 防泄题：考试态（复习/温故）未作答且未 peek 时，点卡片只播这句提示语——不念词、不念提示 */
 private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
 
-/** v5 R7 前向拦截提示语：不能越过未处理的卡 */
-private const val BLOCK_HINT_EXAM = "先回答这张卡，再往上滑。认识点 √，想不起来点 ×。"
-private const val BLOCK_HINT_NEW = "先听一遍这张新词卡，听完就能往上滑。"
-
 /**
  * 根界面：抖音式垂直 feed（v4 第三轮定稿：连击 + 间隔双层模型，design.md §9）。
- * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.3）：
+ * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.5）：
  * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播
  * 2. 复习/温故卡未作答只念"还记得它念什么吗"，绝不念词的读音；认识/忘了后才念词+提示
  *    （v5 防泄题：考试态未作答**点卡片**也只播「再想一想，想起来了吗？」，分流在 TermCard 调用点
@@ -73,14 +73,19 @@ private const val BLOCK_HINT_NEW = "先听一遍这张新词卡，听完就能�
  * 8. 完成卡「真做完才出现」（v5 R7，§5.1）：`Page.Done` 仅在**待处理数 == 0** 时存在于 feed 尾；
  *    未做完时队尾就是最后一张待处理卡，feed 里没有任何含完成语义的页。文案与播报回到**单一形态**，
  *    战果用当日持久计数（§5.3，跨重启不归零）。
- *    **前向拦截**（§5.2）：向前停稳到某页时，若其前方仍存在待处理卡，则退回**最靠前的那一张**并播
- *    一句语音解释，然后 return（本次不播 cardSpeech）。`pages` 顺序**完全不动**——不回收、不重排、
- *    不写任何学习状态（不碰 revealed / peeked / results，不调 repo）；被拦的不是用户当前页，其
- *    `spokenKey` 也不入 `spokenKeys`。退回后动画会再触发一次停稳，此时该页前方已无待处理卡 → 正常播报，
- *    解释语与该卡播报**拼成一句**播出（`tts.speak` 是 QUEUE_FLUSH，两句分开播会互相掐断）。
- *    **只拦前向**：下滑回看与完成卡之后的自由刷不受限制——**不得**设 `userScrollEnabled = false`
- *    （全向开关会把回看一起锁死，且卡片静止不动会被高龄用户误读为卡死）。
+ *    **前向拦截**（§5.2）：向前停稳到某页时，若其前方仍存在待处理卡，则**静默**退回**最靠前的那一张**
+ *    （不播任何提示语——滑不动本身就是结构性的反馈，逐次拦截都解释一句对高龄用户是噪声），
+ *    然后 return（本次不播被拦页的 cardSpeech）。`pages` 顺序**完全不动**——不回收、不重排、
+ *    不写任何学习状态（不碰 revealed / peeked / results，不调 repo）；被拦页的 `spokenKey` 不入
+ *    `spokenKeys`。退回后动画会再触发一次停稳，此时该页前方已无待处理卡 → 正常播报。
+ *    **只拦前向**：下滑回看（含翻回以前任意一张已处理的卡）与完成卡之后的自由刷不受限制——**不得**
+ *    设 `userScrollEnabled = false`（全向开关会把回看一起锁死，且卡片静止不动会被高龄用户误读为卡死）。
  *    **不存在「跳过 / 延后」这个动作**：待处理卡的唯一出口是 √ / ×（可先「👀 想看答案」再作答）。
+ * 9. 作答后自动前进（v5 R8，§5.5）：复习/温故卡完成作答（√ / ×）后，等本次播报「词 + 提示 + 反馈」
+ *    整句念完（最短停留 AUTO_ADVANCE_MIN_MS + `tts.awaitQuiet()`）再 `animateScrollToPage(cur + 1)`
+ *    ——抢跑会被落点卡的播报 FLUSH 掉答案与反馈（`tts.speak` 是 QUEUE_FLUSH）。新词卡没有「作答完成」
+ *    这个事件，**不**自动前进（`SwipeHint` 保留，节奏由用户自己掌握）；播报期间用户自己滑动
+ *    （前进或回看）→ 放弃本次自动前进，不抢方向。
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
@@ -100,8 +105,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 自由刷池：顺序抽取，池空重洗
     var restoreTo by remember { mutableStateOf<Int?>(null) }             // 断点/频道切换的目标页
     var pendingAnnounce by remember { mutableStateOf<String?>(null) }    // 频道播报（与首卡合并成一句播）
-    var blockHint by remember { mutableStateOf<String?>(null) }          // v5 R7 越界解释语（与退回目标卡的播报合并成一句，§5.2）
     var firstChannelLoad by remember { mutableStateOf(true) }
+    // v5 R8 作答后自动前进（§5.5）：本次刚作答的卡 seq；-1 = 没有待办的自动前进。
+    // 用作答卡的 seq 作 effect key（而非布尔）——既能触发，又能在收尾时置回 -1 取消
+    var advanceAfterSpeechSeq by remember { mutableStateOf(-1) }
 
     val pagerState = rememberPagerState(pageCount = { pages.size })
 
@@ -215,7 +222,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         pages = taskPages
         freePool = emptyList()
         spokenKeys.clear()
-        blockHint = null                     // 队列已重建，丢弃上一队列未播出的越界解释语
+        advanceAfterSpeechSeq = -1           // 队列已重建，丢弃上一队列未完成的自动前进
         syncDonePage()                       // 完成卡条件出现：pending == 0 才有收尾页
         restoreTo = frontierIndex()          // 断点 = frontier（第一张待处理卡；都做完了则是完成卡）
         session = SessionStats(repo.todayKnown(), repo.todayForgot())   // 战果当日持久口径（§5.3）
@@ -306,6 +313,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         if (p.mode != CardMode.FREE) appendReviewCard(t)
         // v5 R7 完成卡条件出现：答完最后一张待处理卡 → 完成卡此时才出现在队尾
         syncDonePage()
+        // v5 R8 作答后自动前进（§5.5）：置触发键，由下面 keyed 该 seq 的 effect 等播报念完再翻页
+        //（必须放在 `tts.speak(...)` 之后）。只有 √ / × 会走到这里 —— 新词卡没有「作答完成」这个事件，
+        // 天然不自动前进（它也不显示作答按钮）。
+        advanceAfterSpeechSeq = p.seq
     }
 
     // 滑动即播（design.md §9 契约）+ v5 R7 前向拦截（§5.2）。
@@ -323,31 +334,19 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 if (pagerState.isScrollInProgress) return@collect   // 200ms 内又开始滑了
                 if (pagerState.currentPage != idx) return@collect   // 迟到的旧页事件（跳页/连滑已完成）：交给新事件播报，防错位闪播
                 if (restoreTo != null) return@collect               // 断点跳页完成前不播，防错位闪播
-                // v5 R7 前向拦截（§5.2）：不能越过未处理的卡——退回最靠前的那张 + 播一句解释，
-                // 列表顺序完全不动（不回收、不重排、不写任何状态、不调 repo）。
+                // v5 R7 前向拦截（§5.2）：不能越过未处理的卡——退回最靠前的那张，**静默**（不播任何提示语）。
+                // 规则是**结构性**的：滑不动就是滑不动，逐次拦截都播一句解释对高龄用户是噪声；而且回看本来就自由，
+                // 用户翻回以前的卡、之后想往前走仍然要回来处理它。列表顺序完全不动（不回收、不重排、不写任何状态、不调 repo）。
                 // 不用 userScrollEnabled=false：那是全向开关，会把「下滑回看」一起锁死，且静止不动会被误读为卡死。
-                // ⚠️ 提示语**不能在这里当场** `tts.speak`：`TTSSpeaker.speak` 是 QUEUE_FLUSH，而退回动画结束
-                //    后会在目标页再触发一次停稳并播 cardSpeech，当场播会被那句 FLUSH 掐断（只播出一两个字；
-                //    把 speak 挪到动画之后只会把掐断点从 ~500ms 提到 ~200ms，不能解决问题）。
-                //    故挂到 `blockHint`，与目标卡那句播报拼成**一句** utterance——视觉先解释、语音后解释。
-                //    动画自身的 `scrolling == true` 不会掐断它：collect 此刻正挂在 `animateScrollToPage` 里，
-                //    而 snapshotFlow 是 conflated 的——采集中途的状态变化不逐个 emit，只在 collect 空出来时
-                //    重读一次 `block()`，那时动画已结束、`isScrollInProgress` 已回到 false。
+                // ⚠️ 拦截分支必须在 `spokenKeys.add` **之前** return：被拦页这一次并没有播报，它的 spokenKey
+                //    不该入集合——否则退回动画结束、本页重新停稳时会因「已播报过」被去重，用户永远听不到它。
                 val block = blockingIndex(idx)
                 if (block >= 0) {
-                    blockHint = if ((pages.getOrNull(block) as? Page.TermPage)?.mode == CardMode.NEW) BLOCK_HINT_NEW
-                    else BLOCK_HINT_EXAM
                     pagerState.animateScrollToPage(block.coerceIn(0, pages.lastIndex))
                     return@collect
                 }
                 val p = pages.getOrNull(idx) ?: return@collect
-                val hint = blockHint                // 越界解释语（若有）只消费一次
-                blockHint = null
-                if (!spokenKeys.add(spokenKey(p))) {
-                    // 目标卡此前已播报过（如站在未作答的复习卡上往前划被退回）：只补解释，不重复念词
-                    if (hint != null) tts.speak(hint)
-                    return@collect
-                }
+                if (!spokenKeys.add(spokenKey(p))) return@collect
                 // 新词卡首次停稳播报 = 当日首次教读：markSeen 幂等，返回 true 才追加该词的
                 // 复习卡到队尾（开始当日连击考核，design.md §9.2）；教读不写 TermState。
                 // 无论 markSeen 返回什么都标记本页已教读——v5 R7 待处理口径看的是「是否教读过」
@@ -360,10 +359,35 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 val announce = pendingAnnounce
                 pendingAnnounce = null
                 val text = cardSpeech(p)
-                // 换频道播报 + 越界解释语都与本卡播报拼成**一句**：分开 speak 会互相 FLUSH 掉
-                val prefix = (announce ?: "") + (hint ?: "")
-                tts.speak(if (prefix.isEmpty()) text else prefix + text)
+                // 换频道播报与本卡播报拼成**一句**：分开 speak 会互相 FLUSH 掉
+                tts.speak(if (announce != null) announce + text else text)
             }
+    }
+
+    // v5 R8 作答后自动前进（§5.5）：必须等这句播报念完再翻，否则落点卡的播报会把答案与反馈掐掉。
+    // key 只用作答卡的 seq：`answer()` 置位触发，effect 收尾置回 -1；新词卡不经过 `answer()`，故不触发。
+    LaunchedEffect(advanceAfterSpeechSeq) {
+        val seq = advanceAfterSpeechSeq
+        if (seq < 0) return@LaunchedEffect
+        delay(AUTO_ADVANCE_MIN_MS)          // 兜底最短停留（TTS 不可用时也不瞬间翻走）
+        tts.awaitQuiet()                    // 等朗读结束（含作答反馈；内部 20s 上限）
+        try {
+            val cur = pagerState.currentPage
+            val curPage = pages.getOrNull(cur)
+            // 用户已自己动过（手动上滑 / 回看）→ 放弃本次自动前进，不抢方向
+            if (curPage !is Page.TermPage || curPage.seq != seq || pagerState.isScrollInProgress) return@LaunchedEffect
+            // 落点 = 下一张：未移除的考核卡追加在队尾，不影响下标关系；若当前卡是最后一张待处理卡，
+            // `syncDonePage()` 已在 `answer()` 里同步插入完成卡，落点恰好是完成卡（当日会话自然收尾）
+            if (cur < pages.lastIndex) pagerState.animateScrollToPage(cur + 1)
+        } finally {
+            // ⚠️ 置回 -1 必须排在 `animateScrollToPage` **之后**（用 finally 保证用户抢方向打断动画时也归位）：
+            //    `advanceAfterSpeechSeq` 是本 effect 自己会改写的 key——写在翻页之前会让 effect 被自己重启并取消，
+            //    翻页动画刚开始就胎死腹中（spec/frontend/state-management.md Gotcha (2)：effect 体内写过的 state
+            //    不要作自己的 key）。也不能把 delay/awaitQuiet 一起包进来：用户答下一张（key 换成新 seq）时
+            //    会被这里一并清成 -1，下一次自动前进就丢了。
+            //    比较后再清：动画途中用户若已答了下一张（key 已换成新 seq），这里的收尾不能把新 key 抹掉。
+            if (advanceAfterSpeechSeq == seq) advanceAfterSpeechSeq = -1
+        }
     }
 
     Column(

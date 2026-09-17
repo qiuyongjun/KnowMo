@@ -15,8 +15,10 @@
   「想看答案」peek 求助按钮（展开不写状态）、间隔阶梯 1→3→7→15→30（毕业判定 15 为工程版概念，原型仅演示阶梯）、
   **完成卡「真做完才出现」**（待处理数为 0 才渲染收尾页，否则队尾就是最后一张待处理卡）、
   **前向拦截「不允许越过未处理的卡」**（滚动停稳后若当前可见卡之前仍有待处理卡，平滑滚回最靠前的
-  那一张并播一句解释；DOM 顺序完全不动——不重排、不回收、不写任何状态；向下回看与完成卡之后的
-  自由刷不受限制。解释语与该卡播报**拼成一句**——speak() 会 cancel 上一句，分开播会互相掐断）、
+  那一张；**静默**——不播任何提示语，滑不动本身就是结构性反馈。DOM 顺序完全不动：不重排、不回收、
+  不写任何状态；向下回看与完成卡之后的自由刷不受限制）、
+  **作答后自动前进**（√ / × 之后等「词 + 提示 + 反馈」整句念完再滚到下一张；新词卡没有作答事件、
+  不自动前进；播报期间用户自己滑动则放弃本次自动前进）、
   完成卡单一形态（战果：今天学完了 N 个词 · 认识了 x 次，忘了 y 次）。
   这些差异不是缺陷，请勿据此反推工程版行为。
   工程实现的当前状态以 .trellis/tasks/09-17-elderly-literacy-app/prd.md 为准。
@@ -344,15 +346,29 @@ function pickVoice(){
   zhVoice=vs.find(v=>/zh[-_]CN/i.test(v.lang))||vs.find(v=>/^zh/i.test(v.lang))||null;
 }
 if(window.speechSynthesis){ pickVoice(); speechSynthesis.onvoiceschanged=pickVoice; }
-function speak(text){
-  if(!window.speechSynthesis) return;
+/* 当前这句话的身份（v5 R8）：speak() 每次新建一个 token。被 cancel() 掉的上一句即使触发
+   onend/onerror，身份也早已作废 → 不会误当成「这句念完了」（否则自动前进会被那声取消提前引爆）。 */
+let currentSpeech=null;
+function speak(text,onEnd){
+  if(!window.speechSynthesis){ if(onEnd) setTimeout(onEnd,0); return; }   /* 无 TTS：当作立刻念完 */
   try{
+    currentSpeech=null;                        /* 先作废旧句身份，再 cancel */
     speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(text);
     if(zhVoice) u.voice=zhVoice;
     u.lang="zh-CN"; u.rate=state.rate;
+    const token={utt:u,ended:false};
+    currentSpeech=token;
+    if(onEnd){
+      const finish=()=>{
+        if(token.ended) return;                /* onend / onerror 只算一次 */
+        token.ended=true;
+        if(currentSpeech===token) onEnd();     /* 身份仍是最新 → 真的是这句念完了 */
+      };
+      u.onend=finish; u.onerror=finish;
+    }
     speechSynthesis.speak(u);
-  }catch(e){}
+  }catch(e){ if(onEnd) setTimeout(onEnd,0); }
 }
 /* 点按朗读（顶栏按钮等带 data-say 的元素） */
 document.getElementById("phone").addEventListener("click",e=>{
@@ -387,7 +403,7 @@ function switchChannel(id){
 function renderFeed(){
   const q=buildQueue(state.channel);
   const feed=document.getElementById("feed");
-  pendingBlockHint=null;      /* DOM 全量重建，旧卡元素作废 → 丢弃未消费的越界解释语 */
+  cancelAutoAdvance();        /* DOM 全量重建，旧卡元素作废 → 丢弃未完成的自动前进 */
   feed.innerHTML=q.map(t=>termCardHTML(t)).join("");
   /* v5 R7：完成卡**条件出现**——待处理数为 0 才追加收尾页，否则队尾就是最后一张待处理卡
      （feed 里没有任何含完成语义的页，「滑到底」≠「做完了」） */
@@ -555,43 +571,79 @@ function reviewAnswer(id,known){
   fb.outerHTML=resultHTML+`<div class="swipe-hint">上滑看下一个 ↑</div>`;
   /* v5 R7：作答可能让待处理数归零 → 完成卡此时才出现在队尾；仍待处理则（保底）不出现 */
   refreshDoneCard();
-  speak(feedbackText);
+  /* v5 R8 作答后自动前进（与 App §5.5 同契约）：等这句「词 + 提示 + 反馈」念完再滚到下一张。
+     onEnd 由 speak() 按 utterance 身份判定——只有本句真的念完才回调；被取消/被新一句取代
+     （用户点卡重听、换频道、新一轮作答）则不回调 → 放弃本次自动前进。 */
+  speak(feedbackText,armAutoAdvance(card));
 }
 
 /* ==================== 前向拦截（不允许越过未处理的卡） ==================== */
 /* v5 R7：滚动停稳（200ms 内无滚动事件）后，若当前可见卡之前仍存在待处理卡，则平滑滚回**最靠前的
-   那一张**并播一句解释——与 App §5.2 同一契约。DOM 顺序**完全不动**（不回收、不重排、不写任何
-   学习状态）；只拦前向，向下回看与完成卡之后的自由刷不受限。 */
-const BLOCK_HINT_EXAM="先回答这张卡，再往上滑。认识点 √，想不起来点 ×。";
-const BLOCK_HINT_NEW="先听一遍这张新词卡，听完就能往上滑。";
+   那一张**——与 App §5.2 同一契约。**静默**：不播任何提示语（滑不动本身就是结构性的反馈，逐次拦截
+   都解释一句对高龄用户是噪声）。DOM 顺序**完全不动**（不回收、不重排、不写任何学习状态）；
+   只拦前向，向下回看与完成卡之后的自由刷不受限。 */
 let scrollSettleTimer=null;
-/* 越界解释语**不当场 speak**：speak() 会先 cancel 上一句，而滚回的目标卡进入视口时 onCardVisible
-   会播该卡内容，当场播会被那句 cancel 掐断（只播出一两个字）。改为挂在目标卡上，与该卡播报拼成
-   一句——与 App 侧 blockHint 同口径（App 的 tts.speak 同样是 QUEUE_FLUSH）。 */
-let pendingBlockHint=null;   /* {card, text} */
-function onFeedScroll(){
-  clearTimeout(scrollSettleTimer);
-  scrollSettleTimer=setTimeout(blockSkippedCards,200);
+let feedScrolling=false;      /* 最近 200ms 内有滚动事件 → 视为用户正在自己滑（同 App 的 isScrollInProgress） */
+/* 卡片等高（.fcard height:100% = feed.clientHeight）→ 可见序号 = round(scrollTop / 卡高) */
+function visibleIndex(){
+  const feed=document.getElementById("feed");
+  const h=feed.clientHeight;
+  if(!h) return -1;
+  const cards=feed.querySelectorAll(".fcard");
+  if(!cards.length) return -1;
+  return Math.min(cards.length-1,Math.max(0,Math.round(feed.scrollTop/h)));
 }
-/* 当前可见卡的序号 i → 序号 < i 的第一张仍待处理的卡 block（没有则不拦）。
-   卡片等高（.fcard height:100% = feed.clientHeight），故可见序号 = round(scrollTop / 高)。
+function cardIndex(card){
+  return [...document.querySelectorAll("#feed .fcard")].indexOf(card);
+}
+function scrollToCard(card){
+  const feed=document.getElementById("feed");
+  const top=feed.scrollTop+(card.getBoundingClientRect().top-feed.getBoundingClientRect().top);
+  feed.scrollTo({top:top,behavior:"smooth"});
+}
+function onFeedScroll(){
+  feedScrolling=true;
+  cancelAutoAdvance();        /* 用户自己动了（前进/回看）→ 放弃本次自动前进，不抢方向 */
+  clearTimeout(scrollSettleTimer);
+  scrollSettleTimer=setTimeout(()=>{ feedScrolling=false; blockSkippedCards(); },200);
+}
+/* 当前可见序号 i → 序号 < i 的第一张仍待处理的卡 block（没有则不拦）。
    站在待处理卡上（block 就是当前卡）不算越界；自由刷区/完成卡之后同样不拦。 */
 function blockSkippedCards(){
   const feed=document.getElementById("feed");
-  const h=feed.clientHeight;
-  if(!h) return;
   const cards=[...feed.querySelectorAll(".fcard")];
   if(!cards.length) return;
-  const i=Math.min(cards.length-1,Math.max(0,Math.round(feed.scrollTop/h)));
+  const i=visibleIndex();
+  if(i<0) return;
   const block=cards.slice(0,i).find(c=>c.dataset.pending==="1");
   if(!block) return;
-  /* 只挂给滚回的那张卡：smooth 滚动途中会掠过中间卡，挂错会插到别人嘴里；
-     先挂后滚，免得目标卡先触发 onCardVisible 而错过 */
-  pendingBlockHint={card:block,text:block.dataset.kind==="review"?BLOCK_HINT_EXAM:BLOCK_HINT_NEW};
-  const top=feed.scrollTop+(block.getBoundingClientRect().top-feed.getBoundingClientRect().top);
-  feed.scrollTo({top:top,behavior:"smooth"});
+  scrollToCard(block);        /* 只滚回，不播任何提示语、不动 DOM 顺序 */
 }
 document.getElementById("feed").addEventListener("scroll",onFeedScroll);
+
+/* ==================== v5 R8 作答后自动前进 ==================== */
+/* 与 App §5.5 同契约：复习/温故卡作答（√ / ×）后自动滚到下一张，但**必须等本次播报念完**——
+   抢跑会被落点卡的播报 cancel 掉「词 + 提示 + 反馈」整句；另加最短停留兜底（TTS 不可用时也不瞬间
+   翻走）。用户自己滑动（前进/回看）→ 放弃本次自动前进，不抢方向。新词卡没有作答事件，故不前进。 */
+const AUTO_ADVANCE_MIN_MS=1500;
+let autoAdvanceToken=0;
+function cancelAutoAdvance(){ autoAdvanceToken++; }
+/* 返回「本句念完」回调，交给 speak(text,onEnd)：只有本句真的念完（身份未被取代）才会回调 */
+function armAutoAdvance(card){
+  const token=++autoAdvanceToken;
+  const startedAt=Date.now();
+  return ()=>{
+    if(token!==autoAdvanceToken) return;              /* 已被用户滑动 / 新一轮作答取代 */
+    setTimeout(()=>{
+      if(token!==autoAdvanceToken) return;
+      if(feedScrolling) return;                       /* 用户正在自己滑：不抢方向 */
+      if(!card || !card.isConnected) return;          /* 卡片已随 feed 重建而作废 */
+      if(cardIndex(card)!==visibleIndex()) return;    /* 用户已滑到别的卡：放弃本次自动前进 */
+      const next=card.nextElementSibling;
+      if(next) scrollToCard(next);
+    },Math.max(0,AUTO_ADVANCE_MIN_MS-(Date.now()-startedAt)));
+  };
+}
 
 /* ==================== 自动朗读（进入视口） ==================== */
 let io=null;
@@ -607,26 +659,19 @@ function onCardVisible(card){
     refreshDoneCard();                 /* 待处理数可能归零 → 完成卡此时才出现在队尾 */
   }
   const key=done?state.channel+":done":state.channel+":"+id;
-  /* v5 R7：越界解释语只认滚回的那张卡、只消费一次——与 App 的 blockHint 同口径 */
-  let hint=null;
-  if(pendingBlockHint && pendingBlockHint.card===card){ hint=pendingBlockHint.text; pendingBlockHint=null; }
-  if(state.spokenSet[key]){
-    if(hint) speak(hint);            /* 目标卡此前已播报过：只补解释，不重复念词 */
-    return;
-  }
+  if(state.spokenSet[key]) return;     /* 已播报过：v5 R7 静默退回，不再补播任何解释语 */
   state.spokenSet[key]=true;
-  const prefix=hint||"";             /* 解释语与本卡播报拼成一句（分开 speak 会互相 cancel） */
   if(done){
     /* v5 R7：完成卡播报回到单一形态（条件出现后不存在「还有 N 张没作答」分支） */
-    speak(prefix+"太棒了，今日任务完成！今天学完了"+taskWordCount()+"个词，认识了"+state.session.known+"次，忘了"+state.session.forgot+"次。继续上滑，随便看看，温故知新。");
+    speak("太棒了，今日任务完成！今天学完了"+taskWordCount()+"个词，认识了"+state.session.known+"次，忘了"+state.session.forgot+"次。继续上滑，随便看看，温故知新。");
   }else if(id){
     const t=TERM_MAP[id];
     if(t.kind==="review"){
       /* v5 防泄题：播报不念词、不念提示（与安卓 cardSpeech 一致）。
          念出 t.text 等于把答案念给用户，考试卡就失去"考回忆"的意义 */
-      speak(prefix+"这个词，还记得它念什么吗？想一想，再按下面的按钮");
+      speak("这个词，还记得它念什么吗？想一想，再按下面的按钮");
     }else{
-      speak(prefix+termFullText(t));
+      speak(termFullText(t));
     }
   }
 }
