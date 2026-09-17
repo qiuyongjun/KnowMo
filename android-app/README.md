@@ -32,15 +32,16 @@ cd android-app && gradle wrapper --gradle-version 8.7
 app/src/main/java/com/qyj/shibang/
 ├── MainActivity.kt            # 入口：装配 TTS 与仓库
 ├── data/
-│   ├── StudyData.kt           # 演示数据：7 场景频道 × 6 生活词组（含逐字拼音）
-│   └── StudyRepository.kt     # 生词本/设置持久化 + 简化 Leitner 间隔（1→3→7→15 天）
+│   ├── StudyData.kt           # 数据模型 + 场景频道定义（推荐聚合 + 12 个场景）
+│   ├── WordBank.kt            # 词库：12 个场景共 368 条生活词组（含逐字拼音）
+│   └── StudyRepository.kt     # 记忆状态（TermState）/ 每日队列持久化 + 调度器 + 简化 Leitner（1→3→7→15 天）
 ├── tts/TTSSpeaker.kt          # Android TTS 封装（中文、语速 0.85、就绪前排队）
 └── ui/
     ├── AppRoot.kt             # 根界面：VerticalPager feed + 频道切换 + 朗读编排
-    ├── TermCard.kt            # 新学卡 / 复习卡（认识/忘了反馈）
+    ├── TermCard.kt            # 新学卡 / 复习卡 / 温故卡（认识/忘了反馈）
     ├── DoneCard.kt            # 完成卡（统计 + 重看一遍）
-    ├── Sheets.kt              # 字卡弹层 / 设置 / 生词本（ModalBottomSheet）
-    ├── Common.kt              # 顶栏、频道 Tab、进度条等共享组件
+    ├── Sheets.kt              # 字卡弹层（ModalBottomSheet）
+    ├── Common.kt              # 顶栏、频道 Tab（含 🎓 毕业徽章）等共享组件
     └── theme/Theme.kt         # 适老化设计 token（高对比配色）
 ```
 
@@ -48,16 +49,16 @@ app/src/main/java/com/qyj/shibang/
 
 1. **上下滑学习**：每屏一张学习卡，snap 吸附；卡片进入视口自动朗读（每卡一次）。
 2. **生活词组**：如"地铁站"整体学习，配逐字拼音与生活用途说明；点单字开字卡弹层（组词联想）。
-3. **频道切换**：顶部 Tab（推荐/买菜/公交地铁/医院/银行/办事/吃饭），点按替换 feed 并语音播报。
-4. **复习混排**：推荐频道中复习卡与新学卡交错；复习卡先考回忆 → 「😀 认识 / 😕 忘了」→ 展开答案与间隔反馈；忘了的词自动进生词本。
-5. **设置**：字体大小（正常/更大，全局即时生效）、朗读速度、每日提醒、记忆曲线说明；拍照识字为后续扩展占位。
+3. **频道切换**：顶部 Tab（推荐/买菜/公交地铁/医院/银行/办事/吃饭/手机微信/药品说明/快递驿站/物业水电/紧急求助/天气日历），点按替换 feed 并语音播报。
+4. **复习混排**：推荐频道中复习卡与新学卡交错；复习卡先考回忆 → 「😀 认识 / 😕 忘了」→ 展开答案与间隔反馈；忘了的词隔天再考，并在当天队列尾部再出现一次。
+5. **无设置页、无生词本**：语速固定 0.85x（适老偏慢），字号跟随系统缩放，不提供字体/语速/提醒入口；拍照识字为后续扩展占位。
 
 ## 适老化硬指标
 
-词组主字 42–64sp、拼音 26sp、正文 ≥18sp；主色与白底对比度 ≥7:1（WCAG AAA）；反馈按钮 92dp 高；全程无多级菜单、无手势依赖；语音+图标双通道引导。
+词组主字 ≥48sp 等效、拼音与说明 ≥22sp；主色与白底对比度 ≥7:1（WCAG AAA）；反馈按钮 92dp 高；字号跟随系统缩放（app 不叠加自有倍率）；全程无多级菜单、无手势依赖；语音+图标双通道引导。
 
 ## 已知边界（下一迭代）
 
-- 复习状态仅内存 + 生词本持久化，完整调度入库（Room + WorkManager）待做。
-- 提醒时间为设置展示，尚未接 AlarmManager/Notification。
+- 记忆状态（TermState）与当日队列已持久化（SharedPreferences + JSON），完整调度入库（Room + WorkManager）待做。
+- 提醒功能未实现（本轮取消设置页），AlarmManager / Notification 待做。
 - 拍照识字（CameraX + ML Kit）按规划为后续版本。

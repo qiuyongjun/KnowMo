@@ -1,0 +1,31 @@
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/MainActivity.kt b/android-app/app/src/main/java/com/qyj/shibang/MainActivity.kt
+index 48270eb..97cdf93 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/MainActivity.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/MainActivity.kt
+@@ -2,7 +2,9 @@ package com.qyj.shibang
+ 
+ import android.os.Bundle
+ import androidx.activity.ComponentActivity
++import androidx.activity.SystemBarStyle
+ import androidx.activity.compose.setContent
++import androidx.activity.enableEdgeToEdge
+ import com.qyj.shibang.data.StudyRepository
+ import com.qyj.shibang.tts.TTSSpeaker
+ import com.qyj.shibang.ui.AppRoot
+@@ -15,6 +17,16 @@ class MainActivity : ComponentActivity() {
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
++        enableEdgeToEdge(
++            statusBarStyle = SystemBarStyle.light(
++                android.graphics.Color.TRANSPARENT,
++                android.graphics.Color.TRANSPARENT,
++            ),
++            navigationBarStyle = SystemBarStyle.light(
++                android.graphics.Color.TRANSPARENT,
++                android.graphics.Color.TRANSPARENT,
++            ),
++        )
+         setContent {
+             ShibangTheme {
+                 AppRoot(repo = repo, tts = tts)

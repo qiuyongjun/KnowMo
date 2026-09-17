@@ -1,0 +1,9 @@
+commit ad32d064c377a72c1182b55cf4f8ac6980f91bba
+Author: qyj <www.qyj@winring.com.cn>
+Date:   Thu Sep 17 16:15:51 2026 +0800
+
+    data: 词库扩至 12 场景 368 词——新增手机微信/药品/快递/物业/紧急求助/天气，旧 36 词 id 保留不丢学习记录
+
+ .../main/java/com/qyj/shibang/data/StudyData.kt    | 139 +------
+ .../src/main/java/com/qyj/shibang/data/WordBank.kt | 451 +++++++++++++++++++++
+ 2 files changed, 464 insertions(+), 126 deletions(-)

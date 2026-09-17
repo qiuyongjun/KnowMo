@@ -3,7 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>慢慢懂 Mando · 老年人识字助手（抖音式原型 v2）</title>
+<!--
+  ⚠️ 本文件已于 2026-09-17 【冻结于 v2】，仅作为交互演示的历史版本保留。
+  它不再同步 v3 工程实现（android-app/），与后者存在以下【已知且有意保留】的差异：
+    · 词库 36 词 / 7 频道（工程版：368 词 / 12 场景）
+    · 静态 REC_QUEUE 演示队列（工程版：每日队列调度器）
+    · 仍有「第 x/y 张」进度条（工程版：已删除）
+    · 含设置页与生词本入口（工程版：已按决策删除）
+    · 复习卡朗读会把词念出来（工程版：不念词，防泄题）
+  这些差异不是缺陷，请勿据此反推工程版行为。
+  工程实现的当前状态以 .trellis/tasks/09-17-elderly-literacy-app/prd.md 为准。
+-->
+<title>慢慢懂 Mando · 老年人识字助手（抖音式原型 v2 · 已冻结）</title>
 <style>
 /* ============ 设计 Token（适老化） ============ */
 :root{
@@ -392,8 +403,8 @@ function termCardHTML(t,idx,total){
     </div>`;
   const actions=isReview
     ? `<div class="fb-actions" id="fb-${t.id}">
-         <button class="fb-btn fb-known" data-say="认识" onclick="reviewAnswer('${t.id}',true)"><span class="fi">😀</span>认识</button>
-         <button class="fb-btn fb-forgot" data-say="忘了" onclick="reviewAnswer('${t.id}',false)"><span class="fi">😕</span>忘了</button>
+         <button class="fb-btn fb-known" onclick="reviewAnswer('${t.id}',true)"><span class="fi">😀</span>认识</button>
+         <button class="fb-btn fb-forgot" onclick="reviewAnswer('${t.id}',false)"><span class="fi">😕</span>忘了</button>
        </div>`
     : `<div class="swipe-hint">上滑看下一个 ↑</div>`;
   return `
@@ -445,23 +456,25 @@ function reviewAnswer(id,known){
   fb.dataset.done="1";
   document.getElementById("py-"+id).classList.remove("hidden");
   document.getElementById("tip-"+id).classList.remove("hidden");
-  let resultHTML;
+  let resultHTML, feedbackText;
   if(known){
     state.session.known++;
     const cur=INTERVALS.indexOf(t.days);
     const next=INTERVALS[Math.min(cur+1,INTERVALS.length-1)];
     t.days=next;
     resultHTML=`<div class="fb-result ok">👍 记得牢！${next} 天后再见</div>`;
+    feedbackText=`认识，真棒！${next} 天后再见`;
   }else{
     state.session.forgot++;
     state.forgot[id]=(state.forgot[id]||0)+1;
     t.days=1;
     resultHTML=`<div class="fb-result re">没关系，明天再来一遍 💪 已加入生词本</div>`;
+    feedbackText=`忘了没关系，明天再来一遍。我们再听一遍：${t.text}`;
     updateWordbookBadge();
   }
   fb.outerHTML=resultHTML+`<div class="swipe-hint">上滑看下一个 ↑</div>`;
   updateDoneStats();
-  setTimeout(()=>speak(termFullText(t)),200);
+  speak(feedbackText);
 }
 
 /* ==================== 完成卡统计 ==================== */
@@ -495,7 +508,7 @@ function observeCards(){
     if(io) io.disconnect();
     io=new IntersectionObserver(entries=>{
       entries.forEach(en=>{ if(en.isIntersecting) onCardVisible(en.target); });
-    },{root:document.getElementById("feed"),threshold:0.6});
+    },{root:document.getElementById("feed"),threshold:0.55});
     cards.forEach(c=>io.observe(c));
   }else{
     /* 降级：滚动监听（旧浏览器/测试环境） */
@@ -640,6 +653,16 @@ fitPhone();
 renderChannels();
 renderFeed();
 restoreSettingsUI();
+/* 自动播放解锁：任一首次交互触发空朗读，解除浏览器自动播放限制后移除监听 */
+(function unlockSpeech(){
+  if(!window.speechSynthesis) return;
+  const events=["pointerdown","touchstart","keydown"];
+  const unlock=()=>{
+    events.forEach(ev=>document.removeEventListener(ev,unlock));
+    try{ speechSynthesis.speak(new SpeechSynthesisUtterance("")); }catch(e){}
+  };
+  events.forEach(ev=>document.addEventListener(ev,unlock));
+})();
 if(!state.greeted){
   state.greeted=true;
   setTimeout(()=>speak("欢迎回来。上滑开始学习，今天有新词，也有要复习的词。"),500);

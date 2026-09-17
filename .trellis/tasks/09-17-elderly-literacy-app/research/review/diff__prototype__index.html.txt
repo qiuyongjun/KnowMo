@@ -1,0 +1,69 @@
+diff --git a/prototype/index.html b/prototype/index.html
+index 88f0db0..ce6a237 100644
+--- a/prototype/index.html
++++ b/prototype/index.html
+@@ -392,8 +392,8 @@ function termCardHTML(t,idx,total){
+     </div>`;
+   const actions=isReview
+     ? `<div class="fb-actions" id="fb-${t.id}">
+-         <button class="fb-btn fb-known" data-say="认识" onclick="reviewAnswer('${t.id}',true)"><span class="fi">😀</span>认识</button>
+-         <button class="fb-btn fb-forgot" data-say="忘了" onclick="reviewAnswer('${t.id}',false)"><span class="fi">😕</span>忘了</button>
++         <button class="fb-btn fb-known" onclick="reviewAnswer('${t.id}',true)"><span class="fi">😀</span>认识</button>
++         <button class="fb-btn fb-forgot" onclick="reviewAnswer('${t.id}',false)"><span class="fi">😕</span>忘了</button>
+        </div>`
+     : `<div class="swipe-hint">上滑看下一个 ↑</div>`;
+   return `
+@@ -445,23 +445,25 @@ function reviewAnswer(id,known){
+   fb.dataset.done="1";
+   document.getElementById("py-"+id).classList.remove("hidden");
+   document.getElementById("tip-"+id).classList.remove("hidden");
+-  let resultHTML;
++  let resultHTML, feedbackText;
+   if(known){
+     state.session.known++;
+     const cur=INTERVALS.indexOf(t.days);
+     const next=INTERVALS[Math.min(cur+1,INTERVALS.length-1)];
+     t.days=next;
+     resultHTML=`<div class="fb-result ok">👍 记得牢！${next} 天后再见</div>`;
++    feedbackText=`认识，真棒！${next} 天后再见`;
+   }else{
+     state.session.forgot++;
+     state.forgot[id]=(state.forgot[id]||0)+1;
+     t.days=1;
+     resultHTML=`<div class="fb-result re">没关系，明天再来一遍 💪 已加入生词本</div>`;
++    feedbackText=`忘了没关系，明天再来一遍。我们再听一遍：${t.text}`;
+     updateWordbookBadge();
+   }
+   fb.outerHTML=resultHTML+`<div class="swipe-hint">上滑看下一个 ↑</div>`;
+   updateDoneStats();
+-  setTimeout(()=>speak(termFullText(t)),200);
++  speak(feedbackText);
+ }
+ 
+ /* ==================== 完成卡统计 ==================== */
+@@ -495,7 +497,7 @@ function observeCards(){
+     if(io) io.disconnect();
+     io=new IntersectionObserver(entries=>{
+       entries.forEach(en=>{ if(en.isIntersecting) onCardVisible(en.target); });
+-    },{root:document.getElementById("feed"),threshold:0.6});
++    },{root:document.getElementById("feed"),threshold:0.55});
+     cards.forEach(c=>io.observe(c));
+   }else{
+     /* 降级：滚动监听（旧浏览器/测试环境） */
+@@ -640,6 +642,16 @@ fitPhone();
+ renderChannels();
+ renderFeed();
+ restoreSettingsUI();
++/* 自动播放解锁：任一首次交互触发空朗读，解除浏览器自动播放限制后移除监听 */
++(function unlockSpeech(){
++  if(!window.speechSynthesis) return;
++  const events=["pointerdown","touchstart","keydown"];
++  const unlock=()=>{
++    events.forEach(ev=>document.removeEventListener(ev,unlock));
++    try{ speechSynthesis.speak(new SpeechSynthesisUtterance("")); }catch(e){}
++  };
++  events.forEach(ev=>document.addEventListener(ev,unlock));
++})();
+ if(!state.greeted){
+   state.greeted=true;
+   setTimeout(()=>speak("欢迎回来。上滑开始学习，今天有新词，也有要复习的词。"),500);

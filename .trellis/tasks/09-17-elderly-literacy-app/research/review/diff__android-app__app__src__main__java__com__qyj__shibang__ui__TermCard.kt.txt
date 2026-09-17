@@ -1,0 +1,48 @@
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/ui/TermCard.kt b/android-app/app/src/main/java/com/qyj/shibang/ui/TermCard.kt
+index e017463..55199d1 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/ui/TermCard.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/ui/TermCard.kt
+@@ -40,28 +40,27 @@ import com.qyj.shibang.ui.theme.OrangeDark
+ import com.qyj.shibang.ui.theme.RedForgot
+ 
+ /**
+- * 学习卡：新学（词组+逐字拼音+用途） / 复习（先考回忆→认识/忘了→展开）。
+- * 对应原型交互契约 §6。
++ * 学习卡（v3）：形态由调度器运行时计算——
++ * 新学（词组+逐字拼音+用途全展开）/ 复习（先考回忆→认识/忘了→展开）/
++ * 温故（完成卡后自由刷池抽出的已学词，全展开，无考试按钮）。
++ * 不再展示"第 x/y 张"进度条（队列边界对用户不可见）。
+  */
+ @Composable
+ fun TermCard(
+     term: Term,
+-    index: Int,
+-    total: Int,
++    mode: CardMode,
+     revealed: Boolean,
+     resultText: String?,
+     onSpeakTerm: () -> Unit,
+     onCharClick: (TermChar) -> Unit,
+     onAnswer: (Boolean) -> Unit,
+ ) {
+-    val isReview = term.kind == Term.Kind.REVIEW
++    val isReview = mode == CardMode.REVIEW
+     Column(
+         Modifier
+             .fillMaxSize()
+             .padding(horizontal = 20.dp, vertical = 14.dp),
+     ) {
+-        ProgressRow(index, total)
+-
+         // 卡片主体：点任意处重听；点单字看讲解
+         Column(
+             Modifier
+@@ -87,7 +86,7 @@ fun TermCard(
+                 Text(term.icon, fontSize = 60.sp)
+             }
+             Spacer(Modifier.height(12.dp))
+-            TermBadge(term)
++            TermBadge(mode)
+             Spacer(Modifier.height(14.dp))
+ 
+             // 词组：每个字可点开字卡弹层

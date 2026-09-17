@@ -2,41 +2,41 @@ package com.qyj.shibang.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.qyj.shibang.data.Term
 import com.qyj.shibang.ui.theme.AppSurface
 import com.qyj.shibang.ui.theme.AppText2
 import com.qyj.shibang.ui.theme.BlueBg
 import com.qyj.shibang.ui.theme.BlueDark
-import com.qyj.shibang.ui.theme.BluePrimary
+import com.qyj.shibang.ui.theme.GreenBg
+import com.qyj.shibang.ui.theme.GreenKnown
 import com.qyj.shibang.ui.theme.OrangeBg
 import com.qyj.shibang.ui.theme.OrangeDark
-import com.qyj.shibang.ui.theme.ProgressTrack
 
 /* ---------- 频道 Tab（参考抖音顶部 tab） ---------- */
 
+/**
+ * 频道 Tab（参考抖音顶部 tab）。
+ * 已完成分区（v4：该区每个词认识计数满 3 = 已移除，design.md §9.6）加 🎓 标记、文字转绿，
+ * 但仍可点进去自主复习；区内任何一词「忘了」清零即即时回退。
+ */
 @Composable
-fun ChannelBar(current: String, onSelect: (String) -> Unit) {
+fun ChannelBar(current: String, graduated: Set<String>, onSelect: (String) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -46,6 +46,7 @@ fun ChannelBar(current: String, onSelect: (String) -> Unit) {
     ) {
         com.qyj.shibang.data.SCENES.forEach { s ->
             val active = s.id == current
+            val isGraduated = s.id in graduated
             val shape = RoundedCornerShape(14.dp)
             Box(
                 Modifier
@@ -55,10 +56,14 @@ fun ChannelBar(current: String, onSelect: (String) -> Unit) {
                     .padding(horizontal = 20.dp, vertical = 14.dp),
             ) {
                 Text(
-                    "${s.icon} ${s.name}",
+                    if (isGraduated) "${s.icon} ${s.name} 🎓" else "${s.icon} ${s.name}",
                     fontSize = 21.sp,
                     fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
-                    color = if (active) BlueDark else AppText2,
+                    color = when {
+                        active -> BlueDark
+                        isGraduated -> GreenKnown
+                        else -> AppText2
+                    },
                 )
             }
         }
@@ -67,44 +72,30 @@ fun ChannelBar(current: String, onSelect: (String) -> Unit) {
 
 /* ---------- 共享小组件 ---------- */
 
-@Composable
-fun ProgressRow(index: Int, total: Int) {
-    Row(
-        Modifier.fillMaxWidth().padding(bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text("第 $index / $total 张", fontSize = 19.sp, fontWeight = FontWeight.Bold, color = AppText2)
-        Spacer(Modifier.width(14.dp))
-        Box(
-            Modifier
-                .weight(1f)
-                .height(12.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .background(ProgressTrack),
-        ) {
-            Box(
-                Modifier
-                    .fillMaxWidth(index.toFloat() / total.toFloat())
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(BluePrimary),
-            )
-        }
-    }
-}
+/**
+ * 卡片形态（v4 运行时计算，不再是静态数据字段）：
+ * 新学 = 无学习记录（无 TermState）；复习 = 任务池内到期/考核中的词；
+ * 温故 = 自由刷池抽出的已学词（有 TermState 即已学，含毕业词），与复习卡同交互：先考回忆，作答后展开。
+ */
+enum class CardMode { NEW, REVIEW, FREE }
 
+/**
+ * 词条角标：三态。
+ * 新学=蓝 / 复习=橙 / 温故=绿（绿色=正面回炉，与「认识」配色同系，不与另两态冲突）。
+ */
 @Composable
-fun TermBadge(term: Term) {
-    val isReview = term.kind == Term.Kind.REVIEW
-    androidx.compose.material3.Surface(
-        color = if (isReview) OrangeBg else BlueBg,
-        shape = RoundedCornerShape(50),
-    ) {
+fun TermBadge(mode: CardMode) {
+    val (bg, fg, label) = when (mode) {
+        CardMode.NEW -> Triple(BlueBg, BlueDark, "✨ 新学")
+        CardMode.REVIEW -> Triple(OrangeBg, OrangeDark, "🔁 复习")
+        CardMode.FREE -> Triple(GreenBg, GreenKnown, "📖 温故")
+    }
+    Surface(color = bg, shape = RoundedCornerShape(50)) {
         Text(
-            if (isReview) "🔁 复习 · 距上次 ${term.days} 天" else "✨ 新学",
+            label,
             fontSize = 19.sp,
             fontWeight = FontWeight.Bold,
-            color = if (isReview) OrangeDark else BlueDark,
+            color = fg,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
         )
     }

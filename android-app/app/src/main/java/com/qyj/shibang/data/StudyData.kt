@@ -8,7 +8,7 @@ data class TermChar(val c: String, val p: String)
 /**
  * 学习单元 = 生活词组（不是单字）。
  * kind/days 不在此存储：新学/复习/温故由 StudyRepository 调度器按
- * TermState（间隔天数 + 上次学习日期）在运行时计算。
+ * TermState（认识计数 + 上次学习日期，计数满 3 = 已移除）在运行时计算。
  * 词条内容见 WordBank.kt。
  */
 data class Term(

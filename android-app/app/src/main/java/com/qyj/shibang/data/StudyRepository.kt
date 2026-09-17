@@ -1,64 +1,311 @@
 package com.qyj.shibang.data
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
- * 学习状态仓库：生词本、设置项。
- * 第一版用 SharedPreferences + JSON 持久化；复习调度入库（Room）留待下一迭代。
+ * 间隔层（全局永久状态）：间隔天数 + 上次学习日期（yyyy-MM-dd）。
+ * 「认识」未满当日连击（3 次）**不写**本状态——词保持原到期状态，次日自然回池（遗留词机制）。
+ * 满 3 移除时升一级（1→3→7→15，每日最多升一级）；「忘了」→ days=1 + lastSeen=今天（不回退为未学词）。
+ * 未学过的词没有 TermState。迁移：第二轮的 "count" 键弃读，days 缺省 1（design.md §9.1）。
+ */
+data class TermState(val days: Int, val lastSeen: String)
+
+/**
+ * 连击层（当日状态，跨频道共享，隔天随日期不符整体作废）：
+ * counts = 每词当日「认识」计数（0–3，自由刷作答同样写入）；
+ * seen   = 当日已教读词集合（markSeen 幂等去重——防重启/回滑后对同一 NEW 卡重复追加考核卡）。
+ */
+data class DayState(
+    val date: String,
+    val counts: Map<String, Int>,
+    val seen: Set<String>,
+)
+
+/**
+ * 当日队列（按频道各持久化一条）：date 与今天不符则作废重建。
+ * modes / answered 与 queue 平行等长：
+ * modes 记录每张卡生成时的形态（新学/复习）；
+ * answered 记录**该卡实例**是否已作答——断点恢复按卡逐卡还原（design.md §9.1）：
+ * v4 同一词会出现多张卡（学 1 次 + 连击考核若干次），词级判定会把剩余考核卡一并展开，
+ * 重启后连击卡死，故必须按卡实例记录。
+ */
+data class DailyQueue(
+    val date: String,
+    val channel: String,
+    val queue: List<String>,
+    val modes: List<String>,
+    val answered: List<Boolean>,
+    val position: Int,
+)
+
+/**
+ * 学习状态仓库：间隔层（TermState）+ 连击层（DayState）+ 每日队列（DailyQueue）。
+ * SharedPreferences + JSON 持久化（36 词量级不上 Room）；全部收在 "state" 一个 JSON 里：
+ * terms = {"days", "lastSeen"}；day = {"date", "counts", "seen"}；queues 各频道含 "answered"。
+ *
+ * v4 连击 + 间隔双层模型（design.md §9，第三轮定稿）：
+ * 连击层管当日移出队列（满 3 移除、忘了清零）；间隔层管跨天调度（1→3→7→15、每日最多升一级）。
  */
 class StudyRepository(context: Context) {
 
     private val prefs = context.applicationContext
         .getSharedPreferences("study_state", Context.MODE_PRIVATE)
 
-    private val forgot = linkedMapOf<String, Int>()
+    private val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
 
-    var fontScale: Float = 1f
-        private set
-    var speechRate: Float = 0.85f
-        private set
-    var remindTime: String = "下午 3 点"
-        private set
+    private val termStates = linkedMapOf<String, TermState>()
+    private val queues = linkedMapOf<String, DailyQueue>()
+    private var day = DayState("", emptyMap(), emptySet())
 
     init {
         load()
     }
 
-    val forgotIds: List<String>
-        get() = forgot.keys.toList()
+    /* ---------- 双层状态机（design.md §9.2，任何频道/自由刷口径一致） ---------- */
 
-    fun forgotCount(id: String): Int = forgot[id] ?: 0
+    fun today(): String = fmt.format(Date())
 
-    fun addForgot(id: String) {
-        forgot[id] = (forgot[id] ?: 0) + 1
+    /** 连击层：该词当日认识计数（隔天自动归零） */
+    fun dayCount(id: String): Int = currentDay().counts[id] ?: 0
+
+    /** 当日已移除（连击满 3）：不再追加队列；只出现在自由刷/自主复习中 */
+    fun isRemovedById(id: String): Boolean = dayCount(id) >= DAILY_COMBO_TARGET
+
+    /**
+     * 当日首次教读：写入 seen 并返回 true（不写 TermState——教读不产生间隔层状态）；
+     * 当日已教读过（重启/回滑重触）返回 false，调用方不得重复追加考核卡。
+     */
+    fun markSeen(id: String): Boolean {
+        val d = currentDay()
+        if (id in d.seen) return false
+        day = d.copy(seen = d.seen + id)
+        persist()
+        return true
+    }
+
+    /**
+     * 「认识」：连击层计数 +1（封顶 3）；满 3（移除当日队列）时间隔层升级：
+     * - 无 TermState → 写 {1, 今天}（首次完成）；
+     * - 有状态且 lastSeen ≠ 今天 → days=nextInterval(days)、lastSeen=今天；
+     * - lastSeen == 今天（当日已升级或已忘了）→ 不升级（每日最多升一级闸门）。
+     * 返回 (count, upgraded, daysAfter) 供 UI 播报剩余次数与升级后的天数。
+     */
+    fun markKnown(id: String): Triple<Int, Boolean, Int> {
+        val d = currentDay()
+        val count = ((d.counts[id] ?: 0) + 1).coerceAtMost(DAILY_COMBO_TARGET)
+        var upgraded = false
+        var daysAfter = termStates[id]?.days ?: 0
+        if (count >= DAILY_COMBO_TARGET) {
+            val cur = termStates[id]
+            when {
+                cur == null -> {
+                    termStates[id] = TermState(1, today())
+                    upgraded = true
+                    daysAfter = 1
+                }
+                cur.lastSeen != today() -> {
+                    val ni = nextInterval(cur.days)
+                    termStates[id] = TermState(ni, today())
+                    upgraded = ni != cur.days   // 已在 15 封顶时不再算升级（间隔值未变）
+                    daysAfter = ni
+                }
+                // cur.lastSeen == 今天：闸门挡住，不升级、不播天数
+            }
+        }
+        day = d.copy(counts = d.counts + (id to count))
+        persist()
+        return Triple(count, upgraded, daysAfter)
+    }
+
+    /**
+     * 「忘了」（任何地方作答口径一致）：连击层清零 + 间隔层写 {1, 今天}——
+     * 只重置间隔，不回退为未学词；分区完成状态随之即时回退（design.md §9.5）。
+     */
+    fun markForgot(id: String) {
+        val d = currentDay()
+        termStates[id] = TermState(1, today())
+        day = d.copy(counts = d.counts + (id to 0))
         persist()
     }
 
-    fun setFontScale(v: Float) {
-        fontScale = v
+    /* ---------- 到期与间隔阶梯（design.md §9.1） ---------- */
+
+    /** 间隔阶梯：1→3→7→15（封顶） */
+    fun nextInterval(days: Int): Int = INTERVALS.firstOrNull { it > days } ?: INTERVALS.last()
+
+    /** 到期日时间戳（lastSeen + days）；lastSeen 解析失败按最早处理（排最前清债） */
+    private fun dueTime(state: TermState): Long =
+        runCatching { fmt.parse(state.lastSeen)?.time }.getOrNull()
+            ?.plus(state.days * DAY_MS) ?: Long.MIN_VALUE
+
+    /** 是否到期：lastSeen + days ≤ 今天；空 lastSeen 视为立即到期 */
+    fun isDue(state: TermState): Boolean {
+        if (state.lastSeen.isEmpty()) return true
+        val todayTime = runCatching { fmt.parse(today())?.time }.getOrNull() ?: return true
+        return dueTime(state) <= todayTime
+    }
+
+    /* ---------- 分区完成（design.md §9.5：恢复 days 封顶判定） ---------- */
+
+    /**
+     * 分区完成判定：该分区**每个词 days == GRADUATED_DAYS**（间隔封顶 = 15）。
+     * 达成 = 多轮**不同日**的满 3 连击（1→3→7→15）；任何一处「忘了」days 打回 1 → 即时退出完成状态（可逆）。
+     * 空分区（`rec` 自身、或有词无条目的分区）不算完成。
+     */
+    fun isSceneGraduated(sceneId: String): Boolean {
+        val ids = STUDY_TERMS.filter { it.scene == sceneId }.map { it.id }
+        if (ids.isEmpty()) return false
+        return ids.all { termStates[it]?.days == GRADUATED_DAYS }
+    }
+
+    /**
+     * 已完成分区集合（**仅供频道栏徽章展示，不影响队列范围**）；
+     * `rec` 是聚合频道，不参与完成判定。
+     */
+    fun graduatedScenes(): Set<String> =
+        SCENES.map { it.id }.filter { it != "rec" && isSceneGraduated(it) }.toSet()
+
+    /* ---------- 每日队列调度器（design.md §9.3） ---------- */
+
+    /**
+     * 队列范围（每日队列与自由刷池共用）：
+     * - 推荐频道 = 全部词条（毕业分区不排除，纯进度标记）；
+     * - 场景频道 = 该场景词条。
+     */
+    private fun scopeIds(channel: String): List<String> =
+        if (channel == "rec") STUDY_TERMS.map { it.id }
+        else STUDY_TERMS.filter { it.scene == channel }.map { it.id }
+
+    /**
+     * 当日队列生成（design.md §9.3）：
+     * - due  = 范围内到期词（isDue），按到期日升序（先清债）；
+     * - news = 未学词洗牌；
+     * - 推荐频道 pool = (due + news).take(DAILY_POOL_QUOTA)（到期复核优先 + 新词补足，共 10 个，
+     *   当日冻结由 ensureQueue 持久化保证）；场景频道 pool 全量（不另设配额）。
+     * - queue 按 pool 原序（到期在前、每词一次），modes 按有无 TermState 标注，answered 全 false。
+     * pool 为空 → 队列只有完成卡，直接自由刷（prd：一个也没有当天直接自由刷）。
+     */
+    fun buildQueue(channel: String): DailyQueue {
+        val scope = scopeIds(channel)
+        val due = scope
+            .filter { id -> termStates[id]?.let { isDue(it) } == true }
+            .sortedBy { id -> termStates[id]?.let { dueTime(it) } ?: Long.MAX_VALUE }
+        val news = scope.filter { termStates[it] == null }.shuffled()
+        val pool = if (channel == "rec") (due + news).take(DAILY_POOL_QUOTA) else due + news
+
+        val queue = ArrayList<String>(pool.size)
+        val modes = ArrayList<String>(pool.size)
+        val answered = ArrayList<Boolean>(pool.size)
+        for (id in pool) {
+            queue.add(id)
+            modes.add(if (termStates[id] == null) MODE_NEW else MODE_REVIEW)
+            answered.add(false)
+        }
+        return DailyQueue(today(), channel, queue, modes, answered, 0)
+    }
+
+    /** 当日有效队列：date 相符直接复用（断点续刷 + 当日冻结），否则重建并持久化 */
+    fun ensureQueue(channel: String): DailyQueue {
+        val existing = queues[channel]
+        if (existing != null && existing.date == today()) return existing
+        val fresh = buildQueue(channel)
+        queues[channel] = fresh
+        persist()
+        return fresh
+    }
+
+    /**
+     * 作答/教读后词**未移除**（当日连击 <3）→ 追加队尾（REVIEW 形态、answered=false，当天再见）；
+     * 已移除不追加。返回追加后的队尾下标（作为该卡实例的队列索引，markAnswered 用）；未追加返回 -1。
+     * 调用方须先 markKnown/markForgot 更新连击计数，再调本方法（移除判定依赖最新计数）。
+     */
+    fun appendQueue(channel: String, id: String): Int {
+        val q = queues[channel] ?: return -1
+        if (q.date != today()) return -1
+        if (isRemovedById(id)) return -1
+        queues[channel] = q.copy(
+            queue = q.queue + id,
+            modes = q.modes + MODE_REVIEW,
+            answered = q.answered + false,
+        )
+        persist()
+        return q.queue.size   // q 仍是旧队列：旧长度 N = 新元素（队尾）下标
+    }
+
+    /** 断点续刷用：标记该卡实例已作答（answered[i]=true），按卡逐卡持久化（design.md §9.1） */
+    fun markAnswered(channel: String, index: Int) {
+        val q = queues[channel] ?: return
+        if (index < 0 || index >= q.queue.size) return
+        val ans = q.answered.toMutableList()
+        while (ans.size < q.queue.size) ans.add(false)   // 旧数据兜底
+        if (ans[index]) return
+        ans[index] = true
+        queues[channel] = q.copy(answered = ans)
         persist()
     }
 
-    fun setSpeechRate(v: Float) {
-        speechRate = v
+    /** 断点位置落库；自由刷阶段的页码 clamp 到完成卡（队列本身不含自由刷页） */
+    fun saveQueuePosition(channel: String, position: Int) {
+        val q = queues[channel] ?: return
+        val p = position.coerceIn(0, q.queue.size)
+        if (q.position == p) return
+        queues[channel] = q.copy(position = p)
         persist()
     }
 
-    fun setRemindTime(t: String) {
-        remindTime = t
-        persist()
+    /* ---------- 自由刷池 ---------- */
+
+    /**
+     * 自由刷池：该范围内**全部已学词**（有 TermState 即已学，含 days==15 的毕业词），洗牌返回；
+     * 抽完由调用方重洗。「教读未完成连击」的词无 TermState，不入池（design.md §9.4）。
+     */
+    fun freePoolIds(channel: String): List<String> =
+        scopeIds(channel).filter { termStates[it] != null }.shuffled()
+
+    /* ---------- 连击层当日状态（隔天作废） ---------- */
+
+    /** 当日有效 DayState：date 与今天不符（隔天/首次）则整体作废重建 */
+    private fun currentDay(): DayState {
+        if (day.date != today()) day = DayState(today(), emptyMap(), emptySet())
+        return day
     }
+
+    /* ---------- 持久化（读写对称） ---------- */
 
     private fun persist() {
         runCatching {
             val obj = JSONObject()
-            obj.put("fscale", fontScale.toDouble())
-            obj.put("rate", speechRate.toDouble())
-            obj.put("remind", remindTime)
-            val f = JSONObject()
-            forgot.forEach { (k, v) -> f.put(k, v) }
-            obj.put("forgot", f)
+            val ts = JSONObject()
+            termStates.forEach { (k, st) ->
+                ts.put(k, JSONObject().put("days", st.days).put("lastSeen", st.lastSeen))
+            }
+            obj.put("terms", ts)
+            val d = currentDay()
+            obj.put(
+                "day",
+                JSONObject()
+                    .put("date", d.date)
+                    .put("counts", JSONObject().apply { d.counts.forEach { (k, v) -> put(k, v) } })
+                    .put("seen", JSONArray(d.seen.toList())),
+            )
+            val qs = JSONObject()
+            queues.forEach { (ch, q) ->
+                qs.put(
+                    ch,
+                    JSONObject()
+                        .put("date", q.date)
+                        .put("queue", JSONArray(q.queue))
+                        .put("modes", JSONArray(q.modes))
+                        .put("answered", JSONArray(q.answered))
+                        .put("position", q.position),
+                )
+            }
+            obj.put("queues", qs)
             prefs.edit().putString("state", obj.toString()).apply()
         }
     }
@@ -67,22 +314,77 @@ class StudyRepository(context: Context) {
         val raw = prefs.getString("state", null) ?: return
         runCatching {
             val obj = JSONObject(raw)
-            fontScale = obj.optDouble("fscale", 1.0).toFloat()
-            speechRate = obj.optDouble("rate", 0.85).toFloat()
-            remindTime = obj.optString("remind", "下午 3 点")
-            val f = obj.optJSONObject("forgot") ?: return
-            f.keys().forEach { k -> forgot[k] = f.optInt(k, 0) }
+            obj.optJSONObject("terms")?.let { ts ->
+                ts.keys().forEach { k ->
+                    val s = ts.optJSONObject(k) ?: return@forEach
+                    // 第二轮的 "count" 键弃读；days 缺省 1（视为已学、近期到期，design.md §9.1 迁移口径）
+                    termStates[k] = TermState(s.optInt("days", 1), s.optString("lastSeen"))
+                }
+            }
+            // 连击层：date 不符 = 隔天，整体作废（不读入）
+            obj.optJSONObject("day")?.let { dj ->
+                val date = dj.optString("date")
+                if (date == today()) {
+                    val counts = linkedMapOf<String, Int>()
+                    dj.optJSONObject("counts")?.let { cj ->
+                        cj.keys().forEach { k -> counts[k] = cj.optInt(k) }
+                    }
+                    val seen = linkedSetOf<String>()
+                    dj.optJSONArray("seen")?.let { sa ->
+                        for (i in 0 until sa.length()) seen.add(sa.optString(i))
+                    }
+                    day = DayState(date, counts, seen)
+                }
+            }
+            obj.optJSONObject("queues")?.let { qs ->
+                qs.keys().forEach { ch ->
+                    val qj = qs.optJSONObject(ch) ?: return@forEach
+                    val queue = mutableListOf<String>()
+                    val modes = mutableListOf<String>()
+                    val answered = mutableListOf<Boolean>()
+                    qj.optJSONArray("queue")?.let { ja ->
+                        for (i in 0 until ja.length()) queue.add(ja.optString(i))
+                    }
+                    qj.optJSONArray("modes")?.let { ma ->
+                        for (i in 0 until ma.length()) modes.add(ma.optString(i))
+                    }
+                    qj.optJSONArray("answered")?.let { aa ->
+                        for (i in 0 until aa.length()) answered.add(aa.optBoolean(i))
+                    }
+                    // 读写对称兜底：modes/answered 与 queue 等长（旧数据缺省 REVIEW/未作答）
+                    while (modes.size < queue.size) modes.add(MODE_REVIEW)
+                    while (answered.size < queue.size) answered.add(false)
+                    queues[ch] = DailyQueue(
+                        qj.optString("date"),
+                        ch,
+                        queue,
+                        modes,
+                        answered,
+                        qj.optInt("position", 0),
+                    )
+                }
+            }
         }
     }
 
     companion object {
-        /** 简化 Leitner 间隔：认识 → 1→3→7→15 天；忘了 → 明天（1 天） */
+        /** 队列卡形态标注（持久化用；与 UI 层 CardMode 对应；自由刷页不落库，由 UI 运行时追加） */
+        const val MODE_NEW = "NEW"
+        const val MODE_REVIEW = "REVIEW"
+
+        /** 连击目标：当日「认识」满 3 = 移出当日队列并升一级间隔；任何一次「忘了」清零（design.md §9.0） */
+        const val DAILY_COMBO_TARGET = 3
+
+        /** 推荐频道每日任务池配额（到期复核优先 + 新词补足；场景频道不另设配额，design.md §9.3） */
+        const val DAILY_POOL_QUOTA = 10
+
+        /** 间隔阶梯（design.md §9.1）：1→3→7→15 */
         val INTERVALS = listOf(1, 3, 7, 15)
 
-        fun nextInterval(current: Int): Int {
-            val i = INTERVALS.indexOf(current)
-            if (i < 0) return INTERVALS[1]
-            return INTERVALS[(i + 1).coerceAtMost(INTERVALS.lastIndex)]
-        }
+        /** 间隔封顶 = 分区完成判定阈值（days==15，design.md §9.5） */
+        val GRADUATED_DAYS = INTERVALS.last()
+
+        /** 一天的毫秒数（到期日 = lastSeen + days * DAY_MS，原型口径） */
+        const val DAY_MS = 24L * 60 * 60 * 1000
     }
 }

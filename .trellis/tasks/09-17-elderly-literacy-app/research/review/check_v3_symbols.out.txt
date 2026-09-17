@@ -1,0 +1,34 @@
+== 包内顶层声明（大写开头） ==
+  com.qyj.shibang              ['MainActivity']
+  com.qyj.shibang.data         ['BANK', 'DAY_MS', 'DailyQueue', 'EMERGENCY', 'EXPRESS', 'FOOD', 'GOV', 'GRADUATED_DAYS', 'HOSPITAL', 'ICON', 'INTERVALS', 'MARKET', 'MEDICINE', 'MODE_NEW', 'MODE_REVIEW', 'PHONE', 'PROPERTY', 'SCENES', 'STUDY_TERMS', 'Scene', 'StudyRepository', 'TRANSIT', 'Term', 'TermChar', 'TermState', 'WEATHER']
+  com.qyj.shibang.tts          ['TTSSpeaker']
+  com.qyj.shibang.ui           ['AppRoot', 'CardMode', 'ChannelBar', 'CharSheet', 'Done', 'DoneCard', 'FREE_BATCH', 'FeedbackButton', 'Page', 'SETTLE_SPEECH_DELAY_MS', 'SessionStats', 'SwipeHint', 'TermBadge', 'TermCard', 'TermPage']
+  com.qyj.shibang.ui.theme     ['AppLine', 'AppSurface', 'AppText', 'AppText2', 'BlueBg', 'BlueDark', 'BluePrimary', 'GreenBg', 'GreenKnown', 'OrangeAccent', 'OrangeBg', 'OrangeDark', 'RedForgot', 'ShibangTheme']
+
+== 逐文件符号解析 ==
+  --- MainActivity.kt (imports=9)
+      全部符号可解析
+  --- data\StudyData.kt (imports=1)
+      全部符号可解析
+  --- data\StudyRepository.kt (imports=6)
+      全部符号可解析
+  --- data\WordBank.kt (imports=0)
+      全部符号可解析
+  --- tts\TTSSpeaker.kt (imports=3)
+      全部符号可解析
+  --- ui\AppRoot.kt (imports=31)
+      全部符号可解析
+  --- ui\Common.kt (imports=27)
+      L72   NEW   <- 未在本文件 import / 本包声明 / 内置白名单中
+      L72   REVIEW   <- 未在本文件 import / 本包声明 / 内置白名单中
+      L72   FREE   <- 未在本文件 import / 本包声明 / 内置白名单中
+  --- ui\DoneCard.kt (imports=21)
+      全部符号可解析
+  --- ui\Sheets.kt (imports=32)
+      全部符号可解析
+  --- ui\TermCard.kt (imports=38)
+      全部符号可解析
+  --- ui\theme\Theme.kt (imports=4)
+      全部符号可解析
+
+可疑符号总数: 3（需逐条人工判定，可能是泛型参数/局部变量/枚举项）

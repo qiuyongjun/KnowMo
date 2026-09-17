@@ -1,0 +1,1131 @@
+diff --git a/.trellis/tasks/09-17-elderly-literacy-app/design.md b/.trellis/tasks/09-17-elderly-literacy-app/design.md
+index 282a105..5f32fa8 100644
+--- a/.trellis/tasks/09-17-elderly-literacy-app/design.md
++++ b/.trellis/tasks/09-17-elderly-literacy-app/design.md
+@@ -81,7 +81,61 @@ ReviewState { termId, box, dueInDays }  // 工程阶段入库；原型内存演
+ 
+ **待下一迭代：** Room + WorkManager 调度入库、AlarmManager 提醒、拍照识字（CameraX + ML Kit）。
+ 
+-## 8. 取舍与风险
++## 9. v3：每日队列调度与滑动即播（2026-09-17 收敛，工程迭代）
++
++> 决策记录：①复习卡不念词（保住考回忆）②完成卡+自由刷 ③新词先不限配额。
++
++### 9.1 数据模型变更
++
++```kotlin
++// StudyData.kt：删除 Term.kind 静态字段与 REC_QUEUE；days 静态初始值作废
++// 新增（StudyRepository 持久化，SharedPreferences JSON）：
++TermState  { days: Int, lastSeen: String }   // lastSeen = yyyy-MM-dd；到期日 = lastSeen + days
++DailyQueue { date: String, channel: String, queue: List<String>, position: Int }
++```
++
++- 动态 kind 计算规则：`lastSeen == null` → 新学；`lastSeen != null && 到期日 <= 今天` → 复习；自由刷池抽取 → 温故。
++- `nextInterval`（1→3→7→15）保留在 StudyRepository。
++
++### 9.2 队列生成（调度器，放 StudyRepository 或独立 Scheduler）
++
++```
++当日首次打开（或切换频道后当日首次）：
++  due  = 到期日 <= 今天 的已学词（按到期日升序，先清债）
++  news = 该范围（推荐=全部场景 / 场景频道=该场景）未学词，随机洗牌
++  交错：约每 2 张新词插 1 张到期复习；无到期复习则纯新词流
++  忘了的词（今日队列内反馈"忘了"）：追加到当前队列尾部一次（days=1）
++自由刷（完成卡之后继续滑）：
++  池 = 该范围已学词，洗牌循环抽取，抽完重洗（无限流）
++```
++
++### 9.3 朗读契约（AppRoot）
++
++| 卡型 | 滑到停稳后 | 动作后 |
++|---|---|---|
++| 新词卡 | "词 + 提示语" | 点卡片重听 |
++| 复习卡（未答） | "这个词，还记得它念什么吗？"（**不念读音**） | 认识/忘了 → 念"词+提示"+反馈文案 |
++| 自由刷卡 | "词 + 提示语"（全展开，无考试按钮） | 点卡片重听 |
++| 完成卡 | 战果播报 + "下面随意看看，温故知新" | — |
++
++- 停稳判定：`pagerState.isScrollInProgress` 为 true 时不播；停稳后 delay ~200ms 再播（快速连滑中间卡不闪播）。用 `snapshotFlow { currentPage to isScrollInProgress }` 实现替代现有 LaunchedEffect(currentPage)。
++- 欢迎语简化（不再报队列信息）。
++
++### 8.4 持久化时机
++
++- 队列生成时写 DailyQueue（date+channel+queue+position=0）；翻页/反馈时更新 position 与 TermState；隔天（date 不符）作废重建。
++- 断点恢复：当天重启 → 恢复 queue+position+TermState，当前卡重播一遍（老人隔一会儿回来重听当前卡更自然）。
++
++### 9.5 涉及文件
++
++- `StudyData.kt`：删 kind/days 静态字段、REC_QUEUE。
++- `StudyRepository.kt`：+TermState/DailyQueue 持久化、调度器、到期计算。
++- `AppRoot.kt`：调度接入、朗读契约 8.3、去 index/total 传参。
++- `TermCard.kt`/`DoneCard.kt`/`Common.kt`：去 ProgressRow；+温故 badge；DoneCard 后接自由刷。
++
++**风险**：本机（Windows）无 JDK/SDK，无法本地编译验证；需 QYJ 在 Android Studio 构建确认。
++
++## 9. 取舍与风险
+ 
+ - **滑动 vs 点击翻页**：选择滑动（已被短视频市场教育的习惯，单指大面积操作）；snap + 大卡片降低误操作代价。风险：部分高龄用户首次需引导——完成卡/空态有语音引导文案。
+ - **词组学习 vs 单字学习**：词组贴近真实识别场景（看牌子认整体），但泛化能力弱于单字。字卡弹层（点单字看组词例句）作为补充路径保留。
+diff --git a/.trellis/tasks/09-17-elderly-literacy-app/implement.md b/.trellis/tasks/09-17-elderly-literacy-app/implement.md
+index 14c7363..2cf84df 100644
+--- a/.trellis/tasks/09-17-elderly-literacy-app/implement.md
++++ b/.trellis/tasks/09-17-elderly-literacy-app/implement.md
+@@ -1,34 +1,33 @@
+ # 执行计划 — 老年人识字辅助应用（原型阶段 v2 · 抖音式 feed）
+ 
+ > v1 导航式原型作废（评审指示），v2 重做为抖音式 feed。
++> v2 原型 + 工程首版（android-app）已交付。当前迭代 = v3（见 design.md §8，prd.md「v3 交互修订」）。
+ 
+ ## 交付物
+ 
+-`prototype/index.html` — 单文件高保真交互原型（抖音式 feed + 真实语音）。
++`prototype/index.html` — 单文件高保真交互原型（已完成）。
++`android-app/` — Kotlin + Compose 工程版（v2 已交付，v3 迭代中）。
+ 
+-## 步骤清单
++## v3 步骤清单（当前迭代）
+ 
+-1. [ ] 骨架：手机框 + 顶部频道 Tab（横滑 chips）+ scroll-snap 垂直 feed 容器 + 设计 token
+-2. [ ] 全局语音机制（zh-CN voice、语速设置、进入视口自动朗读 + 点按重听）
+-3. [ ] 新学卡：场景图标背景 + 大字词组 + 逐字拼音（每字可点开字卡弹层）+ 用途说明
+-4. [ ] 字卡弹层：拼音/组词/例句/发音（沿用 v1 设计）
+-5. [ ] 复习卡：🔁角标（距上次 N 天）→ 认识/忘了大按钮 → 展开完整内容 + 间隔反馈文案（角标即时更新）
+-6. [ ] 完成卡：语音表扬 + 从头再看一遍；生词本入口 + 列表弹层（忘了的词自动收集、点读）
+-7. [ ] 频道切换：点按替换 feed + 播报频道名；推荐频道为复习+新学交错队列
+-8. [ ] 设置弹层：字体大小（即时生效）/ 语速 / 提醒时间 / 记忆曲线说明 / 拍照识字"敬请期待"占位
+-9. [ ] 适老化自检：字号/对比度/触控/snap 吸附/无半张卡
+-10. [ ] jsdom 冒烟测试：切换频道、滑卡朗读触发、复习反馈流、生词本收集、完成卡重置
+-11. [ ] present_files 交付 + QYJ 评审 → 冻结基准
++1. [ ] `StudyData.kt`：删除 `Term.kind`/`Term.days` 静态字段与 `REC_QUEUE`（调用方同步清理）
++2. [ ] `StudyRepository.kt`：新增 TermState（days/lastSeen）+ DailyQueue（date/channel/queue/position）持久化；到期计算（lastSeen+days <= today）；调度器 `buildQueue(channel)`（到期复习优先+未学新词洗牌交错，见 design.md §8.2）；自由刷池
++3. [ ] `AppRoot.kt`：接入调度器；朗读契约改造（design.md §8.3：复习卡不念词、停稳 200ms debounce、snapshotFlow）；欢迎语简化；页面模型加自由刷卡/动态 kind
++4. [ ] `TermCard.kt`：去 ProgressRow 调用与 index/total 参数；badge 支持动态 kind（新学/复习/温故）
++5. [ ] `DoneCard.kt`/`Common.kt`：去 ProgressRow；完成卡文案（"下面随意看看，温故知新"）；若 ProgressRow 不再被引用则删除
++6. [ ] 静态检查：无残留 REC_QUEUE/kind 引用；JSON 持久化字段读写对称
++7. [ ] QYJ 在 Android Studio 构建 + 实机验证（本机无 JDK/SDK，无法本地编译）
+ 
+ ## 验证方式
+ 
+-- node 语法校验 + jsdom 冒烟测试（stub IntersectionObserver/speechSynthesis/canvas）全绿。
+-- Chrome/Edge 手工体验：真实发声、snap 滑动、逐条过 PRD Acceptance Criteria。
++- 本机静态审查（Grep 残留引用、逻辑走查到期/断点/隔天三条路径）。
++- 实机构建验证由 QYJ 执行：编译通过 + 走查 v3 验收标准（prd.md）。
+ 
+ ## 评审门（Review Gate）
+ 
+-- 步骤 11 为强制评审点：QYJ 确认前不创建工程实施子任务。
++- 步骤 7 为强制评审点：QYJ 实机确认后才能 commit 收尾 / 进入下一迭代。
+ 
+ ## 回滚点
+ 
+-- 单文件交付；git 提交粒度 = 大步骤；出问题回退上一提交。
++- git 提交粒度 = 迭代；出问题回退上一提交。
++
+diff --git a/.trellis/tasks/09-17-elderly-literacy-app/prd.md b/.trellis/tasks/09-17-elderly-literacy-app/prd.md
+index 3493998..b8aab41 100644
+--- a/.trellis/tasks/09-17-elderly-literacy-app/prd.md
++++ b/.trellis/tasks/09-17-elderly-literacy-app/prd.md
+@@ -49,6 +49,34 @@
+ - 关键操作语音引导：卡片进入视口自动朗读；按钮点击朗读含义。
+ - 上下滑为唯一翻页手势，snap 吸附防止半张卡造成的困惑。
+ 
++### v3 交互修订（2026-09-17 讨论收敛，工程实现迭代）
++
++> v2 工程版（android-app）已实现静态队列 feed。v3 修订针对实机体验三大痛点：复习卡泄题、静态队列重头开始、进度条暴露队列边界。
++
++1. **滑动即播（分卡型，不泄题）**
++   - 新词卡：滑到停稳（滑动进行中不播，停稳后 ~200ms debounce）自动念"词 + 提示语"。
++   - 复习卡：滑到只播"这个词，还记得它念什么吗？"，**不念读音**（保住考回忆）；按"认识/忘了"后才念词+提示。
++   - 完成卡：播报今日战果。
++2. **去掉"第 x/y 张"进度条**：队列边界对用户不可见，进度由完成卡和语音表达。
++3. **每日队列调度（替代静态 REC_QUEUE）**
++   - 当日首次打开生成当日队列：**到期复习词优先（先清债）+ 全部未学新词（先不限配额）**，交错混排（约每 2 新词插 1 复习）+ 内部洗牌 → 不知道后面是什么。
++   - 「忘了」：days 重置 1（明天到期），且当天队列尾部自动重现一次（错词当天再见）。
++   - 「认识」：1→3→7→15 天升级，到期日到了自然出现在未来队列。
++   - `kind` 从静态数据字段改为运行时计算：首次见=新学，到期=复习，自由刷=温故。
++4. **完成卡 + 自由刷**：当日队列刷完出完成卡（语音表扬+战果）；继续上滑进入自由刷——已学词池随机回炉、循环不重样，随时可停，无强迫。
++5. **持久化与断点**（SharedPreferences+JSON，36 词量级不上 Room）：
++   - 每词状态：间隔天数、上次学习日期/到期日。
++   - 当日队列 + 断点位置 + 日期戳：当天内重启从断点续刷；隔天重新调度（队列本身是新的，自然不重头）。
++6. **场景频道走同一调度器**，按场景过滤（该场景的到期复习+未学新词），体验与推荐频道一致。
++
++### v3 验收标准
++
++- [ ] 复习卡自动朗读不念读音；新词卡滑到停稳自动念；快速连滑无"闪播"杂音。
++- [ ] 界面无"第 x/y 张"进度条。
++- [ ] 隔天打开队列重新调度；当天内重启从断点继续；忘了的词当天尾部重现。
++- [ ] 完成卡后继续滑出现自由刷卡（已学词随机），badge 显示"温故"。
++- [ ] 「认识/忘了」反馈逻辑保留，间隔升级持久化，重启不丢。
++
+ ### 原型范围与边界
+ 
+ - 交付物：单文件 HTML 高保真交互原型，手机框内运行，浏览器直接体验（含真实语音朗读）。
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/MainActivity.kt b/android-app/app/src/main/java/com/qyj/shibang/MainActivity.kt
+index 48270eb..97cdf93 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/MainActivity.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/MainActivity.kt
+@@ -2,7 +2,9 @@ package com.qyj.shibang
+ 
+ import android.os.Bundle
+ import androidx.activity.ComponentActivity
++import androidx.activity.SystemBarStyle
+ import androidx.activity.compose.setContent
++import androidx.activity.enableEdgeToEdge
+ import com.qyj.shibang.data.StudyRepository
+ import com.qyj.shibang.tts.TTSSpeaker
+ import com.qyj.shibang.ui.AppRoot
+@@ -15,6 +17,16 @@ class MainActivity : ComponentActivity() {
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
++        enableEdgeToEdge(
++            statusBarStyle = SystemBarStyle.light(
++                android.graphics.Color.TRANSPARENT,
++                android.graphics.Color.TRANSPARENT,
++            ),
++            navigationBarStyle = SystemBarStyle.light(
++                android.graphics.Color.TRANSPARENT,
++                android.graphics.Color.TRANSPARENT,
++            ),
++        )
+         setContent {
+             ShibangTheme {
+                 AppRoot(repo = repo, tts = tts)
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/data/StudyRepository.kt b/android-app/app/src/main/java/com/qyj/shibang/data/StudyRepository.kt
+index 72eb754..f0fbc16 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/data/StudyRepository.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/data/StudyRepository.kt
+@@ -1,18 +1,45 @@
+ package com.qyj.shibang.data
+ 
+ import android.content.Context
++import org.json.JSONArray
+ import org.json.JSONObject
++import java.text.SimpleDateFormat
++import java.util.Date
++import java.util.Locale
+ 
+ /**
+- * 学习状态仓库：生词本、设置项。
+- * 第一版用 SharedPreferences + JSON 持久化；复习调度入库（Room）留待下一迭代。
++ * 单词记忆状态：间隔天数 + 上次学习日期（yyyy-MM-dd）。
++ * 未学过的词没有 TermState；到期日 = lastSeen + days 天。
++ */
++data class TermState(val days: Int, val lastSeen: String)
++
++/**
++ * 当日队列（按频道各持久化一条）：date 与今天不符则作废重建。
++ * modes 与 queue 一一对应，记录每张卡当时的形态（新学/复习），
++ * 保证当天内重启恢复时，已经反馈过的词不会重新回到考试状态。
++ */
++data class DailyQueue(
++    val date: String,
++    val channel: String,
++    val queue: List<String>,
++    val modes: List<String>,
++    val position: Int,
++)
++
++/**
++ * 学习状态仓库：生词本、设置项、单词记忆状态（TermState）、每日队列（DailyQueue）。
++ * SharedPreferences + JSON 持久化（36 词量级不上 Room）；全部收在 "state" 一个 JSON 里。
+  */
+ class StudyRepository(context: Context) {
+ 
+     private val prefs = context.applicationContext
+         .getSharedPreferences("study_state", Context.MODE_PRIVATE)
+ 
++    private val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
++
+     private val forgot = linkedMapOf<String, Int>()
++    private val termStates = linkedMapOf<String, TermState>()
++    private val queues = linkedMapOf<String, DailyQueue>()
+ 
+     var fontScale: Float = 1f
+         private set
+@@ -50,6 +77,131 @@ class StudyRepository(context: Context) {
+         persist()
+     }
+ 
++    /* ---------- 记忆状态与到期判定 ---------- */
++
++    fun today(): String = fmt.format(Date())
++
++    fun termState(id: String): TermState? = termStates[id]
++
++    /** 到期判定：lastSeen + days 天 <= 今天 → 到期 */
++    fun isDue(state: TermState, today: String = today()): Boolean = runCatching {
++        val due = fmt.parse(state.lastSeen)!!.time + state.days * DAY_MS
++        due <= fmt.parse(today)!!.time
++    }.getOrDefault(false)
++
++    /** 「认识」：间隔升级（1→3→7→15），lastSeen = 今天 */
++    fun markKnown(id: String) {
++        val current = termStates[id]?.days ?: 1
++        termStates[id] = TermState(nextInterval(current), today())
++        persist()
++    }
++
++    /**
++     * 新词首次学过：间隔 1 天（明天到期，进入复习队列），lastSeen = 今天；不记生词本。
++     * 新词卡没有反馈按钮，"学过"的时机 = 该卡首次停稳自动播报（AppRoot 调用）。
++     * 若缺这一步，词永远没有 TermState，复习债与自由刷池都无从产生。
++     */
++    fun markSeen(id: String) {
++        if (termStates[id] != null) return
++        termStates[id] = TermState(1, today())
++        persist()
++    }
++
++    /** 「忘了」：间隔归 1（明天到期），lastSeen = 今天，并记入生词本 */
++    fun markForgot(id: String) {
++        termStates[id] = TermState(1, today())
++        forgot[id] = (forgot[id] ?: 0) + 1
++        persist()
++    }
++
++    /* ---------- 每日队列调度器 ---------- */
++
++    /** 队列范围：推荐频道取全部词条，场景频道取该场景词条 */
++    private fun scopeIds(channel: String): List<String> =
++        if (channel == "rec") STUDY_TERMS.map { it.id }
++        else STUDY_TERMS.filter { it.scene == channel }.map { it.id }
++
++    /**
++     * 当日队列生成：到期复习词（按到期日升序，先清债）+ 未学新词（洗牌），
++     * 约每 2 张新词插 1 张到期复习；无到期复习则纯新词流。
++     * 剩余复习词排在新词之后，保证清债优先。
++     */
++    fun buildQueue(channel: String): DailyQueue {
++        val today = today()
++        val scope = scopeIds(channel)
++        val due = scope
++            .mapNotNull { id -> termStates[id]?.let { id to it } }
++            .filter { (_, st) -> isDue(st, today) }
++            .sortedBy { (_, st) ->
++                // 到期日 = lastSeen + days，越早到期越靠前（先清债）
++                runCatching { fmt.parse(st.lastSeen)!!.time + st.days * DAY_MS }.getOrDefault(0L)
++            }
++            .map { it.first }
++        val news = scope.filter { id -> termStates[id] == null }.shuffled()
++
++        val queue = ArrayList<String>(scope.size + 4)
++        val modes = ArrayList<String>(scope.size + 4)
++        var dueIdx = 0
++        var sinceReview = 0
++        for (n in news) {
++            queue.add(n)
++            modes.add(MODE_NEW)
++            sinceReview++
++            if (sinceReview >= 2 && dueIdx < due.size) {
++                queue.add(due[dueIdx])
++                modes.add(MODE_REVIEW)
++                dueIdx++
++                sinceReview = 0
++            }
++        }
++        while (dueIdx < due.size) {
++            queue.add(due[dueIdx])
++            modes.add(MODE_REVIEW)
++            dueIdx++
++        }
++        return DailyQueue(today, channel, queue, modes, 0)
++    }
++
++    /** 当日有效队列：date 相符直接复用（断点续刷），否则重建并持久化 */
++    fun ensureQueue(channel: String): DailyQueue {
++        val existing = queues[channel]
++        if (existing != null && existing.date == today()) return existing
++        val fresh = buildQueue(channel)
++        queues[channel] = fresh
++        persist()
++        return fresh
++    }
++
++    /**
++     * 「忘了」的词当天队列尾部重现一次；返回是否真的补了。
++     * 去重按"队列中该词只出现一次"判定：首次补后出现两次，之后原卡/重现卡
++     * 再怎么触发都不会重复补（含 replay 清 revealed 后重复作答的场景）。
++     */
++    fun appendQueue(channel: String, id: String): Boolean {
++        val q = queues[channel] ?: return false
++        if (q.date != today() || q.queue.count { it == id } != 1) return false
++        queues[channel] = q.copy(queue = q.queue + id, modes = q.modes + MODE_REVIEW)
++        persist()
++        return true
++    }
++
++    /** 断点位置落库；自由刷阶段的页码 clamp 到完成卡（队列本身不含自由刷页） */
++    fun saveQueuePosition(channel: String, position: Int) {
++        val q = queues[channel] ?: return
++        val p = position.coerceIn(0, q.queue.size)
++        if (q.position == p) return
++        queues[channel] = q.copy(position = p)
++        persist()
++    }
++
++    /* ---------- 自由刷池 ---------- */
++
++    /** 自由刷池：该范围内已学过的词（有 TermState），洗牌返回；抽完由调用方重洗 */
++    fun freePoolIds(channel: String): List<String> =
++        scopeIds(channel).filter { termStates[it] != null }.shuffled()
++
++    /* ---------- 持久化 ---------- */
++
+     private fun persist() {
+         runCatching {
+             val obj = JSONObject()
+@@ -59,6 +211,23 @@ class StudyRepository(context: Context) {
+             val f = JSONObject()
+             forgot.forEach { (k, v) -> f.put(k, v) }
+             obj.put("forgot", f)
++            val ts = JSONObject()
++            termStates.forEach { (k, st) ->
++                ts.put(k, JSONObject().put("days", st.days).put("lastSeen", st.lastSeen))
++            }
++            obj.put("terms", ts)
++            val qs = JSONObject()
++            queues.forEach { (ch, q) ->
++                qs.put(
++                    ch,
++                    JSONObject()
++                        .put("date", q.date)
++                        .put("queue", JSONArray(q.queue))
++                        .put("modes", JSONArray(q.modes))
++                        .put("position", q.position),
++                )
++            }
++            obj.put("queues", qs)
+             prefs.edit().putString("state", obj.toString()).apply()
+         }
+     }
+@@ -70,12 +239,47 @@ class StudyRepository(context: Context) {
+             fontScale = obj.optDouble("fscale", 1.0).toFloat()
+             speechRate = obj.optDouble("rate", 0.85).toFloat()
+             remindTime = obj.optString("remind", "下午 3 点")
+-            val f = obj.optJSONObject("forgot") ?: return
+-            f.keys().forEach { k -> forgot[k] = f.optInt(k, 0) }
++            obj.optJSONObject("forgot")?.let { f ->
++                f.keys().forEach { k -> forgot[k] = f.optInt(k, 0) }
++            }
++            obj.optJSONObject("terms")?.let { ts ->
++                ts.keys().forEach { k ->
++                    val s = ts.optJSONObject(k) ?: return@forEach
++                    termStates[k] = TermState(s.optInt("days", 1), s.optString("lastSeen"))
++                }
++            }
++            obj.optJSONObject("queues")?.let { qs ->
++                qs.keys().forEach { ch ->
++                    val qj = qs.optJSONObject(ch) ?: return@forEach
++                    val queue = mutableListOf<String>()
++                    val modes = mutableListOf<String>()
++                    qj.optJSONArray("queue")?.let { ja ->
++                        for (i in 0 until ja.length()) queue.add(ja.optString(i))
++                    }
++                    qj.optJSONArray("modes")?.let { ma ->
++                        for (i in 0 until ma.length()) modes.add(ma.optString(i))
++                    }
++                    // 读写对称兜底：modes 与 queue 等长（旧数据缺省按复习处理）
++                    while (modes.size < queue.size) modes.add(MODE_REVIEW)
++                    queues[ch] = DailyQueue(
++                        qj.optString("date"),
++                        ch,
++                        queue,
++                        modes,
++                        qj.optInt("position", 0),
++                    )
++                }
++            }
+         }
+     }
+ 
+     companion object {
++        private const val DAY_MS = 24L * 60 * 60 * 1000
++
++        /** 队列卡形态标注（持久化用；与 UI 层 CardMode 对应；自由刷页不落库，由 UI 运行时追加） */
++        const val MODE_NEW = "NEW"
++        const val MODE_REVIEW = "REVIEW"
++
+         /** 简化 Leitner 间隔：认识 → 1→3→7→15 天；忘了 → 明天（1 天） */
+         val INTERVALS = listOf(1, 3, 7, 15)
+ 
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/tts/TTSSpeaker.kt b/android-app/app/src/main/java/com/qyj/shibang/tts/TTSSpeaker.kt
+index 7524a5e..96fe424 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/tts/TTSSpeaker.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/tts/TTSSpeaker.kt
+@@ -6,7 +6,8 @@ import java.util.Locale
+ 
+ /**
+  * Android TTS 封装：中文、语速可调（老年人默认 0.85）。
+- * 初始化是异步的：ready 之前的朗读请求存入 pending，就绪后补播最后一条。
++ * 初始化是异步的：ready 之前的朗读请求按序存入 pending，就绪后按序补播
++ * （不设就绪回调——回调里再 speak 是 QUEUE_FLUSH，会打断/重播已补播的内容）。
+  */
+ class TTSSpeaker(context: Context) {
+ 
+@@ -19,10 +20,8 @@ class TTSSpeaker(context: Context) {
+     @Volatile
+     var rate: Float = 0.85f
+ 
+-    /** TTS 引擎就绪回调（用于播欢迎语） */
+-    var onReady: (() -> Unit)? = null
+-
+-    private var pending: String? = null
++    /** 就绪前的朗读请求按顺序排队（欢迎语等不被后续卡片播报覆盖） */
++    private val pendingQueue = ArrayDeque<String>()
+ 
+     init {
+         tts = TextToSpeech(context.applicationContext) { status ->
+@@ -30,22 +29,31 @@ class TTSSpeaker(context: Context) {
+             if (ready) {
+                 tts?.language = Locale.SIMPLIFIED_CHINESE
+                 tts?.setSpeechRate(rate)
+-                pending?.let { speak(it) }
+-                pending = null
+-                onReady?.invoke()
++                // 按序补播就绪前排队的请求（QUEUE_ADD 接续，不互相打断）
++                pendingQueue.forEach { text ->
++                    tts?.setSpeechRate(rate)
++                    tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "shibang-utt")
++                }
++                pendingQueue.clear()
+             }
+         }
+     }
+ 
+     fun speak(text: String) {
+         if (!ready) {
+-            pending = text
++            if (pendingQueue.lastOrNull() != text) pendingQueue.add(text)
++            if (pendingQueue.size > 4) pendingQueue.removeFirst()
+             return
+         }
+         tts?.setSpeechRate(rate)
+         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "shibang-utt")
+     }
+ 
++    /** 立即停止当前朗读（快速连滑打断播报用） */
++    fun stop() {
++        tts?.stop()
++    }
++
+     fun shutdown() {
+         tts?.stop()
+         tts?.shutdown()
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/ui/AppRoot.kt b/android-app/app/src/main/java/com/qyj/shibang/ui/AppRoot.kt
+index f6ce065..868055f 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/ui/AppRoot.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/ui/AppRoot.kt
+@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.navigationBarsPadding
++import androidx.compose.foundation.layout.statusBarsPadding
+ import androidx.compose.foundation.pager.VerticalPager
+ import androidx.compose.foundation.pager.rememberPagerState
+ import androidx.compose.runtime.Composable
+@@ -16,10 +18,10 @@ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
+ import androidx.compose.runtime.setValue
++import androidx.compose.runtime.snapshotFlow
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.platform.LocalDensity
+ import androidx.compose.ui.unit.Density
+-import com.qyj.shibang.data.REC_QUEUE
+ import com.qyj.shibang.data.STUDY_TERMS
+ import com.qyj.shibang.data.StudyRepository
+ import com.qyj.shibang.data.Term
+@@ -27,23 +29,31 @@ import com.qyj.shibang.data.TermChar
+ import com.qyj.shibang.data.sceneName
+ import com.qyj.shibang.tts.TTSSpeaker
+ import com.qyj.shibang.ui.theme.AppSurface
++import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
+ 
+-/** feed 页：词条卡或完成卡 */
++/** feed 页：词条卡（mode 由调度器运行时计算：新学/复习/温故）或完成卡 */
+ sealed interface Page {
+-    data class TermPage(val t: Term) : Page
++    data class TermPage(val t: Term, val mode: CardMode) : Page
+     data object Done : Page
+ }
+ 
+ data class SessionStats(val known: Int = 0, val forgot: Int = 0)
+ 
++/** 每次预追加的自由刷页数（临近完成卡时预追加，池空重洗） */
++private const val FREE_BATCH = 2
++
++/** 停稳判定后的播报去抖（ms）：滑动进行中不播，停稳后再等这么久，快速连滑不闪播 */
++private const val SETTLE_SPEECH_DELAY_MS = 200L
++
+ /**
+- * 根界面：抖音式垂直 feed。
+- * 交互契约（见任务 design.md §6）：
+- * 1. 卡片进入视口自动朗读（每卡一次）
+- * 2. 点卡片重听，点单字开字卡弹层
+- * 3. 复习卡先考回忆，认识/忘了后展开并即时反馈间隔
+- * 4. 频道切换重建 feed 并播报
++ * 根界面：抖音式垂直 feed（v3：每日队列调度 + 滑动即播不泄题）。
++ * 交互契约（见任务 design.md §8）：
++ * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播
++ * 2. 复习卡未作答只念"还记得它念什么吗"，绝不念词的读音；认识/忘了后才念词+提示
++ * 3. 当日队列由 repo.ensureQueue 调度（隔天重建），断点恢复；忘了的词当天尾部重现
++ * 4. 完成卡之后继续上滑 = 自由刷无限流（温故），pageCount 随滑动增长
++ * 5. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
+  */
+ @Composable
+ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
+@@ -51,86 +61,120 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
+     var fontScale by remember { mutableFloatStateOf(repo.fontScale) }
+     var speechRate by remember { mutableFloatStateOf(repo.speechRate) }
+     var channel by remember { mutableStateOf("rec") }
+-    var terms by remember { mutableStateOf(STUDY_TERMS) }
+     var session by remember { mutableStateOf(SessionStats()) }
+-    val revealed = remember { mutableStateMapOf<String, Boolean>() }   // 复习卡是否已展开
++    val revealed = remember { mutableStateMapOf<String, Boolean>() }   // 复习卡是否已作答展开
+     val results = remember { mutableStateMapOf<String, String>() }     // termId -> 反馈文案
+-    val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重
++    val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重（频道+页序+词）
+     var charFor by remember { mutableStateOf<TermChar?>(null) }
+     val scope = rememberCoroutineScope()
+ 
++    // feed 页面：当日队列 + 完成卡 + 自由刷追加页（无限流）
++    var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
++    var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 自由刷池：顺序抽取，池空重洗
++    var restoreTo by remember { mutableStateOf<Int?>(null) }             // 断点/频道切换的目标页
++    var pendingAnnounce by remember { mutableStateOf<String?>(null) }    // 频道播报（与首卡合并成一句播）
++    var firstChannelLoad by remember { mutableStateOf(true) }
++
++    val pagerState = rememberPagerState(pageCount = { pages.size })
++
+     LaunchedEffect(speechRate) { tts.rate = speechRate }
+ 
+-    // 欢迎语（TTS 就绪后播报）
++    // 欢迎语（TTS 未就绪时进 pending 队列，就绪后按序补播，始终先于卡片播报）
+     LaunchedEffect(Unit) {
+-        val welcome = "欢迎回来。上滑开始学习，今天有新词，也有要复习的词。"
+-        if (tts.ready) tts.speak(welcome) else tts.onReady = { tts.speak(welcome) }
++        tts.speak("欢迎回来。上滑开始学习。")
+     }
+ 
+-    // feed 队列：推荐频道 = 复习+新学交错；场景频道 = 该场景词条；末尾固定完成卡
+-    val pages: List<Page> = remember(channel, terms) {
+-        val queue = if (channel == "rec") {
+-            REC_QUEUE.mapNotNull { id -> terms.firstOrNull { it.id == id } }
+-        } else {
+-            terms.filter { it.scene == channel }
++    fun termById(id: String): Term? = STUDY_TERMS.firstOrNull { it.id == id }
++
++    fun termSpeech(t: Term) = "${t.text}。${t.tip}"
++
++    fun spokenKey(idx: Int, p: Page) = "$channel:$idx:" + when (p) {
++        is Page.TermPage -> p.t.id
++        Page.Done -> "done"
++    }
++
++    /** 停稳后播报文案（design.md §8.3 契约）：复习卡未作答绝不念词的读音 */
++    fun cardSpeech(p: Page): String = when (p) {
++        is Page.TermPage -> when (p.mode) {
++            CardMode.REVIEW ->
++                if (revealed[p.t.id] == true) termSpeech(p.t)
++                else "这个词，还记得它念什么吗？想一想，再按下面的按钮"
++            else -> termSpeech(p.t)   // 新学 / 温故：词 + 提示语，全展开
+         }
+-        queue.map { Page.TermPage(it) } + Page.Done
++        Page.Done ->
++            "太棒了，今天的内容学完了！认识了${session.known}个，忘了${session.forgot}个。" +
++                "明天记得再来。下面随意看看，温故知新。"
+     }
+-    val pagerState = rememberPagerState(pageCount = { pages.size })
+ 
+-    // 频道切换：回第一页 + 播报（首次组合进入不播）
+-    var firstChannelRun by remember { mutableStateOf(true) }
++    // 装载当日队列（repo 内 date 不符自动重建）：首次进入 = 断点恢复；切频道 = 回第一页
+     LaunchedEffect(channel) {
+-        if (firstChannelRun) {
+-            firstChannelRun = false
+-            return@LaunchedEffect
+-        }
++        val announce = !firstChannelLoad
++        firstChannelLoad = false
++        val q = repo.ensureQueue(channel)
++        pages = q.queue.mapIndexed { i, id ->
++            val t = termById(id) ?: return@mapIndexed null
++            val mode = if (q.modes[i] == StudyRepository.MODE_NEW) CardMode.NEW else CardMode.REVIEW
++            // 断点恢复：今天已作答过的复习卡（lastSeen = 今天）直接展开，不重回考试状态
++            if (mode == CardMode.REVIEW && repo.termState(id)?.lastSeen == q.date) revealed[id] = true
++            Page.TermPage(t, mode)
++        }.filterNotNull() + Page.Done
++        freePool = emptyList()
+         spokenKeys.clear()
+-        pagerState.scrollToPage(0)
+-        tts.speak("换到${sceneName(channel)}频道")
++        restoreTo = if (announce) 0 else q.position
++        if (announce) pendingAnnounce = "换到${sceneName(channel)}频道。"
+     }
+ 
+-    // 当前卡片进入视口 → 自动朗读（同卡只播一次）
+-    LaunchedEffect(pagerState.currentPage, pages) {
+-        val p = pages.getOrNull(pagerState.currentPage) ?: return@LaunchedEffect
+-        val key = when (p) {
+-            is Page.TermPage -> "$channel:${p.t.id}"
+-            Page.Done -> "$channel:done"
+-        }
+-        if (spokenKeys.add(key)) {
+-            when (p) {
+-                is Page.TermPage -> {
+-                    if (p.t.kind == Term.Kind.REVIEW) {
+-                        tts.speak("${p.t.text}。还记得它念什么吗？想一想，再按下面的按钮")
+-                    } else {
+-                        tts.speak("${p.t.text}。${p.t.tip}")
+-                    }
+-                }
+-                Page.Done -> tts.speak(
+-                    "太棒了，今天的内容学完了！认识了${session.known}个，忘了${session.forgot}个。明天记得再来。",
+-                )
++    // 断点/频道切换跳页（restoreTo 置空防重复；需先于停稳监听声明，保证跳页先行）
++    LaunchedEffect(pages, restoreTo) {
++        val target = restoreTo ?: return@LaunchedEffect
++        restoreTo = null
++        if (pages.isNotEmpty()) pagerState.scrollToPage(target.coerceIn(0, pages.lastIndex))
++    }
++
++    /** 自由刷：从池里顺序取 count 张追加到尾部；池空重洗（无限流，随时可停） */
++    fun appendFreePages(count: Int) {
++        val extra = ArrayList<Page>(count)
++        repeat(count) {
++            if (freePool.isEmpty()) {
++                freePool = repo.freePoolIds(channel).mapNotNull(::termById)
+             }
++            val next = freePool.firstOrNull() ?: return@repeat
++            freePool = freePool.drop(1)
++            extra.add(Page.TermPage(next, CardMode.FREE))
+         }
++        if (extra.isNotEmpty()) pages = pages + extra
+     }
+ 
+-    fun termSpeech(t: Term) = "${t.text}。${t.tip}"
++    // 翻页落库：保存当日断点 + 临近完成卡（差一页）预追加自由刷页
++    LaunchedEffect(pagerState) {
++        snapshotFlow { pagerState.currentPage }.collect { idx ->
++            repo.saveQueuePosition(channel, idx)
++            val doneIdx = pages.indexOfFirst { it is Page.Done }
++            if (doneIdx >= 0 && idx >= doneIdx - 1) appendFreePages(FREE_BATCH)
++        }
++    }
+ 
+-    fun answer(t: Term, known: Boolean) {
+-        val newDays: Int
++    fun answer(p: Page.TermPage, known: Boolean) {
++        val t = p.t
++        revealed[t.id] = true
+         if (known) {
++            val newDays = StudyRepository.nextInterval(repo.termState(t.id)?.days ?: 1)
++            repo.markKnown(t.id)
+             session = session.copy(known = session.known + 1)
+-            newDays = StudyRepository.nextInterval(t.days)
++            results[t.id] = "👍 记得牢！$newDays 天后再见"
++            tts.speak("${termSpeech(t)}。记得牢，${newDays}天后再见。")
+         } else {
++            repo.markForgot(t.id)
+             session = session.copy(forgot = session.forgot + 1)
+-            repo.addForgot(t.id)
+-            newDays = 1
++            results[t.id] = "没关系，明天再来一遍 💪 已加入生词本"
++            tts.speak("${termSpeech(t)}。没关系，明天再来一遍。")
++            // 忘了的词：当天队列尾部重现一次（repo 去重，只补一次）
++            if (repo.appendQueue(channel, t.id)) {
++                pages = pages.toMutableList().apply {
++                    add(indexOfFirst { it is Page.Done }.coerceAtLeast(0), Page.TermPage(t, CardMode.REVIEW))
++                }
++            }
+         }
+-        terms = terms.map { if (it.id == t.id) it.copy(days = newDays) else it }
+-        revealed[t.id] = true
+-        results[t.id] =
+-            if (known) "👍 记得牢！$newDays 天后再见"
+-            else "没关系，明天再来一遍 💪 已加入生词本"
+-        tts.speak(termSpeech(t))
+     }
+ 
+     fun replay() {
+@@ -142,12 +186,44 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
+         tts.speak("好，我们从头再看一遍")
+     }
+ 
++    // 滑动即播（design.md §8.3）：isScrollInProgress=true 期间不播；
++    // 停稳后 delay ~200ms 再播，期间又开始滑则取消——快速连滑中间卡不闪播
++    LaunchedEffect(pagerState, pages) {
++        snapshotFlow { pagerState.currentPage to pagerState.isScrollInProgress }
++            .collect { (idx, scrolling) ->
++                if (scrolling) {
++                    tts.stop()
++                    return@collect
++                }
++                delay(SETTLE_SPEECH_DELAY_MS)
++                if (pagerState.isScrollInProgress) return@collect   // 200ms 内又开始滑了
++                if (pagerState.currentPage != idx) return@collect   // 迟到的旧页事件（跳页/连滑已完成）：交给新事件播报，防错位闪播
++                if (restoreTo != null) return@collect               // 断点跳页完成前不播，防错位闪播
++                val p = pages.getOrNull(idx) ?: return@collect
++                if (!spokenKeys.add(spokenKey(idx, p))) return@collect
++                // 新词卡首次停稳播报 = 完成首次学习：记 days=1（明天到期进入复习队列）
++                if (p is Page.TermPage && p.mode == CardMode.NEW && repo.termState(p.t.id) == null) {
++                    repo.markSeen(p.t.id)
++                }
++                val announce = pendingAnnounce
++                pendingAnnounce = null
++                val text = cardSpeech(p)
++                tts.speak(if (announce != null) announce + text else text)
++            }
++    }
++
+     // 「更大字体」档：乘在系统 fontScale 上，全局即时生效
+     val base = LocalDensity.current
+     CompositionLocalProvider(
+         LocalDensity provides Density(base.density, base.fontScale * fontScale),
+     ) {
+-        Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White)) {
++        Column(
++            Modifier
++                .fillMaxSize()
++                .background(androidx.compose.ui.graphics.Color.White)
++                .statusBarsPadding()
++                .navigationBarsPadding(),
++        ) {
+             ChannelBar(current = channel, onSelect = { channel = it })
+ 
+             VerticalPager(
+@@ -157,20 +233,17 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
+                     .weight(1f)
+                     .background(AppSurface),
+             ) { idx ->
+-                when (val p = pages[idx]) {
++                when (val p = pages.getOrNull(idx) ?: return@VerticalPager) {
+                     is Page.TermPage -> TermCard(
+                         term = p.t,
+-                        index = idx + 1,
+-                        total = pages.size,
+-                        revealed = p.t.kind == Term.Kind.NEW || revealed[p.t.id] == true,
++                        mode = p.mode,
++                        revealed = p.mode != CardMode.REVIEW || revealed[p.t.id] == true,
+                         resultText = results[p.t.id],
+                         onSpeakTerm = { tts.speak(termSpeech(p.t)) },
+                         onCharClick = { charFor = it },
+-                        onAnswer = { known -> answer(p.t, known) },
++                        onAnswer = { known -> answer(p, known) },
+                     )
+                     Page.Done -> DoneCard(
+-                        index = idx + 1,
+-                        total = pages.size,
+                         known = session.known,
+                         forgot = session.forgot,
+                         onReplay = { replay() },
+@@ -180,7 +253,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
+         }
+ 
+         charFor?.let { ch ->
+-            CharSheet(ch = ch, terms = terms, onSpeak = { tts.speak(it) }, onDismiss = { charFor = null })
++            CharSheet(ch = ch, terms = STUDY_TERMS, onSpeak = { tts.speak(it) }, onDismiss = { charFor = null })
+         }
+     }
+ }
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/ui/Common.kt b/android-app/app/src/main/java/com/qyj/shibang/ui/Common.kt
+index cb2308d..1cefcfd 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/ui/Common.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/ui/Common.kt
+@@ -2,36 +2,31 @@ package com.qyj.shibang.ui
+ 
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.clickable
++import androidx.compose.foundation.horizontalScroll
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.Spacer
+-import androidx.compose.foundation.layout.fillMaxHeight
+ import androidx.compose.foundation.layout.fillMaxWidth
+-import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.layout.width
+-import androidx.compose.foundation.horizontalScroll
+ import androidx.compose.foundation.rememberScrollState
+ import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Surface
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+-import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+-import com.qyj.shibang.data.Term
+ import com.qyj.shibang.ui.theme.AppSurface
+ import com.qyj.shibang.ui.theme.AppText2
+ import com.qyj.shibang.ui.theme.BlueBg
+ import com.qyj.shibang.ui.theme.BlueDark
+-import com.qyj.shibang.ui.theme.BluePrimary
++import com.qyj.shibang.ui.theme.GreenBg
++import com.qyj.shibang.ui.theme.GreenKnown
+ import com.qyj.shibang.ui.theme.OrangeBg
+ import com.qyj.shibang.ui.theme.OrangeDark
+-import com.qyj.shibang.ui.theme.ProgressTrack
+ 
+ /* ---------- 频道 Tab（参考抖音顶部 tab） ---------- */
+ 
+@@ -67,44 +62,29 @@ fun ChannelBar(current: String, onSelect: (String) -> Unit) {
+ 
+ /* ---------- 共享小组件 ---------- */
+ 
+-@Composable
+-fun ProgressRow(index: Int, total: Int) {
+-    Row(
+-        Modifier.fillMaxWidth().padding(bottom = 8.dp),
+-        verticalAlignment = Alignment.CenterVertically,
+-    ) {
+-        Text("第 $index / $total 张", fontSize = 19.sp, fontWeight = FontWeight.Bold, color = AppText2)
+-        Spacer(Modifier.width(14.dp))
+-        Box(
+-            Modifier
+-                .weight(1f)
+-                .height(12.dp)
+-                .clip(RoundedCornerShape(6.dp))
+-                .background(ProgressTrack),
+-        ) {
+-            Box(
+-                Modifier
+-                    .fillMaxWidth(index.toFloat() / total.toFloat())
+-                    .fillMaxHeight()
+-                    .clip(RoundedCornerShape(6.dp))
+-                    .background(BluePrimary),
+-            )
+-        }
+-    }
+-}
++/**
++ * 卡片形态（v3 运行时计算，不再是静态数据字段）：
++ * 新学 = 无学习记录；复习 = 已学且到期；温故 = 完成卡后自由刷池抽出的已学词。
++ */
++enum class CardMode { NEW, REVIEW, FREE }
+ 
++/**
++ * 词条角标：三态。
++ * 新学=蓝 / 复习=橙 / 温故=绿（绿色=正面回炉，与「认识」配色同系，不与另两态冲突）。
++ */
+ @Composable
+-fun TermBadge(term: Term) {
+-    val isReview = term.kind == Term.Kind.REVIEW
+-    androidx.compose.material3.Surface(
+-        color = if (isReview) OrangeBg else BlueBg,
+-        shape = RoundedCornerShape(50),
+-    ) {
++fun TermBadge(mode: CardMode) {
++    val (bg, fg, label) = when (mode) {
++        CardMode.NEW -> Triple(BlueBg, BlueDark, "✨ 新学")
++        CardMode.REVIEW -> Triple(OrangeBg, OrangeDark, "🔁 复习")
++        CardMode.FREE -> Triple(GreenBg, GreenKnown, "📖 温故")
++    }
++    Surface(color = bg, shape = RoundedCornerShape(50)) {
+         Text(
+-            if (isReview) "🔁 复习 · 距上次 ${term.days} 天" else "✨ 新学",
++            label,
+             fontSize = 19.sp,
+             fontWeight = FontWeight.Bold,
+-            color = if (isReview) OrangeDark else BlueDark,
++            color = fg,
+             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+         )
+     }
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/ui/DoneCard.kt b/android-app/app/src/main/java/com/qyj/shibang/ui/DoneCard.kt
+index 3fbd5ed..96bb5f5 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/ui/DoneCard.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/ui/DoneCard.kt
+@@ -2,15 +2,12 @@ package com.qyj.shibang.ui
+ 
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.clickable
+-import androidx.compose.foundation.layout.Arrangement
+-import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+@@ -21,23 +18,18 @@ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+-import com.qyj.shibang.ui.theme.AppSurface
+ import com.qyj.shibang.ui.theme.AppText2
+ import com.qyj.shibang.ui.theme.BluePrimary
+-import com.qyj.shibang.ui.theme.GreenBg
+-import com.qyj.shibang.ui.theme.GreenKnown
+-import com.qyj.shibang.ui.theme.OrangeBg
+ 
+-/** 队列末尾的完成卡：统计 + 重看一遍 */
++/** 队列末尾的完成卡：战果 + 重看一遍；继续上滑进入自由刷（温故，无限流） */
+ @Composable
+-fun DoneCard(index: Int, total: Int, known: Int, forgot: Int, onReplay: () -> Unit) {
++fun DoneCard(known: Int, forgot: Int, onReplay: () -> Unit) {
+     Column(
+         Modifier
+             .fillMaxSize()
+             .padding(horizontal = 20.dp, vertical = 14.dp),
+         horizontalAlignment = Alignment.CenterHorizontally,
+     ) {
+-        ProgressRow(index, total)
+         Spacer(Modifier.weight(1f))
+         Text("🎉", fontSize = 96.sp)
+         Spacer(Modifier.height(10.dp))
+@@ -61,6 +53,9 @@ fun DoneCard(index: Int, total: Int, known: Int, forgot: Int, onReplay: () -> Un
+         }
+         Spacer(Modifier.height(14.dp))
+         Text("明天记得再来学一会儿", fontSize = 19.sp, color = AppText2)
++        Spacer(Modifier.height(6.dp))
++        // 完成卡不是尽头：上滑进入自由刷（池空自动重洗，随时可停）
++        SwipeHint()
+         Spacer(Modifier.weight(1f))
+     }
+ }
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/ui/TermCard.kt b/android-app/app/src/main/java/com/qyj/shibang/ui/TermCard.kt
+index e017463..55199d1 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/ui/TermCard.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/ui/TermCard.kt
+@@ -40,28 +40,27 @@ import com.qyj.shibang.ui.theme.OrangeDark
+ import com.qyj.shibang.ui.theme.RedForgot
+ 
+ /**
+- * 学习卡：新学（词组+逐字拼音+用途） / 复习（先考回忆→认识/忘了→展开）。
+- * 对应原型交互契约 §6。
++ * 学习卡（v3）：形态由调度器运行时计算——
++ * 新学（词组+逐字拼音+用途全展开）/ 复习（先考回忆→认识/忘了→展开）/
++ * 温故（完成卡后自由刷池抽出的已学词，全展开，无考试按钮）。
++ * 不再展示"第 x/y 张"进度条（队列边界对用户不可见）。
+  */
+ @Composable
+ fun TermCard(
+     term: Term,
+-    index: Int,
+-    total: Int,
++    mode: CardMode,
+     revealed: Boolean,
+     resultText: String?,
+     onSpeakTerm: () -> Unit,
+     onCharClick: (TermChar) -> Unit,
+     onAnswer: (Boolean) -> Unit,
+ ) {
+-    val isReview = term.kind == Term.Kind.REVIEW
++    val isReview = mode == CardMode.REVIEW
+     Column(
+         Modifier
+             .fillMaxSize()
+             .padding(horizontal = 20.dp, vertical = 14.dp),
+     ) {
+-        ProgressRow(index, total)
+-
+         // 卡片主体：点任意处重听；点单字看讲解
+         Column(
+             Modifier
+@@ -87,7 +86,7 @@ fun TermCard(
+                 Text(term.icon, fontSize = 60.sp)
+             }
+             Spacer(Modifier.height(12.dp))
+-            TermBadge(term)
++            TermBadge(mode)
+             Spacer(Modifier.height(14.dp))
+ 
+             // 词组：每个字可点开字卡弹层
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/ui/theme/Theme.kt b/android-app/app/src/main/java/com/qyj/shibang/ui/theme/Theme.kt
+index 063d5f7..6f7c93b 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/ui/theme/Theme.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/ui/theme/Theme.kt
+@@ -15,13 +15,10 @@ val OrangeBg = Color(0xFFFFF3E0)
+ val GreenKnown = Color(0xFF1B5E20)
+ val GreenBg = Color(0xFFE8F5E9)
+ val RedForgot = Color(0xFFB71C1C)
+-val RedBg = Color(0xFFFFEBEE)
+ val AppSurface = Color(0xFFF5F7FA)
+ val AppLine = Color(0xFFDDE2EA)
+ val AppText = Color(0xFF1A1A1A)
+ val AppText2 = Color(0xFF424244)
+-val BadgeDot = Color(0xFFD32F2F)
+-val ProgressTrack = Color(0xFFE0E4EA)
+ 
+ @Composable
+ fun ShibangTheme(content: @Composable () -> Unit) {
+diff --git a/prototype/index.html b/prototype/index.html
+index 88f0db0..ce6a237 100644
+--- a/prototype/index.html
++++ b/prototype/index.html
+@@ -392,8 +392,8 @@ function termCardHTML(t,idx,total){
+     </div>`;
+   const actions=isReview
+     ? `<div class="fb-actions" id="fb-${t.id}">
+-         <button class="fb-btn fb-known" data-say="认识" onclick="reviewAnswer('${t.id}',true)"><span class="fi">😀</span>认识</button>
+-         <button class="fb-btn fb-forgot" data-say="忘了" onclick="reviewAnswer('${t.id}',false)"><span class="fi">😕</span>忘了</button>
++         <button class="fb-btn fb-known" onclick="reviewAnswer('${t.id}',true)"><span class="fi">😀</span>认识</button>
++         <button class="fb-btn fb-forgot" onclick="reviewAnswer('${t.id}',false)"><span class="fi">😕</span>忘了</button>
+        </div>`
+     : `<div class="swipe-hint">上滑看下一个 ↑</div>`;
+   return `
+@@ -445,23 +445,25 @@ function reviewAnswer(id,known){
+   fb.dataset.done="1";
+   document.getElementById("py-"+id).classList.remove("hidden");
+   document.getElementById("tip-"+id).classList.remove("hidden");
+-  let resultHTML;
++  let resultHTML, feedbackText;
+   if(known){
+     state.session.known++;
+     const cur=INTERVALS.indexOf(t.days);
+     const next=INTERVALS[Math.min(cur+1,INTERVALS.length-1)];
+     t.days=next;
+     resultHTML=`<div class="fb-result ok">👍 记得牢！${next} 天后再见</div>`;
++    feedbackText=`认识，真棒！${next} 天后再见`;
+   }else{
+     state.session.forgot++;
+     state.forgot[id]=(state.forgot[id]||0)+1;
+     t.days=1;
+     resultHTML=`<div class="fb-result re">没关系，明天再来一遍 💪 已加入生词本</div>`;
++    feedbackText=`忘了没关系，明天再来一遍。我们再听一遍：${t.text}`;
+     updateWordbookBadge();
+   }
+   fb.outerHTML=resultHTML+`<div class="swipe-hint">上滑看下一个 ↑</div>`;
+   updateDoneStats();
+-  setTimeout(()=>speak(termFullText(t)),200);
++  speak(feedbackText);
+ }
+ 
+ /* ==================== 完成卡统计 ==================== */
+@@ -495,7 +497,7 @@ function observeCards(){
+     if(io) io.disconnect();
+     io=new IntersectionObserver(entries=>{
+       entries.forEach(en=>{ if(en.isIntersecting) onCardVisible(en.target); });
+-    },{root:document.getElementById("feed"),threshold:0.6});
++    },{root:document.getElementById("feed"),threshold:0.55});
+     cards.forEach(c=>io.observe(c));
+   }else{
+     /* 降级：滚动监听（旧浏览器/测试环境） */
+@@ -640,6 +642,16 @@ fitPhone();
+ renderChannels();
+ renderFeed();
+ restoreSettingsUI();
++/* 自动播放解锁：任一首次交互触发空朗读，解除浏览器自动播放限制后移除监听 */
++(function unlockSpeech(){
++  if(!window.speechSynthesis) return;
++  const events=["pointerdown","touchstart","keydown"];
++  const unlock=()=>{
++    events.forEach(ev=>document.removeEventListener(ev,unlock));
++    try{ speechSynthesis.speak(new SpeechSynthesisUtterance("")); }catch(e){}
++  };
++  events.forEach(ev=>document.addEventListener(ev,unlock));
++})();
+ if(!state.greeted){
+   state.greeted=true;
+   setTimeout(()=>speak("欢迎回来。上滑开始学习，今天有新词，也有要复习的词。"),500);

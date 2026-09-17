@@ -1,0 +1,56 @@
+diff --git a/android-app/app/src/main/java/com/qyj/shibang/ui/DoneCard.kt b/android-app/app/src/main/java/com/qyj/shibang/ui/DoneCard.kt
+index 3fbd5ed..96bb5f5 100644
+--- a/android-app/app/src/main/java/com/qyj/shibang/ui/DoneCard.kt
++++ b/android-app/app/src/main/java/com/qyj/shibang/ui/DoneCard.kt
+@@ -2,15 +2,12 @@ package com.qyj.shibang.ui
+ 
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.clickable
+-import androidx.compose.foundation.layout.Arrangement
+-import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+@@ -21,23 +18,18 @@ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+-import com.qyj.shibang.ui.theme.AppSurface
+ import com.qyj.shibang.ui.theme.AppText2
+ import com.qyj.shibang.ui.theme.BluePrimary
+-import com.qyj.shibang.ui.theme.GreenBg
+-import com.qyj.shibang.ui.theme.GreenKnown
+-import com.qyj.shibang.ui.theme.OrangeBg
+ 
+-/** 队列末尾的完成卡：统计 + 重看一遍 */
++/** 队列末尾的完成卡：战果 + 重看一遍；继续上滑进入自由刷（温故，无限流） */
+ @Composable
+-fun DoneCard(index: Int, total: Int, known: Int, forgot: Int, onReplay: () -> Unit) {
++fun DoneCard(known: Int, forgot: Int, onReplay: () -> Unit) {
+     Column(
+         Modifier
+             .fillMaxSize()
+             .padding(horizontal = 20.dp, vertical = 14.dp),
+         horizontalAlignment = Alignment.CenterHorizontally,
+     ) {
+-        ProgressRow(index, total)
+         Spacer(Modifier.weight(1f))
+         Text("🎉", fontSize = 96.sp)
+         Spacer(Modifier.height(10.dp))
+@@ -61,6 +53,9 @@ fun DoneCard(index: Int, total: Int, known: Int, forgot: Int, onReplay: () -> Un
+         }
+         Spacer(Modifier.height(14.dp))
+         Text("明天记得再来学一会儿", fontSize = 19.sp, color = AppText2)
++        Spacer(Modifier.height(6.dp))
++        // 完成卡不是尽头：上滑进入自由刷（池空自动重洗，随时可停）
++        SwipeHint()
+         Spacer(Modifier.weight(1f))
+     }
+ }

@@ -40,28 +40,30 @@ import com.qyj.shibang.ui.theme.OrangeDark
 import com.qyj.shibang.ui.theme.RedForgot
 
 /**
- * 学习卡：新学（词组+逐字拼音+用途） / 复习（先考回忆→认识/忘了→展开）。
- * 对应原型交互契约 §6。
+ * 学习卡（v4 双层模型）：形态由调度器运行时计算——
+ * 新学（词组+逐字拼音+用途全展开，无按钮）/ 复习与温故（同一考试交互：
+ * 先只出词→认识/忘了按钮→作答展开+反馈文案）。
+ * 温故 = 自由刷池抽出的已学词（有 TermState 即已学，含 days==15 的毕业词），
+ * 作答同样走连击+间隔双层状态机（design.md §9.2/§9.4）。
+ * 不再展示"第 x/y 张"进度条（队列边界对用户不可见）。
  */
 @Composable
 fun TermCard(
     term: Term,
-    index: Int,
-    total: Int,
+    mode: CardMode,
     revealed: Boolean,
     resultText: String?,
     onSpeakTerm: () -> Unit,
     onCharClick: (TermChar) -> Unit,
     onAnswer: (Boolean) -> Unit,
 ) {
-    val isReview = term.kind == Term.Kind.REVIEW
+    // 新学卡无反馈按钮；复习/温故卡在作答前都出「认识/忘了」（v4：自由刷同样可作答，走同一双层状态机）
+    val isExam = mode != CardMode.NEW
     Column(
         Modifier
             .fillMaxSize()
             .padding(horizontal = 20.dp, vertical = 14.dp),
     ) {
-        ProgressRow(index, total)
-
         // 卡片主体：点任意处重听；点单字看讲解
         Column(
             Modifier
@@ -87,7 +89,7 @@ fun TermCard(
                 Text(term.icon, fontSize = 60.sp)
             }
             Spacer(Modifier.height(12.dp))
-            TermBadge(term)
+            TermBadge(mode)
             Spacer(Modifier.height(14.dp))
 
             // 词组：每个字可点开字卡弹层
@@ -114,7 +116,7 @@ fun TermCard(
             }
             Spacer(Modifier.height(10.dp))
 
-            // 逐字拼音：新学卡常显；复习卡回忆阶段隐藏
+            // 逐字拼音：新学卡常显；复习/温故卡作答前隐藏（考回忆）
             if (revealed) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     term.chars.forEach { ch ->
@@ -147,7 +149,7 @@ fun TermCard(
         Spacer(Modifier.height(12.dp))
 
         // 底部动作区
-        if (isReview && !revealed) {
+        if (isExam && !revealed) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 FeedbackButton(
                     emoji = "😕", label = "忘了",
