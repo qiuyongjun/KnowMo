@@ -159,13 +159,13 @@ fun TermCard(
         if (isExam && !revealed) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 FeedbackButton(
-                    emoji = "😕", label = "忘了",
+                    icon = "×", label = "忘了",
                     container = RedForgot,
                     onClick = { onAnswer(false) },
                     modifier = Modifier.weight(1f),
                 )
                 FeedbackButton(
-                    emoji = "😀", label = "认识",
+                    icon = "√", label = "认识",
                     container = GreenKnown,
                     onClick = { onAnswer(true) },
                     modifier = Modifier.weight(1f),
@@ -209,10 +209,10 @@ fun TermCard(
     }
 }
 
-/** 复习反馈按钮 */
+/** 复习反馈按钮：图标为 × / √ 字形（字体渲染，随字号缩放、无彩色表情歧义） */
 @Composable
 private fun FeedbackButton(
-    emoji: String,
+    icon: String,
     label: String,
     container: Color,
     onClick: () -> Unit,
@@ -227,7 +227,13 @@ private fun FeedbackButton(
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(emoji, fontSize = 40.sp)
+            Text(
+                icon,
+                fontSize = 44.sp,
+                lineHeight = 46.sp,
+                fontWeight = FontWeight.Black,
+                color = Color.White,
+            )
             Text(label, fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color.White)
         }
     }

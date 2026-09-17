@@ -1,59 +1,68 @@
-# Component Guidelines
+# 组件与交互契约
 
-> How components are built in this project.
-
----
-
-## Overview
-
-<!--
-Document your project's component conventions here.
-
-Questions to answer:
-- What component patterns do you use?
-- How are props defined?
-- How do you handle composition?
-- What accessibility standards apply?
--->
-
-(To be filled by the team)
+> Mando 的 Compose UI 约定与 feed 交互契约。
+> 语言：中文，与 `prd.md` / `design.md` / 代码注释保持一致。
 
 ---
 
-## Component Structure
+## 组件结构
 
-<!-- Standard structure of a component file -->
+- 所有 Composable 放 `ui/`；业务状态由 `AppRoot` 持有并下传，子组件**不感知调度器与 repo**。
+- **形态分流集中在调用点**，组件只渲染。例：`TermCard` 只收 `revealed` / `peeked` / `onSpeakTerm` / `onPeek` / `onAnswer`，「考试态未作答该播提示语还是重听」的判定在 `AppRoot` 的调用点完成。
+- 参数扁平传递；不要在两个文件里各维护一份分流规则。
+- 文案与 TTS 话术集中在 `AppRoot`（`cardSpeech`），组件只负责渲染。
 
-(To be filled by the team)
+## feed 交互契约（VerticalPager）
 
----
+### 方向语义
 
-## Props Conventions
+`VerticalPager` 以 index 递增为「下一个」：**手指上滑 = index+1**；手指下滑 = index−1（回看）。
 
-<!-- How props should be defined and typed -->
+> **Warning**：凡是引导用户「回去看前面某张卡」的文案，方向词必须是**往下滑**。
+> `SwipeHint()` 的文案固定为「上滑看下一个 ↑」，在需要往回滑的分支里**不得渲染**，否则方向相反会误导。完成卡 `pending > 0` 分支即属此类。
 
-(To be filled by the team)
+### 滑动策略：未作答不锁定
 
----
+**决策（v5 评审）**：考试态未作答时**不锁滑动** —— `VerticalPager` 不得设置 `userScrollEnabled = false`，也不得加任何形式的未作答拦截。
 
-## Styling Patterns
+依据：
 
-<!-- How styles are applied (CSS modules, styled-components, Tailwind, etc.) -->
+1. 跳过不写 `TermState`，次日 `isDue` 仍为真且 `dueTime` 更旧 → 在 `buildQueue` 的双键排序中反而更靠前，**自愈、无债务**；
+2. 强制作答会把「跳过」转换成「乱答」（「忘了」在 v5 代价加重，用户倾向点「认识」），污染连击层与 lapses，即放大「认识」自评虚高；
+3. Anki bury / SuperMemo postpone：跳过与延后是一等的用户控制权。
 
-(To be filled by the team)
+因此：需要兜底的不是滑动，而是下面「完成」的语义。
 
----
+### 完成度语义：完成卡不得由「位置」推导
 
-## Accessibility
+**规则**：`Page.Done` 位于队尾 ≠ 任务完成。完成卡文案必须由**队列完成度**驱动：
 
-<!-- A11y requirements and patterns -->
+```kotlin
+val pending = pendingTaskCount()      // REVIEW 且未作答的卡数；NEW / FREE 不计入
+if (pending > 0) 主文案「还有 N 张没作答」+「往下滑，回去把它们答完」
+else            主文案「今日任务完成！」（既有契约，逐字保持，不回归）
+```
 
-(To be filled by the team)
+播报（`cardSpeech` 的 `Page.Done` 分支）同口径分流。`pending > 0` 分支不得出现「今日任务完成」与 🎉。
 
----
+### 播报去重键必须随完成度变化
+
+完成卡的播报去重键为 `"$channel:$idx:done:${pending}"`。
+
+若用固定键，用户先听到「还有 3 张没作答」、回去答完再滑回完成卡时会**不再播报**「今日任务完成」。
+
+## 适老化硬约束
+
+- 反馈按钮高度 92dp；图标 40–44sp；词字随词长 42–64sp；点击目标不小于 48dp。
+- TTS 语速 0.85x。播报在**滑动停稳后**延迟约 200ms 触发，滑动进行中一律 `tts.stop()`（快速连滑不闪播）。
+- 关键语义不用 emoji 表达：作答按钮用 √ / × 字形（随字号缩放、无彩色表情歧义）。
+- 不做设置页、生词本、进度条。
 
 ## Common Mistakes
 
-<!-- Component-related mistakes your team has made -->
-
-(To be filled by the team)
+| 症状 | 根因 | 修法 |
+|---|---|---|
+| 引导文案方向相反 | 把「上滑 = 下一个」误用于「回看」 | 回看用「往下滑」，且该分支不渲染 `SwipeHint()` |
+| 有卡没答却播「今日任务完成」 | 用「滑到底」当完成判定 | 由 `pendingTaskCount()` 驱动分流 |
+| 答完再回完成卡听不到「完成」 | 播报去重键不随完成度变化 | 键里带上 `pending` |
+| 复习卡点一下就把答案念出来 | 点卡回调没按形态分流 | 调用点按 `mode` + `revealed` + `peeked` 路由到提示语 |

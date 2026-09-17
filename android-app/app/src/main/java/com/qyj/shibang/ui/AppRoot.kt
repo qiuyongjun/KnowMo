@@ -66,6 +66,10 @@ private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
  * 6. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
  * 7. 分区完成（§9.5，v5：毕业判定 days >= 15 与间隔封顶 30 解耦）→ 频道栏加 🎓，毕业词升 30 后不回退；
  *    「忘了」days=1 即时回退
+ * 8. 完成卡按队列完成度分流（v5 R7，§5.1）：feed 中仍有未作答复习卡时，不宣告「今日任务完成」，
+ *    改播未作答张数 + 「往下滑」（回看方向）引导；全部答完才回到 v4 文案。
+ *    **滑动全程开放**：不因未作答而设 userScrollEnabled=false 或任何拦截——跳过不写任何学习状态、
+ *    无债务风险，锁定会把「跳过」逼成「乱答」（design.md §1 决策，prd 中「经评审否决」）
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
@@ -99,21 +103,49 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
 
     fun termSpeech(t: Term) = "${t.text}。${t.tip}"
 
-    fun spokenKey(idx: Int, p: Page) = "$channel:$idx:" + when (p) {
-        is Page.TermPage -> p.t.id
-        Page.Done -> "done"
+    /** v5 R7 完成卡分流口径（design.md §5.1）：feed 中**形态为复习且未作答**的卡数。
+     *  新学卡无作答按钮、温故/自由刷卡属自由刷，均不计入。
+     *
+     *  ⚠️ 必须写成局部函数而非 `val`：这里读的是 `pages` / `revealed` 的 State 委托 getter，
+     *  每次调用都取当前值。若写成 `val`，`LaunchedEffect(pagerState, pages)` 的闭包会捕获旧值——
+     *  页面集合未变而仅发生作答（满 3 连击移除时不追加新卡）时该 effect 不重启，
+     *  滑到完成卡会播报过期张数。 */
+    fun pendingTaskCount(): Int = pages.count { p ->
+        p is Page.TermPage && p.mode == CardMode.REVIEW && revealed[p.seq] != true
     }
 
-    /** 停稳后播报文案（design.md §9 契约）：复习/温故卡未作答绝不念词的读音 */
+    /** v5 R7：「今天答了 M 张」= 已作答的复习卡数（队列维度，由 pages 推导，不依赖会话计数） */
+    fun answeredTaskCount(): Int = pages.count { p ->
+        p is Page.TermPage && p.mode == CardMode.REVIEW && revealed[p.seq] == true
+    }
+
+    fun spokenKey(idx: Int, p: Page) = "$channel:$idx:" + when (p) {
+        is Page.TermPage -> p.t.id
+        // 完成卡播报按「未作答张数」入键（v5 R7）：完成度变化后再滑到本卡要播新口径
+        // （否则首次到达播了「还有 N 张没作答」，答完回来不再播「今日任务完成」）
+        Page.Done -> "done:${pendingTaskCount()}"
+    }
+
+    /** 停稳后播报文案（design.md §9 契约）：复习/温故卡未作答绝不念词的读音。
+     *  v5 R7：完成卡按队列完成度分流——仍有未作答复习卡时不宣告「完成」，改为提示与引导。 */
     fun cardSpeech(p: Page): String = when (p) {
         is Page.TermPage -> when {
             p.mode == CardMode.NEW -> termSpeech(p.t)          // 新学：词 + 提示语，全展开
             revealed[p.seq] == true -> termSpeech(p.t)         // 已作答：词 + 提示语
             else -> "这个词，还记得它念什么吗？想一想，再按下面的按钮"
         }
-        Page.Done ->
-            "太棒了，今日任务完成！认识了${session.known}个，忘了${session.forgot}个。" +
-                "继续上滑，随便看看，温故知新。"
+        Page.Done -> {
+            val pending = pendingTaskCount()
+            if (pending > 0) {
+                // 往回看要**往下滑**（未作答卡在完成卡之前/上方，见 design.md §5.1），
+                // 不得说「上滑」——上滑是 index+1，方向相反
+                "还有${pending}张没作答。往下滑，回去把它们答完吧。"
+            } else {
+                // 全部复习卡作答完毕：维持 v4 原文案，逐字不回归
+                "太棒了，今日任务完成！认识了${session.known}个，忘了${session.forgot}个。" +
+                    "继续上滑，随便看看，温故知新。"
+            }
+        }
     }
 
     // 装载当日队列（repo 内 date 不符自动重建）：首次进入 = 断点恢复；切频道 = 回第一页
@@ -190,7 +222,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         if (p.qIndex >= 0) repo.markAnswered(channel, p.qIndex)   // 自由刷页 qIndex=-1 不落库
         if (known) {
             // 双层状态机（design.md §9.2）：连击层 +1（满 3 = 移除当日队列，不追加）；
-            // 间隔层仅满 3 时升级（1→3→7→15，受每日最多升一级闸门约束）
+            // 间隔层仅满 3 时升级（1→3→7→15→30，受每日最多升一级闸门约束）
             val (count, upgraded, daysAfter) = repo.markKnown(t.id)
             session = session.copy(known = session.known + 1)
             val (msg, spoken) = when (count) {
@@ -283,6 +315,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 Page.Done -> DoneCard(
                     known = session.known,
                     forgot = session.forgot,
+                    // v5 R7：按队列完成度分流（函数调用 → 每次重组读当前 pages/revealed）
+                    pending = pendingTaskCount(),
+                    answered = answeredTaskCount(),
                 )
             }
         }

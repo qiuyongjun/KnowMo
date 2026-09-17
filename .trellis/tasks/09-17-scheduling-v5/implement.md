@@ -15,7 +15,13 @@
    - AppRoot：`peeked` map（按 seq）；peek 回调只置 map 不写 repo；TermCard 调用点接线
 3. **prototype/index.html 契约同步**
    - 考试卡点按不播读音（播「再想一想」）；加「想看答案」按钮（展开不写状态——原型本就无持久层，只改交互表现）
-4. **验证**
+   - 完成卡分流：以 `.fb-actions:not([data-done])` 统计未作答复习卡数，>0 时改文案与播报（与 App 同一口径）
+4. **AppRoot.kt + DoneCard.kt 完成卡分流（R7，design.md §5.1）**
+   - AppRoot：新增局部**函数** `pendingTaskCount()`（`pages` 中 `mode == CardMode.REVIEW && revealed[seq] != true`）与已作答张数（写成 `val` 会被旧闭包捕获，见 §5.1）
+   - `cardSpeech` 的 `Page.Done` 分支按 pending 分流；`DoneCard(...)` 调用点传 pending / answered
+   - DoneCard：增 `pending` / `answered` 参数；`pending == 0` 分支逐字保持现状（不回归）；`pending > 0` 分支按 §5.1 文案，且该分支不显示 🎉 与 `SwipeHint`
+   - **不新增滑动锁定**：不得给 `VerticalPager` 设 `userScrollEnabled = false`（R7 显式要求）
+5. **验证**
    - `cd android-app && ./gradlew assembleDebug`（Windows: `gradlew.bat assembleDebug`）
    - 手动场景走查（下）
 
@@ -30,6 +36,10 @@
 | 5 | 复习卡未作答点卡片 | TTS 只说「再想一想，想起来了吗？」 |
 | 6 | peek 后作答 | 走正常连击（peek 未写任何状态） |
 | 7 | 新学卡/已作答卡点按 | 重听行为不变 |
+| 8 | 滑过未作答复习卡直达完成卡 | 完成卡显示「还有 N 张没作答 / 今天答了 M 张 / 往下滑，回去把它们答完」；播报同口径，**不**出现「今日任务完成」；此时手指下滑可回到那张未作答卡并正常作答 |
+| 9 | 全部复习卡作答完毕再到完成卡 | 恢复「🎉 今日任务完成！/ 认识了 x 个，忘了 y 个 / 继续上滑，随便看看」与既有播报（无回归） |
+| 10 | 完成卡后继续上滑（自由刷） | 自由刷温故卡不计入未作答数；作答仍走双层状态机，完成卡文案不因此变化 |
+| 11 | 考试态未作答时上下滑动 | 滑动仍然可用，无锁定、无拦截（R7 显式契约） |
 
 ## 回滚点
 

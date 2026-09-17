@@ -116,7 +116,7 @@ body{background:#ECEFF1;font-family:"Microsoft YaHei","PingFang SC","Noto Sans S
   cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;transition:transform .08s;
 }
 .fb-btn:active{transform:scale(.96)}
-.fb-btn .fi{font-size:44px}
+.fb-btn .fi{font-size:46px;line-height:1;font-weight:900}
 .fb-known{background:var(--known)}
 .fb-forgot{background:var(--forgot)}
 /* v5 想看答案：弱权重小按钮（底色 surface、次级文字色），位于反馈按钮下一行 */
@@ -384,6 +384,8 @@ function renderFeed(){
   const total=q.length+1;                      /* 词条 + 完成卡 */
   const feed=document.getElementById("feed");
   feed.innerHTML=q.map((t,i)=>termCardHTML(t,i,total)).join("")+doneCardHTML(q.length+1,total);
+  /* v5 R7：完成卡文案按刚渲染出的 feed 完成度定稿（未作答复习卡数 > 0 则不宣告完成） */
+  updateDoneStats();
   feed.scrollTop=0;
   observeCards();
 }
@@ -412,8 +414,8 @@ function termCardHTML(t,idx,total){
     </div>`;
   const actions=isReview
     ? `<div class="fb-actions" id="fb-${t.id}">
-         <button class="fb-btn fb-known" onclick="reviewAnswer('${t.id}',true)"><span class="fi">😀</span>认识</button>
-         <button class="fb-btn fb-forgot" onclick="reviewAnswer('${t.id}',false)"><span class="fi">😕</span>忘了</button>
+         <button class="fb-btn fb-known" onclick="reviewAnswer('${t.id}',true)"><span class="fi">√</span>认识</button>
+         <button class="fb-btn fb-forgot" onclick="reviewAnswer('${t.id}',false)"><span class="fi">×</span>忘了</button>
          <button class="peek-btn" onclick="peekAnswer('${t.id}')">👀 想看答案</button>
        </div>`
     : `<div class="swipe-hint">上滑看下一个 ↑</div>`;
@@ -434,14 +436,34 @@ function doneCardHTML(idx,total){
       <span class="prog-text">第 ${idx} / ${total} 张</span>
       <span class="prog-bar"><span class="fill" style="width:100%"></span></span>
     </div>
-    <div class="done-card">
+    <div class="done-card" id="done-card">${doneCardInner()}</div>
+  </section>`;
+}
+/* v5 R7：完成卡分流（与 App 同一口径，design.md §5.1）
+   未作答数 = feed 中「形态为复习且未作答」的卡：已作答的复习卡 .fb-actions 已被结果区替换掉，
+   .fb-actions:not([data-done]) 恰为未作答复习卡；新学卡没有 .fb-actions（只有 swipe-hint），不计入 */
+function pendingReviewCount(){
+  return document.querySelectorAll(".fb-actions:not([data-done])").length;
+}
+function answeredReviewCount(){
+  return document.querySelectorAll(".fb-result").length;
+}
+function doneCardInner(){
+  const pending=pendingReviewCount();
+  if(pending>0){
+    /* 仍有未作答复习卡：不宣告「完成」，改为未作答张数 + 往回滑引导。
+       方向词必须是「往下滑」——未作答卡在本卡之前（上方），回看是下滑方向（上滑是下一张） */
+    return `
+      <div class="dt">还有 ${pending} 张没作答</div>
+      <div class="ds">今天答了 ${answeredReviewCount()} 张</div>
+      <div class="relisten">往下滑，回去把它们答完</div>`;
+  }
+  return `
       <div class="party">🎉</div>
       <div class="dt">今天学完啦！</div>
-      <div class="ds" id="done-stats">认识了 0 个，忘了 0 个（明天再来）</div>
+      <div class="ds" id="done-stats">认识了 ${state.session.known} 个，忘了 ${state.session.forgot} 个（明天再来）</div>
       <button class="btn btn-primary" data-say="从头再看一遍" onclick="replayFeed()">🔄 从头再看一遍</button>
-      <div class="relisten">明天记得再来学一会儿</div>
-    </div>
-  </section>`;
+      <div class="relisten">明天记得再来学一会儿</div>`;
 }
 function replayFeed(){
   state.session={known:0,forgot:0};
@@ -511,28 +533,41 @@ function reviewAnswer(id,known){
 }
 
 /* ==================== 完成卡统计 ==================== */
+/* v5 R7：每次作答后重算完成度（未作答张数变化 → 完成卡文案在「未答完」与「已完成」间切换） */
 function updateDoneStats(){
-  const el=document.getElementById("done-stats");
-  if(el) el.textContent=`认识了 ${state.session.known} 个，忘了 ${state.session.forgot} 个（明天再来）`;
+  const el=document.getElementById("done-card");
+  if(el) el.innerHTML=doneCardInner();
 }
 
 /* ==================== 自动朗读（进入视口） ==================== */
 let io=null;
 function onCardVisible(card){
   const id=card.dataset.term;
-  const key=state.channel+":"+id;
+  /* v5 R7：完成卡不能走通用「每卡一次」键（channel:undefined）——该键在完成卡首次可见时就被置位，
+     之后每次回访都被拦掉，答完所有复习卡再滑回本卡永远播不出「完成」。
+     故完成卡单独按「未作答张数」入键（与 App spokenKey 的 done:<pending> 对称）。 */
+  const done=!id && card.dataset.done;
+  const pending=done?pendingReviewCount():0;
+  const key=done?state.channel+":done:"+pending:state.channel+":"+id;
   if(state.spokenSet[key]) return;
   state.spokenSet[key]=true;
-  if(id){
+  if(done){
+    /* v5 R7：完成卡按完成度分流播报（与 App 同一口径，design.md §5.1）。
+       未作答张数变化 → 键变化 → 回到本卡播新口径（不会重复念同一个数） */
+    if(pending>0){
+      speak("还有 "+pending+" 张没作答。往下滑，回去把它们答完吧。");
+    }else{
+      speak("太棒了，今天的内容学完了！认识了"+state.session.known+"个，忘了"+state.session.forgot+"个。明天记得再来。");
+    }
+  }else if(id){
     const t=TERM_MAP[id];
     if(t.kind==="review"){
-      speak(t.text+"。还记得它念什么吗？想一想，再按下面的按钮");
+      /* v5 防泄题：播报不念词、不念提示（与安卓 cardSpeech 一致）。
+         念出 t.text 等于把答案念给用户，考试卡就失去"考回忆"的意义 */
+      speak("这个词，还记得它念什么吗？想一想，再按下面的按钮");
     }else{
       speak(termFullText(t));
     }
-  }else if(card.dataset.done && !state.spokenSet[state.channel+":done"]){
-    state.spokenSet[state.channel+":done"]=true;
-    speak("太棒了，今天的内容学完了！认识了"+state.session.known+"个，忘了"+state.session.forgot+"个。明天记得再来。");
   }
 }
 function observeCards(){
