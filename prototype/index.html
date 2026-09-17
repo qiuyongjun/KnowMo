@@ -12,7 +12,10 @@
     · 含设置页与生词本入口（工程版：已按决策删除）
     · 无持久层（工程版：SharedPreferences + 连击/间隔双层状态机）
   v5（09-17-scheduling-v5）已同步的交互契约：复习卡未作答点按不泄读音（播「再想一想」）、
-  「想看答案」peek 求助按钮（展开不写状态）、间隔阶梯 1→3→7→15→30（毕业判定 15 为工程版概念，原型仅演示阶梯）。
+  「想看答案」peek 求助按钮（展开不写状态）、间隔阶梯 1→3→7→15→30（毕业判定 15 为工程版概念，原型仅演示阶梯）、
+  **完成卡「真做完才出现」**（待处理数为 0 才渲染收尾页，否则队尾就是最后一张待处理卡）、
+  **滑过即回收**（滚动停稳后把已滚过视口上方且仍未处理的卡移到队尾 = 前向消化，不写任何状态；
+  跳过的卡只是「稍后」而非「放弃」）、完成卡单一形态（战果：今天学完了 N 个词 · 认识了 x 次，忘了 y 次）。
   这些差异不是缺陷，请勿据此反推工程版行为。
   工程实现的当前状态以 .trellis/tasks/09-17-elderly-literacy-app/prd.md 为准。
 -->
@@ -381,15 +384,16 @@ function switchChannel(id){
 }
 function renderFeed(){
   const q=buildQueue(state.channel);
-  const total=q.length+1;                      /* 词条 + 完成卡 */
   const feed=document.getElementById("feed");
-  feed.innerHTML=q.map((t,i)=>termCardHTML(t,i,total)).join("")+doneCardHTML(q.length+1,total);
-  /* v5 R7：完成卡文案按刚渲染出的 feed 完成度定稿（未作答复习卡数 > 0 则不宣告完成） */
-  updateDoneStats();
+  feed.innerHTML=q.map(t=>termCardHTML(t)).join("");
+  /* v5 R7：完成卡**条件出现**——待处理数为 0 才追加收尾页，否则队尾就是最后一张待处理卡
+     （feed 里没有任何含完成语义的页，「滑到底」≠「做完了」） */
+  refreshDoneCard();
+  renumberCards();
   feed.scrollTop=0;
   observeCards();
 }
-function termCardHTML(t,idx,total){
+function termCardHTML(t){
   const isReview=t.kind==="review";
   const badge=isReview
     ? `<span class="badge review">🔁 复习 · 距上次 ${t.days} 天</span>`
@@ -419,58 +423,100 @@ function termCardHTML(t,idx,total){
          <button class="peek-btn" onclick="peekAnswer('${t.id}')">👀 想看答案</button>
        </div>`
     : `<div class="swipe-hint">上滑看下一个 ↑</div>`;
+  /* data-pending：待处理标记（与 App §5.1 口径对齐）——未作答的复习卡 + 尚未看过的温故卡
+     （「看过」= onCardVisible 触发过）。作答/看过时置 0，用来判定完成卡是否该出现 */
   return `
-  <section class="fcard" data-term="${t.id}" data-idx="${idx+1}">
+  <section class="fcard" data-term="${t.id}" data-kind="${isReview?"review":"new"}" data-pending="1" data-idx="">
     <div class="progress-row">
-      <span class="prog-text">第 ${idx+1} / ${total} 张</span>
-      <span class="prog-bar"><span class="fill" style="width:${(idx+1)/total*100}%"></span></span>
+      <span class="prog-text"></span>
+      <span class="prog-bar"><span class="fill"></span></span>
     </div>
     ${body}
     ${actions}
   </section>`;
 }
-function doneCardHTML(idx,total){
+function doneCardHTML(){
   return `
-  <section class="fcard" data-done="1" data-idx="${idx}">
+  <section class="fcard" data-done="1" data-idx="">
     <div class="progress-row">
-      <span class="prog-text">第 ${idx} / ${total} 张</span>
-      <span class="prog-bar"><span class="fill" style="width:100%"></span></span>
+      <span class="prog-text"></span>
+      <span class="prog-bar"><span class="fill"></span></span>
     </div>
     <div class="done-card" id="done-card">${doneCardInner()}</div>
   </section>`;
 }
-/* v5 R7：完成卡分流（与 App 同一口径，design.md §5.1）
-   未作答数 = feed 中「形态为复习且未作答」的卡：已作答的复习卡 .fb-actions 已被结果区替换掉，
-   .fb-actions:not([data-done]) 恰为未作答复习卡；新学卡没有 .fb-actions（只有 swipe-hint），不计入 */
-function pendingReviewCount(){
-  return document.querySelectorAll(".fb-actions:not([data-done])").length;
+/* v5 R7 待处理口径（与 App §5.1 对齐）：未作答的复习卡 + 尚未看过的温故卡
+   （原型的「看过」= onCardVisible 触发过；温故/自由刷页在原型里不落队列，故不含） */
+function pendingCardCount(){
+  return document.querySelectorAll(".fcard[data-pending='1']").length;
 }
-function answeredReviewCount(){
-  return document.querySelectorAll(".fb-result").length;
+/* N = 任务区去重词数（与 App §5.3 同口径）：回收只移动不删除，故这个数在当日是恒定的 */
+function taskWordCount(){
+  const ids=new Set();
+  document.querySelectorAll(".fcard[data-term]").forEach(c=>ids.add(c.dataset.term));
+  return ids.size;
 }
+/* v5 R7 完成卡单一形态（条件出现后不存在「还有 N 张没作答」分支，不再按完成度分流） */
 function doneCardInner(){
-  const pending=pendingReviewCount();
-  if(pending>0){
-    /* 仍有未作答复习卡：不宣告「完成」，改为未作答张数 + 往回滑引导。
-       方向词必须是「往下滑」——未作答卡在本卡之前（上方），回看是下滑方向（上滑是下一张） */
-    return `
-      <div class="dt">还有 ${pending} 张没作答</div>
-      <div class="ds">今天答了 ${answeredReviewCount()} 张</div>
-      <div class="relisten">往下滑，回去把它们答完</div>`;
-  }
   return `
       <div class="party">🎉</div>
-      <div class="dt">今天学完啦！</div>
-      <div class="ds" id="done-stats">认识了 ${state.session.known} 个，忘了 ${state.session.forgot} 个（明天再来）</div>
-      <button class="btn btn-primary" data-say="从头再看一遍" onclick="replayFeed()">🔄 从头再看一遍</button>
-      <div class="relisten">明天记得再来学一会儿</div>`;
+      <div class="dt">今日任务完成！</div>
+      <div class="ds">今天学完了 ${taskWordCount()} 个词 · 认识了 ${state.session.known} 次，忘了 ${state.session.forgot} 次</div>
+      <div class="dt" style="font-size:calc(24px * var(--fscale));color:var(--primary)">继续上滑，随便看看</div>
+      <div class="swipe-hint">上滑看下一个 ↑</div>`;
 }
-function replayFeed(){
-  state.session={known:0,forgot:0};
-  state.spokenSet={};
-  renderFeed();
-  speak("好，我们从头再看一遍");
-  updateDoneStats();
+/* v5 R7 完成卡「真做完才出现」：待处理数为 0 且无收尾页 → 追加到队尾；反之（保底）移除 */
+function refreshDoneCard(){
+  const feed=document.getElementById("feed");
+  const present=feed.querySelector(".fcard[data-done]");
+  const pending=pendingCardCount();
+  if(pending===0 && !present){
+    feed.insertAdjacentHTML("beforeend",doneCardHTML());
+    const d=feed.querySelector(".fcard[data-done]");
+    if(io && d) io.observe(d);                 /* 新加入的收尾页也要能被自动播报 */
+  }else if(pending>0 && present){
+    if(io) io.unobserve(present);
+    present.remove();
+  }
+  renumberCards();
+}
+/* 序号/进度行随回收与完成卡条件出现重算（DOM 顺序即当前队序） */
+function renumberCards(){
+  const cards=document.querySelectorAll("#feed .fcard");
+  const total=cards.length;
+  cards.forEach((card,i)=>{
+    const idx=i+1;
+    card.dataset.idx=idx;
+    const txt=card.querySelector(".prog-text");
+    if(txt) txt.textContent="第 "+idx+" / "+total+" 张";
+    const fill=card.querySelector(".prog-bar .fill");
+    if(fill) fill.style.width=(idx/total*100)+"%";
+  });
+}
+/* v5 R7 前向消化（滑过即回收，与 App §5.2 同一契约）：滚动停稳后，把「已完全滚到视口上方
+   且仍待处理」的卡按原相对顺序移到队尾（完成卡之前）。滑过 = 稍后，不是放弃；
+   只改 DOM 顺序，不写任何学习状态（作答/连击/间隔全不动）。 */
+function recycleSkippedCards(){
+  const feed=document.getElementById("feed");
+  const done=feed.querySelector(".fcard[data-done]");
+  const top=feed.getBoundingClientRect().top;
+  const skipped=[];
+  let movedH=0;
+  feed.querySelectorAll(".fcard[data-term]").forEach(card=>{
+    if(card.dataset.pending!=="1") return;                    /* 只回收仍待处理的卡 */
+    const r=card.getBoundingClientRect();
+    if(r.bottom<=top+1){ skipped.push(card); movedH+=r.height; }
+  });
+  if(!skipped.length) return;
+  /* 位移补偿基准必须取**变更前**的 scrollTop：Chrome/Firefox 默认开启 CSS scroll
+     anchoring，会在 DOM 变更时按锚点自动补一次；若在变更后再读 scrollTop 再减，
+     等于二次扣减 → 当前卡反而跳位。先取值、后移动、再显式赋值，两种浏览器行为下都正确。 */
+  const before=feed.scrollTop;
+  /* insertBefore(…, done)：完成卡之前；无完成卡则 done 为 null = appendChild 到队列末尾 */
+  skipped.forEach(c=>feed.insertBefore(c,done));
+  /* 抵消上方内容被移走造成的位移，当前显示页不错位（等价于 App 侧给 pager 传稳定 key） */
+  feed.scrollTop=Math.max(0,before-movedH);
+  renumberCards();
 }
 
 /* 词条朗读：词 + 用途。
@@ -508,7 +554,9 @@ function reviewAnswer(id,known){
   const t=TERM_MAP[id];
   const fb=document.getElementById("fb-"+id);
   if(!fb || fb.dataset.done) return;           /* 防重复点按 */
+  const card=fb.closest(".fcard");
   fb.dataset.done="1";
+  if(card) card.dataset.pending="0";           /* v5 R7：作答 = 该卡处理完毕，退出待处理 */
   document.getElementById("py-"+id).classList.remove("hidden");
   document.getElementById("tip-"+id).classList.remove("hidden");
   let resultHTML, feedbackText;
@@ -528,37 +576,41 @@ function reviewAnswer(id,known){
     updateWordbookBadge();
   }
   fb.outerHTML=resultHTML+`<div class="swipe-hint">上滑看下一个 ↑</div>`;
-  updateDoneStats();
+  /* v5 R7：作答可能让待处理数归零 → 完成卡此时才出现在队尾；仍待处理则（保底）不出现 */
+  refreshDoneCard();
   speak(feedbackText);
 }
 
-/* ==================== 完成卡统计 ==================== */
-/* v5 R7：每次作答后重算完成度（未作答张数变化 → 完成卡文案在「未答完」与「已完成」间切换） */
-function updateDoneStats(){
-  const el=document.getElementById("done-card");
-  if(el) el.innerHTML=doneCardInner();
+/* ==================== 滑过即回收（前向消化） ==================== */
+/* v5 R7：滚动停稳（200ms 内无滚动事件）后，把「已完全滚到视口上方且仍待处理」的卡回收队尾
+   （完成卡之前）——与 App §5.2 同一契约，故「身前永远是没答完的卡」，一路往上滑就能做完、
+   不需要回看；只改 DOM 顺序，不写任何学习状态（作答/连击/间隔全不动）。 */
+let scrollSettleTimer=null;
+function onFeedScroll(){
+  clearTimeout(scrollSettleTimer);
+  scrollSettleTimer=setTimeout(recycleSkippedCards,200);
 }
+document.getElementById("feed").addEventListener("scroll",onFeedScroll);
 
 /* ==================== 自动朗读（进入视口） ==================== */
 let io=null;
 function onCardVisible(card){
   const id=card.dataset.term;
-  /* v5 R7：完成卡不能走通用「每卡一次」键（channel:undefined）——该键在完成卡首次可见时就被置位，
-     之后每次回访都被拦掉，答完所有复习卡再滑回本卡永远播不出「完成」。
-     故完成卡单独按「未作答张数」入键（与 App spokenKey 的 done:<pending> 对称）。 */
-  const done=!id && card.dataset.done;
-  const pending=done?pendingReviewCount():0;
-  const key=done?state.channel+":done:"+pending:state.channel+":"+id;
+  /* v5 R7：完成卡单一形态，故按**页身份**入键（channel:done / channel:词id）——下标会随
+     「滑过即回收」变化，用下标入键会重复播报；完成卡一旦出现就不会再消失。 */
+  const done=!id && !!card.dataset.done;
+  /* 待处理口径（与 App §5.1 对齐）：未作答的复习卡 + 尚未看过的温故卡（「看过」= 本函数触发过）。
+     温故/新学卡看过即处理完毕；复习卡的处理完毕只认作答（reviewAnswer）。 */
+  if(!done && card.dataset.pending==="1" && card.dataset.kind==="new"){
+    card.dataset.pending="0";
+    refreshDoneCard();                 /* 待处理数可能归零 → 完成卡此时才出现在队尾 */
+  }
+  const key=done?state.channel+":done":state.channel+":"+id;
   if(state.spokenSet[key]) return;
   state.spokenSet[key]=true;
   if(done){
-    /* v5 R7：完成卡按完成度分流播报（与 App 同一口径，design.md §5.1）。
-       未作答张数变化 → 键变化 → 回到本卡播新口径（不会重复念同一个数） */
-    if(pending>0){
-      speak("还有 "+pending+" 张没作答。往下滑，回去把它们答完吧。");
-    }else{
-      speak("太棒了，今天的内容学完了！认识了"+state.session.known+"个，忘了"+state.session.forgot+"个。明天记得再来。");
-    }
+    /* v5 R7：完成卡播报回到单一形态（条件出现后不存在「还有 N 张没作答」分支） */
+    speak("太棒了，今日任务完成！今天学完了"+taskWordCount()+"个词，认识了"+state.session.known+"次，忘了"+state.session.forgot+"次。继续上滑，随便看看，温故知新。");
   }else if(id){
     const t=TERM_MAP[id];
     if(t.kind==="review"){

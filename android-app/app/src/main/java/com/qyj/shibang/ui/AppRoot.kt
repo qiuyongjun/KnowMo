@@ -49,7 +49,7 @@ private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
 
 /**
  * 根界面：抖音式垂直 feed（v4 第三轮定稿：连击 + 间隔双层模型，design.md §9）。
- * 交互契约（见任务 design.md §9）：
+ * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.3）：
  * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播
  * 2. 复习/温故卡未作答只念"还记得它念什么吗"，绝不念词的读音；认识/忘了后才念词+提示
  *    （v5 防泄题：考试态未作答**点卡片**也只播「再想一想，想起来了吗？」，分流在 TermCard 调用点
@@ -66,10 +66,14 @@ private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
  * 6. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
  * 7. 分区完成（§9.5，v5：毕业判定 days >= 15 与间隔封顶 30 解耦）→ 频道栏加 🎓，毕业词升 30 后不回退；
  *    「忘了」days=1 即时回退
- * 8. 完成卡按队列完成度分流（v5 R7，§5.1）：feed 中仍有未作答复习卡时，不宣告「今日任务完成」，
- *    改播未作答张数 + 「往下滑」（回看方向）引导；全部答完才回到 v4 文案。
- *    **滑动全程开放**：不因未作答而设 userScrollEnabled=false 或任何拦截——跳过不写任何学习状态、
- *    无债务风险，锁定会把「跳过」逼成「乱答」（design.md §1 决策，prd 中「经评审否决」）
+ * 8. 完成卡「真做完才出现」（v5 R7，§5.1）：`Page.Done` 仅在**待处理数 == 0** 时存在于 feed 尾；
+ *    未做完时队尾就是最后一张待处理卡，feed 里没有任何含完成语义的页。文案与播报回到**单一形态**，
+ *    战果用当日持久计数（§5.3，跨重启不归零）。
+ *    **前向消化**（§5.2）：向前停稳时把 `[lastSettled, 当前页)` 里仍待处理的卡回收队尾，
+ *    于是用户身前永远是没答完的卡、一路往上滑就能做完、不需要回看；回收**不写任何学习状态**、
+ *    不调 repo（与数据上的「跳过」完全等价——跳过是「稍后」，不是「放弃」）。
+ *    **滑动全程开放**：不因未作答而设 userScrollEnabled=false 或任何拦截——锁定会把「跳过」
+ *    逼成「乱答」，污染连击层与 lapses（design.md §1 决策，prd 中「经评审否决」）
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
@@ -77,16 +81,18 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     var session by remember { mutableStateOf(SessionStats()) }
     val revealed = remember { mutableStateMapOf<Int, Boolean>() }      // seq -> 复习/温故卡是否已作答展开（按出现记，不按词记）
     val peeked = remember { mutableStateMapOf<Int, Boolean>() }        // seq -> 考试卡「想看答案」求助展开（v5：会话态不持久化，不写任何学习状态）
+    val taught = remember { mutableStateMapOf<Int, Boolean>() }        // seq -> 新词卡当日是否已教读（v5 R7 待处理口径；装载时按 repo.wasSeenToday 恢复）
     val results = remember { mutableStateMapOf<Int, String>() }        // seq -> 反馈文案
     var seqGen by remember { mutableStateOf(0) }                       // 页出现序号发生器（只在 effect/回调中递增）
-    val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重（频道+页序+词）
+    val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重（频道 + 页身份）
     var charFor by remember { mutableStateOf<TermChar?>(null) }
     var graduated by remember { mutableStateOf(emptySet<String>()) }   // 已完成分区（频道栏 🎓）
 
-    // feed 页面：当日队列 + 完成卡 + 自由刷追加页（无限流）
+    // feed 页面：当日队列 + 完成卡（条件存在）+ 自由刷追加页（无限流）
     var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
     var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 自由刷池：顺序抽取，池空重洗
     var restoreTo by remember { mutableStateOf<Int?>(null) }             // 断点/频道切换的目标页
+    var lastSettled by remember { mutableStateOf(0) }                    // v5 R7 回收锚点：上一次停稳的页下标（§5.2）
     var pendingAnnounce by remember { mutableStateOf<String?>(null) }    // 频道播报（与首卡合并成一句播）
     var firstChannelLoad by remember { mutableStateOf(true) }
 
@@ -103,68 +109,119 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
 
     fun termSpeech(t: Term) = "${t.text}。${t.tip}"
 
-    /** v5 R7 完成卡分流口径（design.md §5.1）：feed 中**形态为复习且未作答**的卡数。
-     *  新学卡无作答按钮、温故/自由刷卡属自由刷，均不计入。
+    /** v5 R7 待处理（pending）口径（design.md §5.1）：新词卡**当日未被教读** 或 复习卡**未作答**；
+     *  温故/自由刷（FREE）卡恒不计入（自由刷是完成之后的消遣，不属于当日任务）。 */
+    fun isPending(p: Page): Boolean = p is Page.TermPage && when (p.mode) {
+        CardMode.NEW -> taught[p.seq] != true
+        CardMode.REVIEW -> revealed[p.seq] != true
+        CardMode.FREE -> false
+    }
+
+    /** 待处理任务卡数：完成卡「条件存在」的判据。
      *
-     *  ⚠️ 必须写成局部函数而非 `val`：这里读的是 `pages` / `revealed` 的 State 委托 getter，
-     *  每次调用都取当前值。若写成 `val`，`LaunchedEffect(pagerState, pages)` 的闭包会捕获旧值——
-     *  页面集合未变而仅发生作答（满 3 连击移除时不追加新卡）时该 effect 不重启，
-     *  滑到完成卡会播报过期张数。 */
-    fun pendingTaskCount(): Int = pages.count { p ->
-        p is Page.TermPage && p.mode == CardMode.REVIEW && revealed[p.seq] != true
+     *  ⚠️ 必须写成局部函数而非 `val`：这里读的是 `pages` / `taught` / `revealed` 的 State 委托 getter，
+     *  每次调用都取当前值。若写成 `val`，key 不含 `pages` 的 effect 闭包会捕获旧值——
+     *  页面集合未变而仅发生作答时该 effect 不重启，滑到完成卡会算出过期张数。 */
+    fun pendingTaskCount(): Int = pages.count { isPending(it) }
+
+    /** frontier = 第一张待处理卡的下标（无待处理卡时取完成卡下标；都没有则 0）。
+     *  不变量（§5.2）：frontier 之前全是已处理卡、frontier 起全是待处理卡，用户永远站在 frontier 上。
+     *  断点与回收锚点都用它——本模型里「在哪儿」就等于「做到哪儿了」。 */
+    fun frontierIndex(): Int {
+        val firstPending = pages.indexOfFirst { isPending(it) }
+        if (firstPending >= 0) return firstPending
+        val doneIdx = pages.indexOfFirst { it is Page.Done }
+        return if (doneIdx >= 0) doneIdx else 0
     }
 
-    /** v5 R7：「今天答了 M 张」= 已作答的复习卡数（队列维度，由 pages 推导，不依赖会话计数） */
-    fun answeredTaskCount(): Int = pages.count { p ->
-        p is Page.TermPage && p.mode == CardMode.REVIEW && revealed[p.seq] == true
+    /** 任务区去重词数 = 完成卡战果里的 N（§5.3：N = 任务区去重词数）。自由刷页不计入。 */
+    fun taskWordCount(): Int = pages.asSequence()
+        .filterIsInstance<Page.TermPage>()
+        .filter { it.mode != CardMode.FREE }
+        .map { it.t.id }
+        .distinct()
+        .count()
+
+    /** v5 R7 完成卡「条件出现」（§5.1）：`pending == 0` 且还没有完成卡 → 追加到任务区末尾；
+     *  反向保底（`pending > 0` 且完成卡还在队尾、其后无自由刷页）→ 移除。
+     *  单调性靠调用点保证：装载后、每次 `answer()` 后、追加考核卡后各调一次。 */
+    fun syncDonePage() {
+        val pending = pendingTaskCount()
+        val doneIdx = pages.indexOfFirst { it is Page.Done }
+        when {
+            pending == 0 && doneIdx < 0 -> pages = pages + Page.Done
+            pending > 0 && doneIdx >= 0 && doneIdx == pages.lastIndex ->
+                pages = pages.filterNot { it is Page.Done }
+        }
     }
 
-    fun spokenKey(idx: Int, p: Page) = "$channel:$idx:" + when (p) {
-        is Page.TermPage -> p.t.id
-        // 完成卡播报按「未作答张数」入键（v5 R7）：完成度变化后再滑到本卡要播新口径
-        // （否则首次到达播了「还有 N 张没作答」，答完回来不再播「今日任务完成」）
-        Page.Done -> "done:${pendingTaskCount()}"
+    /** v5 R7 前向消化（§5.2）：把 `[from, to)` 里**仍待处理**的卡按原相对顺序移到队尾（完成卡之前）。
+     *  只改 `pages` 顺序：不碰 `revealed` / `peeked` / `results`（状态按 seq 跟着卡走），
+     *  不调 repo（连击、间隔、answered、持久化队列顺序全不动）——「滑过」与「跳过」数据上完全等价。
+     *  返回回收张数（回收后当前页下标会前移这么多）。 */
+    fun recycleSkipped(from: Int, to: Int): Int {
+        if (to <= from) return 0
+        val moved = ArrayList<Page>()
+        val kept = ArrayList<Page>(pages.size)
+        pages.forEachIndexed { idx, p ->
+            if (idx >= from && idx < to && isPending(p)) moved.add(p) else kept.add(p)
+        }
+        if (moved.isEmpty()) return 0
+        val doneIdx = kept.indexOfFirst { it is Page.Done }
+        val insertAt = if (doneIdx >= 0) doneIdx else kept.size
+        pages = kept.toMutableList().apply { addAll(insertAt, moved) }
+        return moved.size
+    }
+
+    /** 自动朗读去重键：按**页身份**（seq）而非下标——回收/追加会改变下标，用下标入键会重复播报。
+     *  完成卡回到单一形态（§5.1），故用 `channel:done` 即可（完成卡一旦出现就不会再消失）。 */
+    fun spokenKey(p: Page) = "$channel:" + when (p) {
+        is Page.TermPage -> "seq:${p.seq}"
+        Page.Done -> "done"
     }
 
     /** 停稳后播报文案（design.md §9 契约）：复习/温故卡未作答绝不念词的读音。
-     *  v5 R7：完成卡按队列完成度分流——仍有未作答复习卡时不宣告「完成」，改为提示与引导。 */
+     *  v5 R7：完成卡回到**单一形态**（条件出现后不存在「还没答完」的完成卡，故不再分流）。 */
     fun cardSpeech(p: Page): String = when (p) {
         is Page.TermPage -> when {
             p.mode == CardMode.NEW -> termSpeech(p.t)          // 新学：词 + 提示语，全展开
             revealed[p.seq] == true -> termSpeech(p.t)         // 已作答：词 + 提示语
             else -> "这个词，还记得它念什么吗？想一想，再按下面的按钮"
         }
-        Page.Done -> {
-            val pending = pendingTaskCount()
-            if (pending > 0) {
-                // 往回看要**往下滑**（未作答卡在完成卡之前/上方，见 design.md §5.1），
-                // 不得说「上滑」——上滑是 index+1，方向相反
-                "还有${pending}张没作答。往下滑，回去把它们答完吧。"
-            } else {
-                // 全部复习卡作答完毕：维持 v4 原文案，逐字不回归
-                "太棒了，今日任务完成！认识了${session.known}个，忘了${session.forgot}个。" +
-                    "继续上滑，随便看看，温故知新。"
-            }
-        }
+        Page.Done ->
+            "太棒了，今日任务完成！今天学完了${taskWordCount()}个词，" +
+                "认识了${session.known}次，忘了${session.forgot}次。" +
+                "继续上滑，随便看看，温故知新。"
     }
 
-    // 装载当日队列（repo 内 date 不符自动重建）：首次进入 = 断点恢复；切频道 = 回第一页
+    // 装载当日队列（repo 内 date 不符自动重建）：进入 / 切频道都回到 frontier（= 断点）
     LaunchedEffect(channel) {
         val announce = !firstChannelLoad
         firstChannelLoad = false
         val q = repo.ensureQueue(channel)
-        pages = q.queue.mapIndexed { i, id ->
-            val t = termById(id) ?: return@mapIndexed null
+        val taskPages = q.queue.mapIndexedNotNull { i, id ->
+            val t = termById(id) ?: return@mapIndexedNotNull null
             val mode = if (q.modes[i] == StudyRepository.MODE_NEW) CardMode.NEW else CardMode.REVIEW
             val seq = nextSeq()
             // 断点恢复：按该卡实例的 answered[i] 逐卡恢复展开态（design.md §9.1）。
             // 不按词级 lastSeen 判定——v4 同词多卡，词级判定会把剩余连击考核卡一并展开，重启后卡死
             if (q.answered[i]) revealed[seq] = true
+            // v5 R7：新词卡当日已教读过（上一会话 markSeen）→ 不算待处理。教读态不持久化，
+            // 按当日 seen 集合恢复（wasSeenToday），否则重启后同一张新词卡会被再算一次待处理
+            if (mode == CardMode.NEW && repo.wasSeenToday(id)) taught[seq] = true
             Page.TermPage(t, mode, seq, i)
-        }.filterNotNull() + Page.Done
+        }
+        // v5 R7 稳定分区（§5.2，Kotlin partition 稳定）：已处理在前、待处理在后（各自保持原相对顺序），
+        // 把上次会话里「被滑过但未回收」的卡归位到 frontier 之后——否则重启后身后留着待处理卡，
+        // 用户走到队尾真的卡死（身后有活但走不回去）
+        val (processed, pending) = taskPages.partition { !isPending(it) }
+        pages = processed + pending
         freePool = emptyList()
         spokenKeys.clear()
-        restoreTo = if (announce) 0 else q.position
+        syncDonePage()                       // 完成卡条件出现：pending == 0 才有收尾页
+        lastSettled = frontierIndex()        // 回收锚点 = frontier
+        restoreTo = lastSettled              // 断点 = frontier
+        session = SessionStats(repo.todayKnown(), repo.todayForgot())   // 战果当日持久口径（§5.3）
         if (announce) pendingAnnounce = "换到${sceneName(channel)}频道。"
     }
 
@@ -193,21 +250,27 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         if (extra.isNotEmpty()) pages = pages + extra
     }
 
-    /** 该词未被移除（当日连击 <3）时追加到持久化队列尾，并在 feed 完成卡前插入一张复习卡（当天再见）。
+    /** 该词未被移除（当日连击 <3）时追加到持久化队列尾，并在 feed「任务区末尾」插入一张复习卡（当天再见）。
+     *  ⚠️ 插入点 = 完成卡下标；完成卡在 v5 是**条件存在**（未做完时根本不在 `pages` 里），
+     *  此时 `indexOfFirst` 返回 -1，必须落到 `pages.size`（任务区末尾）——若沿用旧写法
+     *  `coerceAtLeast(0)`，-1 会变成 0 把新卡插到**队首**（用户身后），前向可达性直接破掉。
      *  repo.appendQueue 追加成功返回队尾下标（作为该卡的 qIndex，markAnswered 用）；已移除返回 -1 不插入。 */
     fun appendReviewCard(t: Term) {
         val qIndex = repo.appendQueue(channel, t.id)
         if (qIndex >= 0) {
+            val doneIdx = pages.indexOfFirst { it is Page.Done }
+            val insertAt = if (doneIdx >= 0) doneIdx else pages.size
             pages = pages.toMutableList().apply {
-                add(indexOfFirst { it is Page.Done }.coerceAtLeast(0), Page.TermPage(t, CardMode.REVIEW, nextSeq(), qIndex))
+                add(insertAt, Page.TermPage(t, CardMode.REVIEW, nextSeq(), qIndex))
             }
         }
     }
 
-    // 翻页落库：保存当日断点 + 临近完成卡（差一页）预追加自由刷页
+    // 翻页落库：保存当日断点（= frontier）+ 临近完成卡（差一页）预追加自由刷页。
+    // 完成卡条件存在（§5.1）：doneIdx < 0 时不追加——未做完时队尾是最后一张待处理卡，不是收尾页
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage }.collect { idx ->
-            repo.saveQueuePosition(channel, idx)
+            repo.saveQueuePosition(channel, frontierIndex())
             val doneIdx = pages.indexOfFirst { it is Page.Done }
             if (doneIdx >= 0 && idx >= doneIdx - 1) appendFreePages(FREE_BATCH)
         }
@@ -244,11 +307,15 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         // 自由刷（Done 之后）不追加：插入点在完成卡之前 = 已滑过的位置（还会引发 pager 错位），
         // 当天再见由自由刷池循环自然覆盖，次日回池由 days=1 + buildQueue 保证（design.md §9.4）
         if (p.mode != CardMode.FREE) appendReviewCard(t)
+        // v5 R7 完成卡条件出现：答完最后一张待处理卡 → 完成卡此时才出现在队尾
+        syncDonePage()
     }
 
-    // 滑动即播（design.md §9 契约）：isScrollInProgress=true 期间不播；
-    // 停稳后 delay ~200ms 再播，期间又开始滑则取消——快速连滑中间卡不闪播
-    LaunchedEffect(pagerState, pages) {
+    // 滑动即播（design.md §9 契约）+ v5 R7 前向消化（§5.2）。
+    // ⚠️ key 只有 pagerState（**去掉 pages**）：回收与追加都在本 effect 体内改 `pages`，
+    //    若 `pages` 还是 key，effect 会执行到一半被自己重启掉（回收了但没播报）。
+    //    `pages` 在 collect 体内读 State 委托 getter 即最新值。
+    LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage to pagerState.isScrollInProgress }
             .collect { (idx, scrolling) ->
                 if (scrolling) {
@@ -259,12 +326,20 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 if (pagerState.isScrollInProgress) return@collect   // 200ms 内又开始滑了
                 if (pagerState.currentPage != idx) return@collect   // 迟到的旧页事件（跳页/连滑已完成）：交给新事件播报，防错位闪播
                 if (restoreTo != null) return@collect               // 断点跳页完成前不播，防错位闪播
+                // 回收会移动列表项使下标失效，但页对象身份不变 → 先取页对象，后回收（§5.2）
                 val p = pages.getOrNull(idx) ?: return@collect
-                if (!spokenKeys.add(spokenKey(idx, p))) return@collect
+                // v5 R7 前向消化：向前停稳 → 把 [lastSettled, idx) 里仍待处理的卡回收队尾；
+                // 往回滑（idx < lastSettled）与跳页只移动锚点、不回收（身后只可能是已处理卡）
+                lastSettled = if (idx > lastSettled) idx - recycleSkipped(lastSettled, idx) else idx
+                if (!spokenKeys.add(spokenKey(p))) return@collect
                 // 新词卡首次停稳播报 = 当日首次教读：markSeen 幂等，返回 true 才追加该词的
-                // 复习卡到队尾（开始当日连击考核，design.md §9.2）；教读不写 TermState
-                if (p is Page.TermPage && p.mode == CardMode.NEW && repo.markSeen(p.t.id)) {
-                    appendReviewCard(p.t)
+                // 复习卡到队尾（开始当日连击考核，design.md §9.2）；教读不写 TermState。
+                // 无论 markSeen 返回什么都标记本页已教读——v5 R7 待处理口径看的是「是否教读过」
+                if (p is Page.TermPage && p.mode == CardMode.NEW) {
+                    val firstTeachToday = repo.markSeen(p.t.id)
+                    taught[p.seq] = true
+                    if (firstTeachToday) appendReviewCard(p.t)
+                    syncDonePage()                                  // 追加考核卡后重算完成卡条件存在
                 }
                 val announce = pendingAnnounce
                 pendingAnnounce = null
@@ -288,6 +363,16 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 .fillMaxWidth()
                 .weight(1f)
                 .background(AppSurface),
+            // v5 R7：必须传 key（§5.2）——回收会把列表项移走/追加，没有稳定 key 时 pager 按 index
+            // 定位，会把用户正在看的卡换成别的卡（错位）。TermPage -> 页身份 seq；Done -> "done"；
+            // 取不到页（列表刚被重建）时给一个不会撞的兜底 key
+            key = { idx ->
+                when (val pg = pages.getOrNull(idx)) {
+                    is Page.TermPage -> "seq-${pg.seq}"
+                    Page.Done -> "done"
+                    null -> "ghost-$idx"
+                }
+            },
         ) { idx ->
             when (val p = pages.getOrNull(idx) ?: return@VerticalPager) {
                 is Page.TermPage -> TermCard(
@@ -315,9 +400,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 Page.Done -> DoneCard(
                     known = session.known,
                     forgot = session.forgot,
-                    // v5 R7：按队列完成度分流（函数调用 → 每次重组读当前 pages/revealed）
-                    pending = pendingTaskCount(),
-                    answered = answeredTaskCount(),
+                    words = taskWordCount(),
                 )
             }
         }

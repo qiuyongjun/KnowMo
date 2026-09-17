@@ -20,12 +20,18 @@ data class TermState(val days: Int, val lastSeen: String, val lapses: Int = 0)
 /**
  * 连击层（当日状态，跨频道共享，隔天随日期不符整体作废）：
  * counts = 每词当日「认识」计数（0–3，自由刷作答同样写入）；
- * seen   = 当日已教读词集合（markSeen 幂等去重——防重启/回滑后对同一 NEW 卡重复追加考核卡）。
+ * seen   = 当日已教读词集合（markSeen 幂等去重——防重启/回滑后对同一 NEW 卡重复追加考核卡；
+ *          v5 R7 另供「新词卡当日是否已教读」的待处理判定：wasSeenToday）；
+ * knownAnswers / forgotAnswers = 当日「认识」/「忘了」作答**次数**（v5 R7 完成卡战果，design.md §5.3）：
+ *   与 counts 同一当日生命周期（隔天随 date 不符整体作废），重启不清零——完成是跨会话可达的事件，
+ *   会话计数重启归零会让最真实的完成卡显示「认识了 0 次」。
  */
 data class DayState(
     val date: String,
     val counts: Map<String, Int>,
     val seen: Set<String>,
+    val knownAnswers: Int = 0,
+    val forgotAnswers: Int = 0,
 )
 
 /**
@@ -48,13 +54,15 @@ data class DailyQueue(
 /**
  * 学习状态仓库：间隔层（TermState）+ 连击层（DayState）+ 每日队列（DailyQueue）。
  * SharedPreferences + JSON 持久化（36 词量级不上 Room）；全部收在 "state" 一个 JSON 里：
- * terms = {"days", "lastSeen", "lapses"}；day = {"date", "counts", "seen"}；queues 各频道含 "answered"。
+ * terms = {"days", "lastSeen", "lapses"}；day = {"date", "counts", "seen", "knownAnswers", "forgotAnswers"}；
+ * queues 各频道含 "answered"。
  *
  * v4 连击 + 间隔双层模型（design.md §9，第三轮定稿）：
  * 连击层管当日移出队列（满 3 移除、忘了清零）；间隔层管跨天调度（1→3→7→15→30、每日最多升一级）。
  * v5（09-17-scheduling-v5）：阶梯封顶延至 30（稳态日到期量降到配额可覆盖量级），毕业判定固定 15
  * 与封顶解耦；TermState 增 lapses 遗忘史（due 排序优先 + 升级减半）；推荐频道高债务日
  * （due ≥ DEBT_THRESHOLD）进清债模式扩配额全复习、不补新词。
+ * v5 R7 附带当日战果计数（knownAnswers / forgotAnswers）——只加计数，不动调度逻辑。
  */
 class StudyRepository(context: Context) {
 
@@ -82,6 +90,18 @@ class StudyRepository(context: Context) {
     fun isRemovedById(id: String): Boolean = dayCount(id) >= DAILY_COMBO_TARGET
 
     /**
+     * 当日该词是否已教读（v5 R7，供 UI 恢复「新词卡待处理」判定：教读态不持久化，
+     * 按当日 seen 集合恢复——否则重启后同一张新词卡会被再算一次待处理）。
+     */
+    fun wasSeenToday(id: String): Boolean = id in currentDay().seen
+
+    /** 当日「认识」作答次数（v5 R7 完成卡战果，持久口径：重启不清零，隔天随 DayState 作废） */
+    fun todayKnown(): Int = currentDay().knownAnswers
+
+    /** 当日「忘了」作答次数（同上） */
+    fun todayForgot(): Int = currentDay().forgotAnswers
+
+    /**
      * 当日首次教读：写入 seen 并返回 true（不写 TermState——教读不产生间隔层状态）；
      * 当日已教读过（重启/回滑重触）返回 false，调用方不得重复追加考核卡。
      */
@@ -99,6 +119,7 @@ class StudyRepository(context: Context) {
      * - 有状态且 lastSeen ≠ 今天 → days=nextInterval(days)、lastSeen=今天、lapses 减半（遗忘史半衰）；
      * - lastSeen == 今天（当日已升级或已忘了）→ 不升级（每日最多升一级闸门）。
      * 返回 (count, upgraded, daysAfter) 供 UI 播报剩余次数与升级后的天数。
+     * v5 R7：当日「认识」次数 +1（完成卡战果，与 counts 同一当日生命周期）。
      */
     fun markKnown(id: String): Triple<Int, Boolean, Int> {
         val d = currentDay()
@@ -122,7 +143,7 @@ class StudyRepository(context: Context) {
                 // cur.lastSeen == 今天：闸门挡住，不升级、不播天数
             }
         }
-        day = d.copy(counts = d.counts + (id to count))
+        day = d.copy(counts = d.counts + (id to count), knownAnswers = d.knownAnswers + 1)
         persist()
         return Triple(count, upgraded, daysAfter)
     }
@@ -131,11 +152,12 @@ class StudyRepository(context: Context) {
      * 「忘了」（任何地方作答口径一致）：连击层清零 + 间隔层写 {1, 今天, lapses+1}——
      * 只重置间隔，不回退为未学词；lapses+1（v5：次日 due 排序优先，遗忘曲线上最该复现的词先见）；
      * 分区完成状态随之即时回退（design.md §9.5）。
+     * v5 R7：当日「忘了」次数 +1（完成卡战果，与 counts 同一当日生命周期）。
      */
     fun markForgot(id: String) {
         val d = currentDay()
         termStates[id] = TermState(1, today(), (termStates[id]?.lapses ?: 0) + 1)
-        day = d.copy(counts = d.counts + (id to 0))
+        day = d.copy(counts = d.counts + (id to 0), forgotAnswers = d.forgotAnswers + 1)
         persist()
     }
 
@@ -307,7 +329,10 @@ class StudyRepository(context: Context) {
                 JSONObject()
                     .put("date", d.date)
                     .put("counts", JSONObject().apply { d.counts.forEach { (k, v) -> put(k, v) } })
-                    .put("seen", JSONArray(d.seen.toList())),
+                    .put("seen", JSONArray(d.seen.toList()))
+                    // v5 R7 当日战果（读写对称；旧版本读到多余 key 无害）
+                    .put("knownAnswers", d.knownAnswers)
+                    .put("forgotAnswers", d.forgotAnswers),
             )
             val qs = JSONObject()
             queues.forEach { (ch, q) ->
@@ -350,7 +375,14 @@ class StudyRepository(context: Context) {
                     dj.optJSONArray("seen")?.let { sa ->
                         for (i in 0 until sa.length()) seen.add(sa.optString(i))
                     }
-                    day = DayState(date, counts, seen)
+                    // v5 R7 当日战果：旧 JSON 无这两键 → 缺省 0（无需迁移代码，读写对称）
+                    day = DayState(
+                        date,
+                        counts,
+                        seen,
+                        dj.optInt("knownAnswers", 0),
+                        dj.optInt("forgotAnswers", 0),
+                    )
                 }
             }
             obj.optJSONObject("queues")?.let { qs ->
