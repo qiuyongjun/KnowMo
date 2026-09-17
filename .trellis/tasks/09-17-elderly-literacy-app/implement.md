@@ -64,7 +64,7 @@
 4. [x] `AppRoot.kt`：`TermPage` 携带 `qIndex`（自由刷页 -1）；`answer()` 走双层状态机 + `markAnswered` + 文案（剩余次数；满 3 且升级时追加"N 天后再来复习"，days==15 封顶再满 3 视为未升级不播天数、但刷新 lastSeen 进入 15 天复核周期）；NEW 卡停稳改 `if (repo.markSeen(id)) appendReviewCard(t)`；断点恢复 `revealed` 改按 `q.answered[i]` 逐卡恢复（修复第二轮按词级 lastSeen 判定导致同词多卡连击卡死的缺陷）；注释同步 §9
 5. [x] `TermCard.kt`/`DoneCard.kt`/`Common.kt`：注释语义核对，无行为变化
 6. [x] 静态自检 + trellis-check 复检：prd v4 六条验收逐条对照通过；§9.2 状态机逐格一致；持久化读写对称（含旧数据兜底）；符号/签名/括号配平全过；**P0 已修**（见步骤 3）。P2 遗留：`StudyData.kt`/`Common.kt` 两处第二轮口径注释过期（禁改清单内，下轮文档同步一并修正）、`dayCount` 可收 private、app 不重启跨零点沿用旧队列至切频道（少见场景，不阻断验收）、断点恢复不还原上次反馈文案（可接受降级）
-7. [ ] QYJ 在 Android Studio 构建 + 实机验证 v4 验收标准（prd.md）——**强制评审门**（v3 步骤 11 一并验证）
+7. [ ] QYJ 实机验证 v4 验收标准（prd.md）——**评审门**（v3 步骤 11 一并验证）。2026-09-17 QYJ 改走 **GitHub Actions**：v3+v4 已合并提交 `c0b0fd8`（76 files，含 .trellis 文档与研究产物），待 QYJ 经 VS Code push 后 CI 构建出 APK 走查验收。
 
 ## v4 验证方式
 
