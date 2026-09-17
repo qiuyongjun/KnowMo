@@ -99,3 +99,22 @@
 - **编译仍未验证**（本机无 JDK / Android SDK / gradlew），任务保持 `in_progress`；`main` 领先 `origin/main` 7 个提交，**待用户确认后 push 让 CI 跑 `assembleDebug`**。
 - 已评估并接受的代价（design.md §5.4）：单日会话变成「逐张必须处理」（约 30 张卡 / 两三分钟）；越界被拦时用户为脱身而点「认识」的倾向上升——放大「认识虚高」，列为监控项。若将来要保留跳过能力，必须是**显式动作 + 明确代价**（延到次日），不能退回「滑动即跳过」。
 
+## 第四轮：静默退回 + 作答后自动前进（R8）
+
+用户两条需求：
+
+1. **越界不播提示语**：「不需要在上滑时提示必须处理当前卡，应该允许用户翻回以前的卡，因为即使切回以前的卡，以后想往后翻都需要回来回答。」——他说的正是上一轮我自己标为「刻意」的那个取舍：规则是结构性的（滑不动就是滑不动），逐次播报解释语是噪声。撤回语音提示，只留退弹动画。
+2. **作答后自动前进**（新增 R8）：「完成回答后自动往后翻」。
+
+R8 的硬约束是**时机**：必须等作答播报念完再翻，否则落点卡的 `cardSpeech`（`QUEUE_FLUSH`）会把「词 + 提示 + 反馈」整句掐掉。为此给 `TTSSpeaker` 加了 `speaking` 标志 + `awaitQuiet()`；AppRoot 用 `delay(1500ms 最短停留) → awaitQuiet() → guard → animateScrollToPage(cur+1)`。新词卡不自动前进（它没有「作答完成」这个事件），`SwipeHint` 保留作「不想等」时的加速通道。
+
+### 踩坑记录（第四轮 —— 两个 P1 都是 check 抓的）
+
+1. **effect 把自己写的 key 复位在挂起动画之前 → 动画被自己取消**：`advanceAfterSpeechSeq` 是本 effect 的 key，最初把复位写在 `animateScrollToPage` 之前 → key 变化使 effect 被自己重启 → 跨帧挂起的动画胎死腹中（表现为「作答后不翻页」或停在两页之间）。这正是本项目自己写进 spec 的戒条（effect 体内写过的 state 不要作自己的 key），但这次形式更隐蔽：**对照 `LaunchedEffect(pages, restoreTo)` 的「先置 key 再滚」一直安全，是因为它用的是非动画的 `scrollToPage`，同一 dispatch 内跑完、取消来临时工作已完成**。修法：复位放进 `finally` + 比较后再清，且 `delay` / `awaitQuiet` 不包进 `try`。
+2. **`onStart` 留空 → `QUEUE_FLUSH` 的 `onStop` 把 `speaking` 清成 false**：冲掉上一句时框架会先给**上一句**发 `onStop`（"flushed from the queue" 也走 `onStop`），而新那句若不在 `onStart` 置回，它**整段播放期间** `speaking` 都是 false → `awaitQuiet()` 立刻返回 → 抢跑掐断反馈——恰好命中 R8 要防的那件事。修法：`onStart` 也置位。（「flush 的 `onStop` 先于新句 `onStart`」这一时序假设**未在真机核实**，已写进代码注释与 spec，并记录了强版本升级路径：每次 `speak` 唯一 utteranceId + 按身份过滤回调。）
+
+### 结论/后续
+
+- 提交 `d3dd9d4`（10 文件，+326/−122）。**编译仍未验证**（本机无 JDK / Android SDK / gradlew），任务保持 `in_progress`；`main` 领先 `origin/main` 9 个提交，**待用户确认后 push 让 CI 跑 `assembleDebug`**。
+- 一个留待真机走查的点：`awaitQuiet()` 的 20s 上限只在 TTS 引擎彻底不回调时才生效（任何一次滑动都会经 `tts.stop()` 清掉标志），而缩短上限会误伤十几秒的正常长句——check 判定「不修，仅记录」。
+
