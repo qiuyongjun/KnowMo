@@ -8,12 +8,14 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 间隔层（全局永久状态）：间隔天数 + 上次学习日期（yyyy-MM-dd）。
+ * 间隔层（全局永久状态）：间隔天数 + 上次学习日期（yyyy-MM-dd）+ 遗忘史次数。
  * 「认识」未满当日连击（3 次）**不写**本状态——词保持原到期状态，次日自然回池（遗留词机制）。
- * 满 3 移除时升一级（1→3→7→15，每日最多升一级）；「忘了」→ days=1 + lastSeen=今天（不回退为未学词）。
- * 未学过的词没有 TermState。迁移：第二轮的 "count" 键弃读，days 缺省 1（design.md §9.1）。
+ * 满 3 移除时升一级（1→3→7→15→30，每日最多升一级），升级时 lapses 减半（遗忘史半衰）；
+ * 「忘了」→ days=1 + lastSeen=今天 + lapses+1（v5：遗忘史让 due 排序获得优先权，修正忘词排池尾的问题）。
+ * 未学过的词没有 TermState。迁移：第二轮的 "count" 键弃读，days 缺省 1（design.md §9.1）；
+ * 旧 JSON 无 "lapses" 键缺省 0（v5 兼容口径）。
  */
-data class TermState(val days: Int, val lastSeen: String)
+data class TermState(val days: Int, val lastSeen: String, val lapses: Int = 0)
 
 /**
  * 连击层（当日状态，跨频道共享，隔天随日期不符整体作废）：
@@ -46,10 +48,13 @@ data class DailyQueue(
 /**
  * 学习状态仓库：间隔层（TermState）+ 连击层（DayState）+ 每日队列（DailyQueue）。
  * SharedPreferences + JSON 持久化（36 词量级不上 Room）；全部收在 "state" 一个 JSON 里：
- * terms = {"days", "lastSeen"}；day = {"date", "counts", "seen"}；queues 各频道含 "answered"。
+ * terms = {"days", "lastSeen", "lapses"}；day = {"date", "counts", "seen"}；queues 各频道含 "answered"。
  *
  * v4 连击 + 间隔双层模型（design.md §9，第三轮定稿）：
- * 连击层管当日移出队列（满 3 移除、忘了清零）；间隔层管跨天调度（1→3→7→15、每日最多升一级）。
+ * 连击层管当日移出队列（满 3 移除、忘了清零）；间隔层管跨天调度（1→3→7→15→30、每日最多升一级）。
+ * v5（09-17-scheduling-v5）：阶梯封顶延至 30（稳态日到期量降到配额可覆盖量级），毕业判定固定 15
+ * 与封顶解耦；TermState 增 lapses 遗忘史（due 排序优先 + 升级减半）；推荐频道高债务日
+ * （due ≥ DEBT_THRESHOLD）进清债模式扩配额全复习、不补新词。
  */
 class StudyRepository(context: Context) {
 
@@ -90,8 +95,8 @@ class StudyRepository(context: Context) {
 
     /**
      * 「认识」：连击层计数 +1（封顶 3）；满 3（移除当日队列）时间隔层升级：
-     * - 无 TermState → 写 {1, 今天}（首次完成）；
-     * - 有状态且 lastSeen ≠ 今天 → days=nextInterval(days)、lastSeen=今天；
+     * - 无 TermState → 写 {1, 今天, lapses=0}（首次完成）；
+     * - 有状态且 lastSeen ≠ 今天 → days=nextInterval(days)、lastSeen=今天、lapses 减半（遗忘史半衰）；
      * - lastSeen == 今天（当日已升级或已忘了）→ 不升级（每日最多升一级闸门）。
      * 返回 (count, upgraded, daysAfter) 供 UI 播报剩余次数与升级后的天数。
      */
@@ -104,14 +109,14 @@ class StudyRepository(context: Context) {
             val cur = termStates[id]
             when {
                 cur == null -> {
-                    termStates[id] = TermState(1, today())
+                    termStates[id] = TermState(1, today(), 0)
                     upgraded = true
                     daysAfter = 1
                 }
                 cur.lastSeen != today() -> {
                     val ni = nextInterval(cur.days)
-                    termStates[id] = TermState(ni, today())
-                    upgraded = ni != cur.days   // 已在 15 封顶时不再算升级（间隔值未变）
+                    termStates[id] = TermState(ni, today(), cur.lapses / 2)
+                    upgraded = ni != cur.days   // 已在 30 封顶时不再算升级（间隔值未变）
                     daysAfter = ni
                 }
                 // cur.lastSeen == 今天：闸门挡住，不升级、不播天数
@@ -123,19 +128,20 @@ class StudyRepository(context: Context) {
     }
 
     /**
-     * 「忘了」（任何地方作答口径一致）：连击层清零 + 间隔层写 {1, 今天}——
-     * 只重置间隔，不回退为未学词；分区完成状态随之即时回退（design.md §9.5）。
+     * 「忘了」（任何地方作答口径一致）：连击层清零 + 间隔层写 {1, 今天, lapses+1}——
+     * 只重置间隔，不回退为未学词；lapses+1（v5：次日 due 排序优先，遗忘曲线上最该复现的词先见）；
+     * 分区完成状态随之即时回退（design.md §9.5）。
      */
     fun markForgot(id: String) {
         val d = currentDay()
-        termStates[id] = TermState(1, today())
+        termStates[id] = TermState(1, today(), (termStates[id]?.lapses ?: 0) + 1)
         day = d.copy(counts = d.counts + (id to 0))
         persist()
     }
 
     /* ---------- 到期与间隔阶梯（design.md §9.1） ---------- */
 
-    /** 间隔阶梯：1→3→7→15（封顶） */
+    /** 间隔阶梯：1→3→7→15→30（封顶；v5 延长阶梯压稳态到期量，毕业判定另行固定 15） */
     fun nextInterval(days: Int): Int = INTERVALS.firstOrNull { it > days } ?: INTERVALS.last()
 
     /** 到期日时间戳（lastSeen + days）；lastSeen 解析失败按最早处理（排最前清债） */
@@ -150,17 +156,18 @@ class StudyRepository(context: Context) {
         return dueTime(state) <= todayTime
     }
 
-    /* ---------- 分区完成（design.md §9.5：恢复 days 封顶判定） ---------- */
+    /* ---------- 分区完成（design.md §9.5；v5：毕业判定 days >= 15 与间隔封顶 30 解耦） ---------- */
 
     /**
-     * 分区完成判定：该分区**每个词 days == GRADUATED_DAYS**（间隔封顶 = 15）。
+     * 分区完成判定：该分区**每个词 days >= GRADUATED_DAYS**（毕业判定 = 15，v5 与封顶 30 解耦——
+     * 毕业词继续升到 30 后 🎓 保持不回退）。
      * 达成 = 多轮**不同日**的满 3 连击（1→3→7→15）；任何一处「忘了」days 打回 1 → 即时退出完成状态（可逆）。
      * 空分区（`rec` 自身、或有词无条目的分区）不算完成。
      */
     fun isSceneGraduated(sceneId: String): Boolean {
         val ids = STUDY_TERMS.filter { it.scene == sceneId }.map { it.id }
         if (ids.isEmpty()) return false
-        return ids.all { termStates[it]?.days == GRADUATED_DAYS }
+        return ids.all { (termStates[it]?.days ?: 0) >= GRADUATED_DAYS }
     }
 
     /**
@@ -183,9 +190,10 @@ class StudyRepository(context: Context) {
 
     /**
      * 当日队列生成（design.md §9.3）：
-     * - due  = 范围内到期词（isDue），按到期日升序（先清债）；
+     * - due  = 范围内到期词（isDue），v5 双键排序：lapses 降序优先（忘词先见）→ 到期日升序（先清旧债）；
      * - news = 未学词洗牌；
-     * - 推荐频道 pool = (due + news).take(DAILY_POOL_QUOTA)（到期复核优先 + 新词补足，共 10 个，
+     * - 推荐频道 pool：due ≥ DEBT_THRESHOLD（20）→ 清债模式 due.take(DEBT_QUOTA)（15 张全复习、
+     *   不补新词，v5）；否则 (due + news).take(DAILY_POOL_QUOTA)（到期复核优先 + 新词补足，共 10 个，
      *   当日冻结由 ensureQueue 持久化保证）；场景频道 pool 全量（不另设配额）。
      * - queue 按 pool 原序（到期在前、每词一次），modes 按有无 TermState 标注，answered 全 false。
      * pool 为空 → 队列只有完成卡，直接自由刷（prd：一个也没有当天直接自由刷）。
@@ -194,9 +202,16 @@ class StudyRepository(context: Context) {
         val scope = scopeIds(channel)
         val due = scope
             .filter { id -> termStates[id]?.let { isDue(it) } == true }
-            .sortedBy { id -> termStates[id]?.let { dueTime(it) } ?: Long.MAX_VALUE }
+            .sortedWith(
+                compareByDescending<Int> { id -> termStates[id]?.lapses ?: 0 }
+                    .thenBy { id -> termStates[id]?.let { dueTime(it) } ?: Long.MAX_VALUE }
+            )
         val news = scope.filter { termStates[it] == null }.shuffled()
-        val pool = if (channel == "rec") (due + news).take(DAILY_POOL_QUOTA) else due + news
+        val pool = when {
+            channel == "rec" && due.size >= DEBT_THRESHOLD -> due.take(DEBT_QUOTA)
+            channel == "rec" -> (due + news).take(DAILY_POOL_QUOTA)
+            else -> due + news
+        }
 
         val queue = ArrayList<String>(pool.size)
         val modes = ArrayList<String>(pool.size)
@@ -261,7 +276,8 @@ class StudyRepository(context: Context) {
     /* ---------- 自由刷池 ---------- */
 
     /**
-     * 自由刷池：该范围内**全部已学词**（有 TermState 即已学，含 days==15 的毕业词），洗牌返回；
+     * 自由刷池：该范围内**全部已学词**（有 TermState 即已学，含毕业词——v5 毕业判定 days >= 15，
+     * 毕业后仍升 30 维持长期复核），洗牌返回；
      * 抽完由调用方重洗。「教读未完成连击」的词无 TermState，不入池（design.md §9.4）。
      */
     fun freePoolIds(channel: String): List<String> =
@@ -282,7 +298,7 @@ class StudyRepository(context: Context) {
             val obj = JSONObject()
             val ts = JSONObject()
             termStates.forEach { (k, st) ->
-                ts.put(k, JSONObject().put("days", st.days).put("lastSeen", st.lastSeen))
+                ts.put(k, JSONObject().put("days", st.days).put("lastSeen", st.lastSeen).put("lapses", st.lapses))
             }
             obj.put("terms", ts)
             val d = currentDay()
@@ -317,8 +333,9 @@ class StudyRepository(context: Context) {
             obj.optJSONObject("terms")?.let { ts ->
                 ts.keys().forEach { k ->
                     val s = ts.optJSONObject(k) ?: return@forEach
-                    // 第二轮的 "count" 键弃读；days 缺省 1（视为已学、近期到期，design.md §9.1 迁移口径）
-                    termStates[k] = TermState(s.optInt("days", 1), s.optString("lastSeen"))
+                    // 第二轮的 "count" 键弃读；days 缺省 1（视为已学、近期到期，design.md §9.1 迁移口径）；
+                    // v5：旧 JSON 无 "lapses" 键缺省 0（无遗忘史，读写对称）
+                    termStates[k] = TermState(s.optInt("days", 1), s.optString("lastSeen"), s.optInt("lapses", 0))
                 }
             }
             // 连击层：date 不符 = 隔天，整体作废（不读入）
@@ -378,11 +395,17 @@ class StudyRepository(context: Context) {
         /** 推荐频道每日任务池配额（到期复核优先 + 新词补足；场景频道不另设配额，design.md §9.3） */
         const val DAILY_POOL_QUOTA = 10
 
-        /** 间隔阶梯（design.md §9.1）：1→3→7→15 */
-        val INTERVALS = listOf(1, 3, 7, 15)
+        /** 间隔阶梯（design.md §9.1；v5 延长封顶压稳态到期量）：1→3→7→15→30 */
+        val INTERVALS = listOf(1, 3, 7, 15, 30)
 
-        /** 间隔封顶 = 分区完成判定阈值（days==15，design.md §9.5） */
-        val GRADUATED_DAYS = INTERVALS.last()
+        /** 分区毕业判定阈值（v5：固定 15，与 INTERVALS 封顶 30 显式解耦，不再跟随阶梯） */
+        const val GRADUATED_DAYS = 15
+
+        /** 推荐频道清债模式触发阈值：到期词 ≥ 20 时当日全复习、不补新词（v5） */
+        const val DEBT_THRESHOLD = 20
+
+        /** 清债模式配额：due.take(15)（v5：先清债再学新，阈值与扩容量保守） */
+        const val DEBT_QUOTA = 15
 
         /** 一天的毫秒数（到期日 = lastSeen + days * DAY_MS，原型口径） */
         const val DAY_MS = 24L * 60 * 60 * 1000

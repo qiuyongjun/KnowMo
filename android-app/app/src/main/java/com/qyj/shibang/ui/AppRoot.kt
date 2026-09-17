@@ -44,27 +44,35 @@ private const val FREE_BATCH = 2
 /** 停稳判定后的播报去抖（ms）：滑动进行中不播，停稳后再等这么久，快速连滑不闪播 */
 private const val SETTLE_SPEECH_DELAY_MS = 200L
 
+/** v5 防泄题：考试态（复习/温故）未作答且未 peek 时，点卡片只播这句提示语——不念词、不念提示 */
+private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
+
 /**
  * 根界面：抖音式垂直 feed（v4 第三轮定稿：连击 + 间隔双层模型，design.md §9）。
  * 交互契约（见任务 design.md §9）：
  * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播
  * 2. 复习/温故卡未作答只念"还记得它念什么吗"，绝不念词的读音；认识/忘了后才念词+提示
+ *    （v5 防泄题：考试态未作答**点卡片**也只播「再想一想，想起来了吗？」，分流在 TermCard 调用点
+ *    ——按形态传对应的 onSpeakTerm；「想看答案」peek 只展开拼音/提示 + 念一遍，不写任何学习状态，
+ *    作答按钮保留，看完仍走正常状态机）
  * 3. 新词卡停稳播报 = markSeen（当日幂等，首次返回 true）+ 立即追加该词复习卡到队尾
  *    （开始当日 3 次认识连击考核）；教读不写 TermState（间隔层）
  * 4. 作答走同一双层状态机（任何频道/自由刷口径一致）：连击层「认识」+1、「忘了」清零
- *    （跨频道共享，当日有效）；满 3 = 移出当日队列 + 间隔层升一级（1→3→7→15，每日最多
+ *    （跨频道共享，当日有效）；满 3 = 移出当日队列 + 间隔层升一级（1→3→7→15→30，每日最多
  *    升一级闸门）；未满 3 的作答不写 TermState。任务卡答后未移除追加队尾（REVIEW 形态），
  *    自由刷卡不追加。展开/作答状态按页出现（seq）记录；断点恢复按队列卡实例 answered[i]
  *    逐卡恢复（不按词级判定，防同词多卡一并展开卡死连击）
  * 5. 完成卡之后继续上滑 = 自由刷无限流（温故，可作答、连击/降级照算），pageCount 随滑动增长
  * 6. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
- * 7. 分区完成（§9.5）：该区全词 days==15（间隔封顶）→ 频道栏加 🎓；「忘了」days=1 即时回退
+ * 7. 分区完成（§9.5，v5：毕业判定 days >= 15 与间隔封顶 30 解耦）→ 频道栏加 🎓，毕业词升 30 后不回退；
+ *    「忘了」days=1 即时回退
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     var channel by remember { mutableStateOf("rec") }
     var session by remember { mutableStateOf(SessionStats()) }
     val revealed = remember { mutableStateMapOf<Int, Boolean>() }      // seq -> 复习/温故卡是否已作答展开（按出现记，不按词记）
+    val peeked = remember { mutableStateMapOf<Int, Boolean>() }        // seq -> 考试卡「想看答案」求助展开（v5：会话态不持久化，不写任何学习状态）
     val results = remember { mutableStateMapOf<Int, String>() }        // seq -> 反馈文案
     var seqGen by remember { mutableStateOf(0) }                       // 页出现序号发生器（只在 effect/回调中递增）
     val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重（频道+页序+词）
@@ -254,8 +262,21 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                     term = p.t,
                     mode = p.mode,
                     revealed = p.mode == CardMode.NEW || revealed[p.seq] == true,
+                    peeked = peeked[p.seq] == true,
                     resultText = results[p.seq],
-                    onSpeakTerm = { tts.speak(termSpeech(p.t)) },
+                    // v5 防泄题分流（在本调用点按形态选回调，TermCard 不感知）：
+                    // 考试态未作答且未 peek → 点卡片只播提示语；其余（新学/已作答/peek 后）重听词+提示
+                    onSpeakTerm = {
+                        val examUnanswered = p.mode != CardMode.NEW && revealed[p.seq] != true
+                        if (examUnanswered && peeked[p.seq] != true) tts.speak(EXAM_TAP_HINT_SPEECH)
+                        else tts.speak(termSpeech(p.t))
+                    },
+                    // v5 求助通道：只置会话态 + 念出词和提示（用户主动求助，给足信息）；
+                    // 不写 repo 任何状态、不 markAnswered、不追加队列——作答仍走正常状态机
+                    onPeek = {
+                        peeked[p.seq] = true
+                        tts.speak(termSpeech(p.t))
+                    },
                     onCharClick = { charFor = it },
                     onAnswer = { known -> answer(p, known) },
                 )

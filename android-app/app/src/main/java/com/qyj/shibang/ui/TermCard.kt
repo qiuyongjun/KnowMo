@@ -43,8 +43,10 @@ import com.qyj.shibang.ui.theme.RedForgot
  * 学习卡（v4 双层模型）：形态由调度器运行时计算——
  * 新学（词组+逐字拼音+用途全展开，无按钮）/ 复习与温故（同一考试交互：
  * 先只出词→认识/忘了按钮→作答展开+反馈文案）。
- * 温故 = 自由刷池抽出的已学词（有 TermState 即已学，含 days==15 的毕业词），
+ * 温故 = 自由刷池抽出的已学词（有 TermState 即已学，含毕业词 days >= 15），
  * 作答同样走连击+间隔双层状态机（design.md §9.2/§9.4）。
+ * v5 防泄题 + 求助通道：考试态未作答时点卡片的分流逻辑在调用方（AppRoot 传对应的 onSpeakTerm）；
+ * peeked = 「想看答案」求助展开（会话态，不写任何学习状态）——拼音/提示显示但认识/忘了按钮保留，可继续作答。
  * 不再展示"第 x/y 张"进度条（队列边界对用户不可见）。
  */
 @Composable
@@ -52,19 +54,23 @@ fun TermCard(
     term: Term,
     mode: CardMode,
     revealed: Boolean,
+    peeked: Boolean,
     resultText: String?,
     onSpeakTerm: () -> Unit,
+    onPeek: () -> Unit,
     onCharClick: (TermChar) -> Unit,
     onAnswer: (Boolean) -> Unit,
 ) {
     // 新学卡无反馈按钮；复习/温故卡在作答前都出「认识/忘了」（v4：自由刷同样可作答，走同一双层状态机）
     val isExam = mode != CardMode.NEW
+    // 答案区展示：作答展开 || peek 求助展开（peek 不等于作答——按钮判定仍只看 revealed）
+    val showAnswer = revealed || peeked
     Column(
         Modifier
             .fillMaxSize()
             .padding(horizontal = 20.dp, vertical = 14.dp),
     ) {
-        // 卡片主体：点任意处重听；点单字看讲解
+        // 卡片主体：点任意处重听（考试态未作答的分流见 onSpeakTerm 调用方）；点单字看讲解
         Column(
             Modifier
                 .weight(1f)
@@ -116,15 +122,15 @@ fun TermCard(
             }
             Spacer(Modifier.height(10.dp))
 
-            // 逐字拼音：新学卡常显；复习/温故卡作答前隐藏（考回忆）
-            if (revealed) {
+            // 逐字拼音：新学卡常显；复习/温故卡作答前隐藏（考回忆），peek 求助后显示（v5）
+            if (showAnswer) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     term.chars.forEach { ch ->
                         Text(ch.p, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = BluePrimary)
                     }
                 }
             }
-            if (revealed) {
+            if (showAnswer) {
                 Spacer(Modifier.height(12.dp))
                 Text(
                     "💡 ${term.tip}",
@@ -140,7 +146,8 @@ fun TermCard(
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                "👆 点一下再听 · 点单字看讲解",
+                // v5：考试态未作答引导用求助按钮；其余（新学/已作答/peek 后）维持重听引导
+                if (isExam && !revealed) "👆 想不起来？点下面的按钮" else "👆 点一下再听 · 点单字看讲解",
                 fontSize = 18.sp,
                 color = AppText2,
             )
@@ -163,6 +170,22 @@ fun TermCard(
                     onClick = { onAnswer(true) },
                     modifier = Modifier.weight(1f),
                 )
+            }
+            // v5 求助通道：弱权重小按钮，只展开答案不写任何学习状态（作答按钮保留在上方）；
+            // peek 后已展开，按钮不再显示
+            if (!peeked) {
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(AppSurface)
+                        .clickable { onPeek() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("👀 想看答案", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = AppText2)
+                }
             }
         } else {
             resultText?.let { msg ->
