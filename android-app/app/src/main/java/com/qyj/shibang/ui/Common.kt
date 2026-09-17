@@ -51,7 +51,7 @@ fun TopBar(forgotCount: Int, onWordbook: () -> Unit, onSettings: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("📖 识字好帮手", fontSize = 24.sp, fontWeight = FontWeight.Black, color = BlueDark)
+        Text("📖 慢慢懂", fontSize = 24.sp, fontWeight = FontWeight.Black, color = BlueDark)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             TopIconButton("📕 生词本", badge = forgotCount, onClick = onWordbook)
             TopIconButton("⚙️ 设置", onClick = onSettings)

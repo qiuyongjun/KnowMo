@@ -179,7 +179,7 @@ fun SettingsSheet(
 
             Spacer(Modifier.height(16.dp))
             Text(
-                "识字好帮手 · 安卓版 v0.2（抖音式学习）",
+                "慢慢懂 Mando · 安卓版 v0.2（抖音式学习）",
                 fontSize = 15.sp, color = AppText2,
                 modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
             )
