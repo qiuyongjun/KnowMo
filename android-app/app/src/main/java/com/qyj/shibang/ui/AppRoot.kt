@@ -47,9 +47,9 @@ data class SessionStats(val known: Int = 0, val forgot: Int = 0)
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
+    // 字体/语速仍读取用户偏好，只是不再提供设置入口
     var fontScale by remember { mutableFloatStateOf(repo.fontScale) }
     var speechRate by remember { mutableFloatStateOf(repo.speechRate) }
-    var remindTime by remember { mutableStateOf(repo.remindTime) }
     var channel by remember { mutableStateOf("rec") }
     var terms by remember { mutableStateOf(STUDY_TERMS) }
     var session by remember { mutableStateOf(SessionStats()) }
@@ -57,8 +57,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     val results = remember { mutableStateMapOf<String, String>() }     // termId -> 反馈文案
     val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重
     var charFor by remember { mutableStateOf<TermChar?>(null) }
-    var showSettings by remember { mutableStateOf(false) }
-    var showWordbook by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(speechRate) { tts.rate = speechRate }
@@ -150,11 +148,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         LocalDensity provides Density(base.density, base.fontScale * fontScale),
     ) {
         Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White)) {
-            TopBar(
-                forgotCount = repo.forgotIds.size,
-                onWordbook = { showWordbook = true },
-                onSettings = { showSettings = true },
-            )
             ChannelBar(current = channel, onSelect = { channel = it })
 
             VerticalPager(
@@ -188,20 +181,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
 
         charFor?.let { ch ->
             CharSheet(ch = ch, terms = terms, onSpeak = { tts.speak(it) }, onDismiss = { charFor = null })
-        }
-        if (showSettings) {
-            SettingsSheet(
-                fontScale = fontScale,
-                speechRate = speechRate,
-                remindTime = remindTime,
-                onFont = { fontScale = it; repo.setFontScale(it) },
-                onRate = { speechRate = it; repo.setSpeechRate(it) },
-                onRemind = { remindTime = it; repo.setRemindTime(it) },
-                onDismiss = { showSettings = false },
-            )
-        }
-        if (showWordbook) {
-            WordBookSheet(repo = repo, terms = terms, onSpeak = { tts.speak(it) }, onDismiss = { showWordbook = false })
         }
     }
 }

@@ -1,24 +1,18 @@
 package com.qyj.shibang.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,64 +24,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qyj.shibang.data.Term
-import com.qyj.shibang.ui.theme.AppLine
 import com.qyj.shibang.ui.theme.AppSurface
-import com.qyj.shibang.ui.theme.AppText
 import com.qyj.shibang.ui.theme.AppText2
-import com.qyj.shibang.ui.theme.BadgeDot
 import com.qyj.shibang.ui.theme.BlueBg
 import com.qyj.shibang.ui.theme.BlueDark
 import com.qyj.shibang.ui.theme.BluePrimary
 import com.qyj.shibang.ui.theme.OrangeBg
 import com.qyj.shibang.ui.theme.OrangeDark
 import com.qyj.shibang.ui.theme.ProgressTrack
-
-/* ---------- 顶栏 ---------- */
-
-@Composable
-fun TopBar(forgotCount: Int, onWordbook: () -> Unit, onSettings: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text("📖 慢慢懂", fontSize = 24.sp, fontWeight = FontWeight.Black, color = BlueDark)
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            TopIconButton("📕 生词本", badge = forgotCount, onClick = onWordbook)
-            TopIconButton("⚙️ 设置", onClick = onSettings)
-        }
-    }
-}
-
-@Composable
-private fun TopIconButton(label: String, badge: Int = 0, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(16.dp)
-    Box(
-        Modifier
-            .height(56.dp)
-            .clip(shape)
-            .background(AppSurface)
-            .border(3.dp, AppLine, shape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = AppText)
-        if (badge > 0) {
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = 10.dp, y = (-10).dp)
-                    .size(24.dp)
-                    .clip(CircleShape)
-                    .background(BadgeDot),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(badge.toString(), fontSize = 13.sp, fontWeight = FontWeight.Black, color = androidx.compose.ui.graphics.Color.White)
-            }
-        }
-    }
-}
 
 /* ---------- 频道 Tab（参考抖音顶部 tab） ---------- */
 
