@@ -1,0 +1,26 @@
+# --- Android / Gradle ---
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+android-app/.kotlin/
+*.apk
+*.aab
+*.keystore
+!debug.keystore
+
+# --- IDE ---
+.idea/
+.vscode/
+*.iml
+
+# --- Node ---
+node_modules/
+
+# --- WorkBuddy 本机会话数据（个人文件，不入库） ---
+.workbuddy/
+
+# --- OS ---
+Thumbs.db
+Desktop.ini
+.DS_Store

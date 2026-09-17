@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>识字好帮手 · 老年人识字助手（抖音式原型 v2）</title>
+<style>
+/* ============ 设计 Token（适老化） ============ */
+:root{
+  --fscale: 1;
+  --primary:#1565C0; --primary-dark:#0D47A1; --primary-bg:#E3F2FD;
+  --accent:#E65100;  --accent-dark:#BF360C;  --accent-bg:#FFF3E0;
+  --known:#1B5E20;   --known-bg:#E8F5E9;
+  --forgot:#B71C1C;  --forgot-bg:#FFEBEE;
+  --bg:#FFFFFF; --surface:#F5F7FA; --line:#DDE2EA;
+  --text:#1A1A1A; --text-2:#424242;
+  --font-body: calc(22px * var(--fscale));
+  --font-button: calc(24px * var(--fscale));
+  --font-pinyin: calc(26px * var(--fscale));
+  --radius:16px;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{background:#ECEFF1;font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",sans-serif;color:var(--text);display:flex;justify-content:center;padding:16px 8px}
+
+/* ============ 手机框 ============ */
+#stage{position:relative}
+#phone{
+  width:412px;height:915px;background:var(--bg);border-radius:36px;
+  box-shadow:0 12px 48px rgba(0,0,0,.28),0 0 0 10px #263238;
+  position:relative;overflow:hidden;transform-origin:top center;
+  display:flex;flex-direction:column;
+}
+.statusbar{height:38px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;font-size:16px;flex:none}
+
+/* ============ 顶栏 ============ */
+.topbar{flex:none;display:flex;align-items:center;justify-content:space-between;padding:8px 16px 6px;background:#fff}
+.appname{font-size:calc(24px * var(--fscale));font-weight:900;color:var(--primary-dark)}
+.topbtns{display:flex;gap:10px}
+.iconbtn{
+  min-width:64px;height:60px;border:3px solid var(--line);border-radius:16px;background:#fff;
+  font-size:calc(21px * var(--fscale));font-weight:800;color:var(--text);cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:6px;position:relative;transition:transform .08s;
+}
+.iconbtn:active{transform:scale(.95)}
+.iconbtn .bdg{position:absolute;top:-10px;right:-10px;min-width:26px;height:26px;padding:0 4px;background:#D32F2F;color:#fff;border-radius:999px;border:3px solid #fff;font-size:15px;font-weight:900;display:none;align-items:center;justify-content:center}
+.iconbtn .bdg.show{display:flex}
+
+/* ============ 频道 Tab ============ */
+.channelbar{flex:none;display:flex;gap:6px;overflow-x:auto;background:#fff;padding:4px 14px 10px;border-bottom:3px solid var(--line);scrollbar-width:none}
+.channelbar::-webkit-scrollbar{display:none}
+.chip{
+  flex:none;min-height:56px;padding:0 20px;border:none;border-radius:14px;background:var(--surface);
+  font-size:calc(21px * var(--fscale));font-weight:700;color:var(--text-2);cursor:pointer;
+  position:relative;transition:transform .08s;
+}
+.chip:active{transform:scale(.95)}
+.chip.active{background:var(--primary-bg);color:var(--primary-dark);font-weight:900}
+.chip.active::after{content:"";position:absolute;left:22%;right:22%;bottom:3px;height:6px;background:var(--primary);border-radius:3px}
+
+/* ============ Feed（抖音式垂直滑动） ============ */
+#feed{
+  flex:1;overflow-y:auto;scroll-snap-type:y mandatory;background:var(--surface);
+  overscroll-behavior:contain;
+}
+.fcard{
+  height:100%;min-height:100%;scroll-snap-align:start;scroll-snap-stop:always;
+  display:flex;flex-direction:column;padding:14px 20px 18px;
+}
+/* 进度行 */
+.progress-row{flex:none;display:flex;align-items:center;justify-content:space-between;padding:4px 2px 8px}
+.prog-text{font-size:calc(19px * var(--fscale));color:var(--text-2);font-weight:700}
+.prog-bar{flex:1;height:12px;margin-left:14px;background:#E0E4EA;border-radius:6px;overflow:hidden;max-width:180px}
+.prog-bar .fill{height:100%;background:var(--primary);width:0%;transition:width .3s;border-radius:6px}
+/* 角标 */
+.badge{display:inline-flex;align-items:center;gap:6px;padding:6px 16px;border-radius:999px;font-size:calc(19px * var(--fscale));font-weight:800}
+.badge.new{background:var(--primary-bg);color:var(--primary-dark)}
+.badge.review{background:var(--accent-bg);color:var(--accent-dark)}
+/* 卡片主体 */
+.card-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;cursor:pointer}
+.scene-icon{width:110px;height:110px;border-radius:28px;display:flex;align-items:center;justify-content:center;font-size:64px}
+.term{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.term .tchar{
+  font-weight:900;line-height:1.25;cursor:pointer;border-radius:12px;padding:2px 4px;
+  border-bottom:6px solid var(--primary-bg);transition:transform .08s;
+}
+.term .tchar:active{transform:scale(.92)}
+.len2 .tchar,.len3 .tchar{font-size:calc(66px * var(--fscale))}
+.len4 .tchar{font-size:calc(56px * var(--fscale))}
+.len5 .tchar,.len6 .tchar{font-size:calc(44px * var(--fscale))}
+.pinyin{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.pinyin span{font-size:var(--font-pinyin);color:var(--primary);font-weight:800;letter-spacing:1px}
+.pinyin.hidden,.tip.hidden{display:none}
+.tip{
+  font-size:var(--font-body);color:var(--text-2);line-height:1.6;background:#fff;
+  border:2px solid var(--line);border-radius:14px;padding:14px 18px;max-width:340px;
+}
+.relisten{font-size:calc(19px * var(--fscale));color:var(--text-2)}
+/* 复习反馈按钮 */
+.fb-actions{flex:none;display:grid;grid-template-columns:1fr 1fr;gap:14px;padding-top:6px}
+.fb-btn{
+  min-height:92px;border:none;border-radius:20px;color:#fff;font-size:var(--font-button);font-weight:900;
+  cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;transition:transform .08s;
+}
+.fb-btn:active{transform:scale(.96)}
+.fb-btn .fi{font-size:44px}
+.fb-known{background:var(--known)}
+.fb-forgot{background:var(--forgot)}
+.fb-result{flex:none;border-radius:18px;padding:16px;text-align:center;font-size:calc(22px * var(--fscale));font-weight:800;margin-top:6px}
+.fb-result.ok{background:var(--known-bg);color:var(--known)}
+.fb-result.re{background:var(--accent-bg);color:var(--accent-dark)}
+.swipe-hint{flex:none;text-align:center;color:var(--text-2);font-size:calc(20px * var(--fscale));font-weight:700;padding:10px 0 2px;animation:bounce 1.6s infinite}
+@keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+
+/* ============ 完成卡 ============ */
+.done-card{align-items:center;justify-content:center;gap:16px;flex:1;display:flex;flex-direction:column;text-align:center}
+.done-card .party{font-size:100px}
+.done-card .dt{font-size:calc(34px * var(--fscale));font-weight:900}
+.done-card .ds{font-size:var(--font-body);color:var(--text-2);line-height:1.6}
+.btn{
+  width:100%;min-height:76px;border:none;border-radius:20px;font-size:var(--font-button);font-weight:900;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;color:#fff;
+  transition:transform .08s;padding:10px 18px;max-width:340px;
+}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:var(--primary)}
+
+/* ============ 弹层（字卡/设置/生词本） ============ */
+#sheet-mask{position:absolute;inset:0;background:rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:.25s;z-index:50}
+#sheet-mask.open{opacity:1;pointer-events:auto}
+.sheet{
+  position:absolute;left:0;right:0;bottom:0;z-index:51;background:#fff;
+  border-radius:28px 28px 0 0;padding:22px 22px 34px;transform:translateY(105%);transition:.28s;
+  max-height:80%;overflow-y:auto;display:none;
+}
+.sheet.open{transform:none}
+.sheet-close{position:absolute;top:14px;right:14px;width:60px;height:60px;border-radius:50%;border:none;background:var(--surface);font-size:28px;font-weight:900;cursor:pointer}
+.sheet-title{font-size:var(--font-button);font-weight:900;margin-bottom:12px}
+.divider{height:2px;background:var(--line);margin:16px 0;border:none}
+.section-label{font-size:calc(20px * var(--fscale));font-weight:800;color:var(--text-2);margin:12px 0 8px}
+/* 字卡弹层 */
+.cs-head{display:flex;align-items:center;justify-content:center;gap:16px;margin:6px 0 2px}
+.cs-char{font-size:calc(96px * var(--fscale));font-weight:900;line-height:1.25}
+.cs-py{text-align:center;font-size:calc(30px * var(--fscale));color:var(--primary);font-weight:800}
+.word-chips{display:flex;flex-wrap:wrap;gap:12px}
+.wchip{background:var(--primary-bg);color:var(--primary-dark);font-size:calc(23px * var(--fscale));font-weight:800;padding:12px 20px;border-radius:14px;cursor:pointer;border:none;transition:transform .08s}
+.wchip:active{transform:scale(.94)}
+/* 设置弹层 */
+.seg{display:grid;gap:10px}
+.seg-2{grid-template-columns:1fr 1fr}
+.seg-3{grid-template-columns:1fr 1fr 1fr}
+.seg-btn{min-height:64px;border:3px solid var(--line);background:#fff;border-radius:16px;font-size:calc(22px * var(--fscale));font-weight:800;color:var(--text-2);cursor:pointer;transition:transform .08s}
+.seg-btn:active{transform:scale(.96)}
+.seg-btn.sel{border-color:var(--primary);background:var(--primary-bg);color:var(--primary-dark)}
+.rule-box{background:var(--accent-bg);border:2px solid var(--accent);border-radius:16px;padding:16px;font-size:calc(20px * var(--fscale));line-height:1.7;color:var(--accent-dark)}
+.soon-box{background:var(--surface);border:2px dashed var(--line);border-radius:16px;padding:16px;font-size:calc(20px * var(--fscale));color:var(--text-2);text-align:center;font-weight:700}
+.proto-note{text-align:center;color:var(--text-2);font-size:17px;margin-top:12px}
+/* 生词本 */
+.wb-list{display:flex;flex-direction:column;gap:12px}
+.wb-item{display:flex;align-items:center;gap:14px;background:var(--surface);border:2px solid var(--line);border-radius:16px;padding:14px 18px;cursor:pointer;transition:transform .08s}
+.wb-item:active{transform:scale(.97)}
+.wb-item .w{font-size:calc(28px * var(--fscale));font-weight:900}
+.wb-item .p{font-size:calc(19px * var(--fscale));color:var(--primary);font-weight:800}
+.wb-item .n{margin-left:auto;font-size:calc(18px * var(--fscale));color:var(--forgot);font-weight:800;flex:none}
+.wb-empty{text-align:center;color:var(--text-2);padding:30px 0;font-size:calc(20px * var(--fscale))}
+
+/* ============ Toast ============ */
+#toast{
+  position:absolute;left:50%;bottom:60px;transform:translateX(-50%) translateY(20px);
+  background:#263238;color:#fff;font-size:calc(22px * var(--fscale));font-weight:700;
+  padding:16px 28px;border-radius:999px;opacity:0;pointer-events:none;transition:.25s;z-index:99;white-space:nowrap;
+}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<div id="stage">
+<div id="phone">
+  <div class="statusbar"><span id="clock">09:00</span><span>📶 🔋</span></div>
+
+  <div class="topbar">
+    <div class="appname">📖 识字好帮手</div>
+    <div class="topbtns">
+      <button class="iconbtn" data-say="生词本" onclick="openWordbook()">📕 生词本<span class="bdg" id="wb-badge">0</span></button>
+      <button class="iconbtn" data-say="设置" onclick="openSheet('scr-settings')">⚙️ 设置</button>
+    </div>
+  </div>
+
+  <div class="channelbar" id="channelbar"></div>
+
+  <div id="feed"></div>
+
+  <div id="sheet-mask" onclick="closeSheets()"></div>
+
+  <!-- 字卡弹层 -->
+  <div class="sheet" id="sheet-char"></div>
+
+  <!-- 设置弹层 -->
+  <div class="sheet" id="scr-settings">
+    <button class="sheet-close" data-say="关闭" onclick="closeSheets()">✕</button>
+    <div class="sheet-title">⚙️ 设置</div>
+    <div class="section-label">🔤 字体大小</div>
+    <div class="seg seg-2" id="seg-font">
+      <button class="seg-btn" data-say="正常" onclick="setFontScale(1,this)">正常</button>
+      <button class="seg-btn" data-say="更大" onclick="setFontScale(1.15,this)">更大 🔎</button>
+    </div>
+    <div class="section-label">🐢 朗读速度</div>
+    <div class="seg seg-3" id="seg-rate">
+      <button class="seg-btn" data-say="慢" onclick="setRate(0.7,this)">慢</button>
+      <button class="seg-btn" data-say="适中" onclick="setRate(0.85,this)">适中</button>
+      <button class="seg-btn" data-say="稍快" onclick="setRate(1.0,this)">稍快</button>
+    </div>
+    <div class="section-label">⏰ 每天提醒我来学</div>
+    <div class="seg seg-3" id="seg-remind">
+      <button class="seg-btn" data-say="上午 9 点" onclick="setRemind('上午 9 点',this)">上午<br>9 点</button>
+      <button class="seg-btn" data-say="下午 3 点" onclick="setRemind('下午 3 点',this)">下午 3 点</button>
+      <button class="seg-btn" data-say="晚上 7 点" onclick="setRemind('晚上 7 点',this)">晚上<br>7 点</button>
+    </div>
+    <div class="section-label">🧠 复习是怎么安排的</div>
+    <div class="rule-box">
+      <strong>认识</strong>的词 → 1 天 → 3 天 → 7 天 → 15 天后再见<br>
+      <strong>忘了</strong>的词 → 明天再来，还会进生词本<br>
+      越认得牢，见得越少；越生疏，见得越勤 💪
+    </div>
+    <div class="section-label">📷 拍照识字</div>
+    <div class="soon-box">后续版本开放，敬请期待</div>
+    <div class="proto-note">识字好帮手 · 高保真演示原型 v2（抖音式）</div>
+  </div>
+
+  <!-- 生词本弹层 -->
+  <div class="sheet" id="sheet-wordbook">
+    <button class="sheet-close" data-say="关闭" onclick="closeSheets()">✕</button>
+    <div class="sheet-title">📕 我的生词本</div>
+    <div class="wb-list" id="wb-list"></div>
+  </div>
+
+  <div id="toast"></div>
+</div>
+</div>
+
+<script>
+"use strict";
+/* ==================== 演示数据 ==================== */
+const SCENES = [
+  {id:"rec",     name:"推荐",   icon:"⭐", color:"#EDE7F6"},
+  {id:"market",  name:"买菜",   icon:"🛒", color:"#E8F5E9"},
+  {id:"transit", name:"公交地铁", icon:"🚌", color:"#E3F2FD"},
+  {id:"hospital",name:"医院",   icon:"🏥", color:"#FFEBEE"},
+  {id:"bank",    name:"银行",   icon:"🏦", color:"#FFF8E1"},
+  {id:"gov",     name:"办事",   icon:"🏛️", color:"#F3E5F5"},
+  {id:"food",    name:"吃饭",   icon:"🍜", color:"#FFF3E0"}
+];
+/* 词条 = 学习单元（生活词组） */
+const TERMS = [
+  /* 买菜 */
+  {id:"market-1", scene:"market", icon:"🛒", text:"今日特价", chars:[{c:"今",p:"jīn"},{c:"日",p:"rì"},{c:"特",p:"tè"},{c:"价",p:"jià"}], tip:"超市里便宜的菜，会挂这四个字的牌子", kind:"review", days:7},
+  {id:"market-2", scene:"market", icon:"🛒", text:"扫码付款", chars:[{c:"扫",p:"sǎo"},{c:"码",p:"mǎ"},{c:"付",p:"fù"},{c:"款",p:"kuǎn"}], tip:"用手机对准方块图案，就能付钱", kind:"new"},
+  {id:"market-3", scene:"market", icon:"🛒", text:"收银台", chars:[{c:"收",p:"shōu"},{c:"银",p:"yín"},{c:"台",p:"tái"}], tip:"排队交钱的地方", kind:"new"},
+  {id:"market-4", scene:"market", icon:"🛒", text:"请排队", chars:[{c:"请",p:"qǐng"},{c:"排",p:"pái"},{c:"队",p:"duì"}], tip:"看到这三个字，就等前面的人办完", kind:"new"},
+  {id:"market-5", scene:"market", icon:"🛒", text:"三块五一斤", chars:[{c:"三",p:"sān"},{c:"块",p:"kuài"},{c:"五",p:"wǔ"},{c:"一",p:"yī"},{c:"斤",p:"jīn"}], tip:"菜价牌上写着多少钱一斤", kind:"new"},
+  {id:"market-6", scene:"market", icon:"🛒", text:"打折", chars:[{c:"打",p:"dǎ"},{c:"折",p:"zhé"}], tip:"便宜了，可以买", kind:"new"},
+  /* 公交地铁 */
+  {id:"transit-1", scene:"transit", icon:"🚇", text:"地铁站", chars:[{c:"地",p:"dì"},{c:"铁",p:"tiě"},{c:"站",p:"zhàn"}], tip:"看到这仨字，就是坐地铁的地方", kind:"review", days:1},
+  {id:"transit-2", scene:"transit", icon:"🚌", text:"公交站", chars:[{c:"公",p:"gōng"},{c:"交",p:"jiāo"},{c:"站",p:"zhàn"}], tip:"等公共汽车的牌子", kind:"new"},
+  {id:"transit-3", scene:"transit", icon:"🚌", text:"从前门上车", chars:[{c:"从",p:"cóng"},{c:"前",p:"qián"},{c:"门",p:"mén"},{c:"上",p:"shàng"},{c:"车",p:"chē"}], tip:"坐公交车，要从前门上车", kind:"new"},
+  {id:"transit-4", scene:"transit", icon:"🚇", text:"出口", chars:[{c:"出",p:"chū"},{c:"口",p:"kǒu"}], tip:"从这扇门出去", kind:"new"},
+  {id:"transit-5", scene:"transit", icon:"🚇", text:"换乘", chars:[{c:"换",p:"huàn"},{c:"乘",p:"chéng"}], tip:"在这里换另一趟车", kind:"new"},
+  {id:"transit-6", scene:"transit", icon:"🚌", text:"下一站", chars:[{c:"下",p:"xià"},{c:"一",p:"yī"},{c:"站",p:"zhàn"}], tip:"广播说这三个字后，就是站名了", kind:"new"},
+  /* 医院 */
+  {id:"hospital-1", scene:"hospital", icon:"🏥", text:"挂号处", chars:[{c:"挂",p:"guà"},{c:"号",p:"hào"},{c:"处",p:"chù"}], tip:"看病第一步，先来这里登记", kind:"review", days:3},
+  {id:"hospital-2", scene:"hospital", icon:"🏥", text:"内科三楼", chars:[{c:"内",p:"nèi"},{c:"科",p:"kē"},{c:"三",p:"sān"},{c:"楼",p:"lóu"}], tip:"看病要找对科室和楼层", kind:"new"},
+  {id:"hospital-3", scene:"hospital", icon:"🏥", text:"叫号", chars:[{c:"叫",p:"jiào"},{c:"号",p:"hào"}], tip:"屏幕上出现您的号，就轮到您了", kind:"new"},
+  {id:"hospital-4", scene:"hospital", icon:"🏥", text:"取药窗口", chars:[{c:"取",p:"qǔ"},{c:"药",p:"yào"},{c:"窗",p:"chuāng"},{c:"口",p:"kǒu"}], tip:"拿到药方后，来这里拿药", kind:"new"},
+  {id:"hospital-5", scene:"hospital", icon:"🏥", text:"饭后吃药", chars:[{c:"饭",p:"fàn"},{c:"后",p:"hòu"},{c:"吃",p:"chī"},{c:"药",p:"yào"}], tip:"吃完饭半小时再吃药", kind:"new"},
+  {id:"hospital-6", scene:"hospital", icon:"🏥", text:"打针", chars:[{c:"打",p:"dǎ"},{c:"针",p:"zhēn"}], tip:"护士扎一针，很快就好", kind:"new"},
+  /* 银行 */
+  {id:"bank-1", scene:"bank", icon:"🏧", text:"取款机", chars:[{c:"取",p:"qǔ"},{c:"款",p:"kuǎn"},{c:"机",p:"jī"}], tip:"从这台机器里取钱", kind:"new"},
+  {id:"bank-2", scene:"bank", icon:"🏦", text:"请输入密码", chars:[{c:"请",p:"qǐng"},{c:"输",p:"shū"},{c:"入",p:"rù"},{c:"密",p:"mì"},{c:"码",p:"mǎ"}], tip:"按您自己设的六个数字", kind:"new"},
+  {id:"bank-3", scene:"bank", icon:"🏦", text:"排队取号", chars:[{c:"排",p:"pái"},{c:"队",p:"duì"},{c:"取",p:"qǔ"},{c:"号",p:"hào"}], tip:"先拿一张号，等着叫号", kind:"new"},
+  {id:"bank-4", scene:"bank", icon:"🏦", text:"三号窗口", chars:[{c:"三",p:"sān"},{c:"号",p:"hào"},{c:"窗",p:"chuāng"},{c:"口",p:"kǒu"}], tip:"柜台按号码办业务", kind:"review", days:7},
+  {id:"bank-5", scene:"bank", icon:"🏦", text:"回执单", chars:[{c:"回",p:"huí"},{c:"执",p:"zhí"},{c:"单",p:"dān"}], tip:"办完事给的纸条，要收好", kind:"new"},
+  {id:"bank-6", scene:"bank", icon:"🏦", text:"存款", chars:[{c:"存",p:"cún"},{c:"款",p:"kuǎn"}], tip:"把钱交给银行保管", kind:"new"},
+  /* 办事 */
+  {id:"gov-1", scene:"gov", icon:"🏛️", text:"办事大厅", chars:[{c:"办",p:"bàn"},{c:"事",p:"shì"},{c:"大",p:"dà"},{c:"厅",p:"tīng"}], tip:"办证件、盖章都在这里", kind:"new"},
+  {id:"gov-2", scene:"gov", icon:"🪪", text:"身份证", chars:[{c:"身",p:"shēn"},{c:"份",p:"fèn"},{c:"证",p:"zhèng"}], tip:"最重要的证件，出门要带", kind:"new"},
+  {id:"gov-3", scene:"gov", icon:"🏛️", text:"请签字", chars:[{c:"请",p:"qǐng"},{c:"签",p:"qiān"},{c:"字",p:"zì"}], tip:"在这里写您的名字", kind:"review", days:3},
+  {id:"gov-4", scene:"gov", icon:"🏛️", text:"盖公章", chars:[{c:"盖",p:"gài"},{c:"公",p:"gōng"},{c:"章",p:"zhāng"}], tip:"工作人员盖章的地方", kind:"new"},
+  {id:"gov-5", scene:"gov", icon:"🖨️", text:"复印件", chars:[{c:"复",p:"fù"},{c:"印",p:"yìn"},{c:"件",p:"jiàn"}], tip:"证件的复印件，办事常常要", kind:"new"},
+  {id:"gov-6", scene:"gov", icon:"📝", text:"填表", chars:[{c:"填",p:"tián"},{c:"表",p:"biǎo"}], tip:"按格子把信息写进去", kind:"new"},
+  /* 吃饭 */
+  {id:"food-1", scene:"food", icon:"🍜", text:"牛肉面", chars:[{c:"牛",p:"niú"},{c:"肉",p:"ròu"},{c:"面",p:"miàn"}], tip:"最常见的一碗面", kind:"new"},
+  {id:"food-2", scene:"food", icon:"🌶️", text:"微辣", chars:[{c:"微",p:"wēi"},{c:"辣",p:"là"}], tip:"只有一点点辣", kind:"new"},
+  {id:"food-3", scene:"food", icon:"🥢", text:"加一双筷子", chars:[{c:"加",p:"jiā"},{c:"一",p:"yī"},{c:"双",p:"shuāng"},{c:"筷",p:"kuài"},{c:"子",p:"zi"}], tip:"请服务员多拿一双筷子", kind:"new"},
+  {id:"food-4", scene:"food", icon:"🧾", text:"买单", chars:[{c:"买",p:"mǎi"},{c:"单",p:"dān"}], tip:"吃完饭结账，就说这两个字", kind:"review", days:1},
+  {id:"food-5", scene:"food", icon:"🧾", text:"小票", chars:[{c:"小",p:"xiǎo"},{c:"票",p:"piào"}], tip:"结账后的小纸条，留着对账", kind:"new"},
+  {id:"food-6", scene:"food", icon:"📖", text:"菜单", chars:[{c:"菜",p:"cài"},{c:"单",p:"dān"}], tip:"写着所有菜和价格的本子", kind:"new"}
+];
+const TERM_MAP = {}; TERMS.forEach(t=>TERM_MAP[t.id]=t);
+
+/* 推荐频道：复习与新学交错（记忆曲线混排演示） */
+const REC_QUEUE = ["transit-1","transit-2","hospital-1","hospital-2","market-1","market-2"];
+const INTERVALS = [1,3,7,15];
+
+/* ==================== 应用状态 ==================== */
+const state = {
+  channel:"rec",
+  forgot:{},            /* 生词本：termId -> 次数 */
+  session:{known:0,forgot:0},
+  fscale:1, rate:0.85, remind:"下午 3 点",
+  spokenSet:{},         /* 卡片自动朗读去重 */
+  greeted:false
+};
+try{
+  const saved=JSON.parse(localStorage.getItem("lcs2-settings")||"null");
+  if(saved) Object.assign(state,{fscale:saved.fscale??1,rate:saved.rate??0.85,remind:saved.remind??"下午 3 点"});
+}catch(e){}
+
+/* ==================== 语音 ==================== */
+let zhVoice=null;
+function pickVoice(){
+  if(!window.speechSynthesis) return;
+  const vs=speechSynthesis.getVoices();
+  zhVoice=vs.find(v=>/zh[-_]CN/i.test(v.lang))||vs.find(v=>/^zh/i.test(v.lang))||null;
+}
+if(window.speechSynthesis){ pickVoice(); speechSynthesis.onvoiceschanged=pickVoice; }
+function speak(text){
+  if(!window.speechSynthesis) return;
+  try{
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text);
+    if(zhVoice) u.voice=zhVoice;
+    u.lang="zh-CN"; u.rate=state.rate;
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+/* 点按朗读（顶栏按钮等带 data-say 的元素） */
+document.getElementById("phone").addEventListener("click",e=>{
+  const el=e.target.closest("[data-say]");
+  if(el && !el.disabled) speak(el.dataset.say);
+});
+
+/* ==================== 频道与 Feed ==================== */
+function buildQueue(channelId){
+  let q;
+  if(channelId==="rec"){
+    q = REC_QUEUE.map(id=>TERM_MAP[id]);
+  }else{
+    q = TERMS.filter(t=>t.scene===channelId);
+  }
+  return q;
+}
+function renderChannels(){
+  const bar=document.getElementById("channelbar");
+  bar.innerHTML=SCENES.map(s=>
+    `<button class="chip ${s.id===state.channel?"active":""}" data-say="${s.name}" onclick="switchChannel('${s.id}')">${s.icon} ${s.name}</button>`
+  ).join("");
+}
+function switchChannel(id){
+  if(state.channel===id) return;
+  state.channel=id;
+  state.spokenSet={};
+  renderChannels();
+  renderFeed();
+  speak("换到"+SCENES.find(s=>s.id===id).name+"频道");
+}
+function renderFeed(){
+  const q=buildQueue(state.channel);
+  const total=q.length+1;                      /* 词条 + 完成卡 */
+  const feed=document.getElementById("feed");
+  feed.innerHTML=q.map((t,i)=>termCardHTML(t,i,total)).join("")+doneCardHTML(q.length+1,total);
+  feed.scrollTop=0;
+  observeCards();
+}
+function termCardHTML(t,idx,total){
+  const isReview=t.kind==="review";
+  const badge=isReview
+    ? `<span class="badge review">🔁 复习 · 距上次 ${t.days} 天</span>`
+    : `<span class="badge new">✨ 新学</span>`;
+  const chars=t.chars.map(ch=>
+    `<span class="tchar" data-say="${ch.c}" onclick="event.stopPropagation();openCharSheet('${ch.c}')">${ch.c}</span>`).join("");
+  const pinyins=t.chars.map(ch=>`<span>${ch.p}</span>`).join("");
+  const pyClass=isReview?"pinyin hidden":"pinyin";
+  const tipClass=isReview?"tip hidden":"tip";
+  const body=`
+    <div class="card-body" onclick="speakTerm('${t.id}')">
+      <div class="scene-icon" style="background:${SCENES.find(s=>s.id===t.scene).color}">${t.icon}</div>
+      ${badge}
+      <div class="term len${t.chars.length}">${chars}</div>
+      <div class="${pyClass}" id="py-${t.id}">${pinyins}</div>
+      <div class="${tipClass}" id="tip-${t.id}">💡 ${t.tip}</div>
+      <div class="relisten">👆 点一下，再听一遍 · 点单字看讲解</div>
+    </div>`;
+  const actions=isReview
+    ? `<div class="fb-actions" id="fb-${t.id}">
+         <button class="fb-btn fb-known" data-say="认识" onclick="reviewAnswer('${t.id}',true)"><span class="fi">😀</span>认识</button>
+         <button class="fb-btn fb-forgot" data-say="忘了" onclick="reviewAnswer('${t.id}',false)"><span class="fi">😕</span>忘了</button>
+       </div>`
+    : `<div class="swipe-hint">上滑看下一个 ↑</div>`;
+  return `
+  <section class="fcard" data-term="${t.id}" data-idx="${idx+1}">
+    <div class="progress-row">
+      <span class="prog-text">第 ${idx+1} / ${total} 张</span>
+      <span class="prog-bar"><span class="fill" style="width:${(idx+1)/total*100}%"></span></span>
+    </div>
+    ${body}
+    ${actions}
+  </section>`;
+}
+function doneCardHTML(idx,total){
+  return `
+  <section class="fcard" data-done="1" data-idx="${idx}">
+    <div class="progress-row">
+      <span class="prog-text">第 ${idx} / ${total} 张</span>
+      <span class="prog-bar"><span class="fill" style="width:100%"></span></span>
+    </div>
+    <div class="done-card">
+      <div class="party">🎉</div>
+      <div class="dt">今天学完啦！</div>
+      <div class="ds" id="done-stats">认识了 0 个，忘了 0 个（明天再来）</div>
+      <button class="btn btn-primary" data-say="从头再看一遍" onclick="replayFeed()">🔄 从头再看一遍</button>
+      <div class="relisten">明天记得再来学一会儿</div>
+    </div>
+  </section>`;
+}
+function replayFeed(){
+  state.session={known:0,forgot:0};
+  state.spokenSet={};
+  renderFeed();
+  speak("好，我们从头再看一遍");
+  updateDoneStats();
+}
+
+/* 词条朗读：词 + 用途 */
+function speakTerm(id){
+  const t=TERM_MAP[id];
+  speak(t.text+"。"+t.tip);
+}
+function termFullText(t){ return t.text+"。"+t.tip; }
+
+/* ==================== 复习反馈 ==================== */
+function reviewAnswer(id,known){
+  const t=TERM_MAP[id];
+  const fb=document.getElementById("fb-"+id);
+  if(!fb || fb.dataset.done) return;           /* 防重复点按 */
+  fb.dataset.done="1";
+  document.getElementById("py-"+id).classList.remove("hidden");
+  document.getElementById("tip-"+id).classList.remove("hidden");
+  let resultHTML;
+  if(known){
+    state.session.known++;
+    const cur=INTERVALS.indexOf(t.days);
+    const next=INTERVALS[Math.min(cur+1,INTERVALS.length-1)];
+    t.days=next;
+    resultHTML=`<div class="fb-result ok">👍 记得牢！${next} 天后再见</div>`;
+  }else{
+    state.session.forgot++;
+    state.forgot[id]=(state.forgot[id]||0)+1;
+    t.days=1;
+    resultHTML=`<div class="fb-result re">没关系，明天再来一遍 💪 已加入生词本</div>`;
+    updateWordbookBadge();
+  }
+  fb.outerHTML=resultHTML+`<div class="swipe-hint">上滑看下一个 ↑</div>`;
+  updateDoneStats();
+  setTimeout(()=>speak(termFullText(t)),200);
+}
+
+/* ==================== 完成卡统计 ==================== */
+function updateDoneStats(){
+  const el=document.getElementById("done-stats");
+  if(el) el.textContent=`认识了 ${state.session.known} 个，忘了 ${state.session.forgot} 个（明天再来）`;
+}
+
+/* ==================== 自动朗读（进入视口） ==================== */
+let io=null;
+function onCardVisible(card){
+  const id=card.dataset.term;
+  const key=state.channel+":"+id;
+  if(state.spokenSet[key]) return;
+  state.spokenSet[key]=true;
+  if(id){
+    const t=TERM_MAP[id];
+    if(t.kind==="review"){
+      speak(t.text+"。还记得它念什么吗？想一想，再按下面的按钮");
+    }else{
+      speak(termFullText(t));
+    }
+  }else if(card.dataset.done && !state.spokenSet[state.channel+":done"]){
+    state.spokenSet[state.channel+":done"]=true;
+    speak("太棒了，今天的内容学完了！认识了"+state.session.known+"个，忘了"+state.session.forgot+"个。明天记得再来。");
+  }
+}
+function observeCards(){
+  const cards=document.querySelectorAll(".fcard");
+  if("IntersectionObserver" in window){
+    if(io) io.disconnect();
+    io=new IntersectionObserver(entries=>{
+      entries.forEach(en=>{ if(en.isIntersecting) onCardVisible(en.target); });
+    },{root:document.getElementById("feed"),threshold:0.6});
+    cards.forEach(c=>io.observe(c));
+  }else{
+    /* 降级：滚动监听（旧浏览器/测试环境） */
+    cards.forEach((c,i)=>{ if(i===0) onCardVisible(c); });
+  }
+}
+
+/* ==================== 字卡弹层 ==================== */
+function openCharSheet(ch){
+  const info=charInfo(ch);
+  const sheet=document.getElementById("sheet-char");
+  sheet.innerHTML=`
+    <button class="sheet-close" data-say="关闭" onclick="closeSheets()">✕</button>
+    <div class="cs-head" onclick="speak('${ch}')"><span class="cs-char">${ch}</span></div>
+    <div class="cs-py" onclick="speak('${ch}')">${info.p}</div>
+    <hr class="divider">
+    <div class="section-label">🗣️ 出现在这些词里（点一下听）</div>
+    <div class="word-chips">${info.words.map(w=>`<button class="wchip" data-say="${w}">${w}</button>`).join("")}</div>
+    <div class="relisten" style="text-align:center;margin-top:16px">👆 点上面的字和词，就能听发音</div>`;
+  sheet.style.display="block";
+  document.getElementById("sheet-mask").classList.add("open");
+  sheet.classList.add("open");
+  setTimeout(()=>speak(ch+","+info.p),250);
+}
+function charInfo(ch){
+  let p="";
+  const words=[];
+  TERMS.forEach(t=>{
+    if(t.chars.some(x=>x.c===ch)){
+      if(!p){ const hit=t.chars.find(x=>x.c===ch); p=hit.p; }
+      words.push(t.text);
+    }
+  });
+  if(!p) p="—";
+  return {p,words};
+}
+
+/* ==================== 设置 / 生词本弹层 ==================== */
+function openSheet(id){
+  const el=document.getElementById(id);
+  el.style.display="block";
+  document.getElementById("sheet-mask").classList.add("open");
+  requestAnimationFrame(()=>el.classList.add("open"));
+}
+function closeSheets(){
+  document.getElementById("sheet-mask").classList.remove("open");
+  ["sheet-char","scr-settings","sheet-wordbook"].forEach(id=>{
+    const el=document.getElementById(id);
+    el.classList.remove("open");
+    setTimeout(()=>{ el.style.display="none"; },280);
+  });
+}
+function openWordbook(){
+  renderWordbook();
+  openSheet("sheet-wordbook");
+  const n=Object.keys(state.forgot).length;
+  speak(n>0?("生词本里有"+n+"个词。点一下就能听"):"生词本是空的，忘掉的词会自动收进来");
+}
+function updateWordbookBadge(){
+  const n=Object.keys(state.forgot).length;
+  const b=document.getElementById("wb-badge");
+  b.textContent=n; b.classList.toggle("show",n>0);
+}
+function renderWordbook(){
+  const list=document.getElementById("wb-list");
+  const ids=Object.keys(state.forgot);
+  if(!ids.length){
+    list.innerHTML=`<div class="wb-empty">还是空的 📕<br>忘了的词会自动收进来，点开就能复习</div>`;
+    return;
+  }
+  list.innerHTML=ids.map(id=>{
+    const t=TERM_MAP[id];
+    return `<div class="wb-item" onclick="speak('${t.text}')">
+      <span class="w">${t.text}</span>
+      <span class="p">${t.chars.map(c=>c.p).join(" ")}</span>
+      <span class="n">忘了 ${state.forgot[id]} 次</span>
+    </div>`;
+  }).join("");
+}
+
+/* ==================== 设置项 ==================== */
+function setFontScale(v,btn){
+  state.fscale=v;
+  document.documentElement.style.setProperty("--fscale",v);
+  document.querySelectorAll("#seg-font .seg-btn").forEach(b=>b.classList.remove("sel"));
+  btn.classList.add("sel");
+  toastMsg(v>1?"字体已放大 🔎":"字体已恢复正常");
+  saveSettings();
+}
+function setRate(v,btn){
+  state.rate=v;
+  document.querySelectorAll("#seg-rate .seg-btn").forEach(b=>b.classList.remove("sel"));
+  btn.classList.add("sel");
+  speak("这是现在的朗读速度");
+  saveSettings();
+}
+function setRemind(v,btn){
+  state.remind=v;
+  document.querySelectorAll("#seg-remind .seg-btn").forEach(b=>b.classList.remove("sel"));
+  btn.classList.add("sel");
+  toastMsg("每天 "+v+" 提醒 ⏰");
+  saveSettings();
+}
+function saveSettings(){
+  try{ localStorage.setItem("lcs2-settings",JSON.stringify({fscale:state.fscale,rate:state.rate,remind:state.remind})); }catch(e){}
+}
+function restoreSettingsUI(){
+  document.documentElement.style.setProperty("--fscale",state.fscale);
+  const fBtns=document.querySelectorAll("#seg-font .seg-btn");
+  fBtns.forEach((b,i)=>b.classList.toggle("sel",(i===0&&state.fscale===1)||(i===1&&state.fscale>1)));
+  const rates=[0.7,0.85,1.0], ri=rates.indexOf(state.rate);
+  document.querySelectorAll("#seg-rate .seg-btn").forEach((b,i)=>b.classList.toggle("sel",i===ri));
+  const rms=["上午 9 点","下午 3 点","晚上 7 点"], mi=rms.indexOf(state.remind);
+  document.querySelectorAll("#seg-remind .seg-btn").forEach((b,i)=>b.classList.toggle("sel",i===mi));
+}
+
+/* ==================== Toast ==================== */
+let toastTimer=null;
+function toastMsg(msg){
+  const t=document.getElementById("toast");
+  t.textContent=msg; t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>t.classList.remove("show"),2400);
+}
+
+/* ==================== 时钟 & 缩放 ==================== */
+function tickClock(){
+  const d=new Date();
+  document.getElementById("clock").textContent=String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");
+}
+function fitPhone(){
+  const s=Math.min(1,(window.innerHeight-36)/915,(window.innerWidth-24)/412);
+  const ph=document.getElementById("phone"), st=document.getElementById("stage");
+  ph.style.transform="scale("+s+")";
+  st.style.width=412*s+"px"; st.style.height=915*s+"px";
+}
+window.addEventListener("resize",fitPhone);
+
+/* ==================== 启动 ==================== */
+tickClock(); setInterval(tickClock,30000);
+fitPhone();
+renderChannels();
+renderFeed();
+restoreSettingsUI();
+if(!state.greeted){
+  state.greeted=true;
+  setTimeout(()=>speak("欢迎回来。上滑开始学习，今天有新词，也有要复习的词。"),500);
+}
+</script>
+</body>
+</html>
