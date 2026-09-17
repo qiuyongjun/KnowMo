@@ -37,3 +37,41 @@
 - **未验证项**：本机无 JDK / Android SDK / `gradlew`（仓库只有 wrapper properties），`gradlew assembleDebug` 跑不了，且 `cmd.exe` 被沙箱拒绝。编译交由 CI（`.github/workflows/android-build.yml`，ubuntu + JDK 17 + Gradle 8.7）在 push 后验证。任务因此保持 `in_progress`，未归档。
 - 环境坑：本机 Bash 工具不可用（portable-git shim 报 `ls`/`dirname: command not found`），PowerShell 工具**不返回 stdout**，只能把输出重定向到文件再用 Read 读取；PowerShell 也不支持 bash 的 `<<'EOF'`，提交信息要走 `git commit -F <文件>`。
 
+---
+
+## 2026-09-17 — v5 R7 重做：完成卡「真做完才出现」+ feed 前向消化（提交 `123d273`）
+
+**任务**：`.trellis/tasks/09-17-scheduling-v5`（R7 被整体替换，上一版实现见 `56c897b`）
+
+### 用户否掉了上一版做法
+
+原话大意：**不希望快速划过就看到「任务完成」；应该是真的完成今日任务后才看到完成卡，而不是把卡片固定在某个位置。**
+
+复核代码确认旧口径确实补不住：`pending` 只数「未作答复习卡」，而整天都是新词卡时，新词卡被快速甩过不触发停稳教读（`markSeen` 只在停稳 200ms 后才跑），该口径恒为 0 → 完成卡照样宣告完成。**只要完成卡还与队尾绑定，「滑到底」就等于「完成」。**
+
+### 用户给出了更好的方案
+
+我给了三个「末尾怎么办」的选项（停在最后一张 / 加末页提示 / 继续滑进自由刷），用户没选任何一个，而是提出：**能不能让他可以无限刷，但都是没答完的卡，这样不需要刷回去答，一直往后刷总会刷完。**
+
+这条直接把设计推到更干净的位置——不是「怎么提示用户往回滑」，而是**让「往回滑」这件事不再必要**：
+
+- **前向消化**：向前滑过的待处理卡回收队尾。不变量：frontier 之前全是已处理卡、frontier 起全是待处理卡，用户永远站在 frontier 上。
+- **完成卡条件出现**：`pending == 0` 时才插入 feed（`syncDonePage()`）。完成是**事件**，不是位置。
+- 跳过依然不写任何状态（跳过 = 稍后，不是放弃），不锁滑动。
+- 装载时对任务区做稳定分区；断点 = frontier（「在哪儿」就等于「做到哪儿了」）。
+- 战果改当日持久计数（`DayState.knownAnswers/forgotAnswers`）：今天学完了 N 个词 · 认识了 x 次，忘了 y 次。
+
+### 踩坑记录（都已沉淀进 spec）
+
+1. **`appendReviewCard` 插入点**：`indexOfFirst { it is Page.Done }.coerceAtLeast(0)` 在 Done 缺席（新模型下的**常态**）时 -1 → 0，会把新卡插到**队首**。改成取不到就 `pages.size`。
+2. **pager 必须传 `key`**：回收会移动列表项，无稳定 key 时 pager 按 index 定位，会把用户正在看的卡换成别的卡。
+3. **播报 effect 的 key 不能含 `pages`**：recycle/append 都在该 effect 体内改 `pages` → effect 自我重启，那次播报丢失。规则：**effect 体内写过的 state，不要作为自己的 key**。
+4. **去重键改绑页身份（`seq`）**：含下标会在卡被回收后再滑到时重复播报。上一版用 `done:${pending}` 也属多余。
+5. **回收算术**：`lastSettled = idx − 回收张数`；往回滑（`idx < lastSettled`）与跳页只移动锚点、不回收（身后只可能是已处理卡）。
+6. 原型侧 check 阶段发现真缺陷：位移补偿原先在 DOM 变更**之后**读 `scrollTop` 再减，而 Chrome/Firefox 的 scroll anchoring 会自动补一次 → 二次扣减。改为变更**前**取值。
+
+### 结论/后续
+
+- 提交 `123d273`（10 文件，+476/−232）。**编译仍未验证**（本机无 JDK/SDK/gradlew），任务保持 `in_progress`；`main` 领先 `origin/main` 若干提交，**待用户确认后 push 让 CI 跑 `assembleDebug`**。
+- 一个已知留白：`DailyQueue.position` 现在只写不读（断点统一走 frontier），check 判定为「不修、仅记录」——删字段会动持久化 schema。
+
