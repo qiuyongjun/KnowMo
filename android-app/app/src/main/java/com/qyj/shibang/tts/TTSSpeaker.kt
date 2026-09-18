@@ -71,9 +71,11 @@ class TTSSpeaker(context: Context) {
                 speaking = false
             }
 
-            // onError(String) 是 API 21 起 deprecated 的**旧重载**（新重载带 errorCode），框架两条路径都会回调，
-            // 故一并覆盖；它非抽象成员（覆盖是可选的），只在 Kotlin 2.0 下产生 OVERRIDE_DEPRECATION **警告**
-            // （不是错误；app/build.gradle.kts 未开 allWarningsAsErrors），@Suppress 把它压掉。
+            // onError(String) 是 API 21 起被 deprecated 的**旧重载**（新重载带 errorCode）。它是平台的
+            // **抽象**成员——**必须**覆盖（不覆盖编译不过），而覆盖它又会在 Kotlin 2.0 下产生
+            // OVERRIDE_DEPRECATION **警告**（不是错误；app/build.gradle.kts 未开 allWarningsAsErrors），
+            // 故用 @Suppress 压掉。新重载 onError(String?, Int) 与 onStop 都有默认实现，一并覆盖是为了让
+            // 三条路径（onDone / onError / onStop）都能清 speaking——漏任何一条都会让 awaitQuiet() 挂到 20s 上限。
             @Suppress("OVERRIDE_DEPRECATION")
             override fun onError(utteranceId: String?) {
                 speaking = false

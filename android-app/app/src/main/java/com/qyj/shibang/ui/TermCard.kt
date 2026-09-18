@@ -48,6 +48,10 @@ import com.qyj.shibang.ui.theme.RedForgot
  * v5 防泄题 + 求助通道：考试态未作答时点卡片的分流逻辑在调用方（AppRoot 传对应的 onSpeakTerm）；
  * peeked = 「想看答案」求助展开（会话态，不写任何学习状态）——拼音/提示显示但认识/忘了按钮保留，可继续作答。
  * 不再展示"第 x/y 张"进度条（队列边界对用户不可见）。
+ * v5 R9 队尾轻提示（footerHint）：**仅分区**（专题自主练习）的最后一张卡传入，在动作区之下渲染一行弱权重文案
+ * ——分区没有完成卡，用一句轻提示代替收尾页（否则上滑无反应会被高龄用户当成卡死）。它是**轻提示**不是完成卡，
+ * 故刻意做得比正文弱（小字号、次级色、无动效）；播报侧由 AppRoot 按同一条件并入该卡的同一句 speak。
+ * footerHint 非空时**不渲染 `SwipeHint`**——轻提示已说明「没有下一张」，再显示「上滑看下一个 ↑」自相矛盾。
  */
 @Composable
 fun TermCard(
@@ -60,6 +64,7 @@ fun TermCard(
     onPeek: () -> Unit,
     onCharClick: (TermChar) -> Unit,
     onAnswer: (Boolean) -> Unit,
+    footerHint: String? = null,
 ) {
     // 新学卡无反馈按钮；复习/温故卡在作答前都出「认识/忘了」（v4：自由刷同样可作答，走同一双层状态机）
     val isExam = mode != CardMode.NEW
@@ -204,7 +209,23 @@ fun TermCard(
                 )
                 Spacer(Modifier.height(6.dp))
             }
-            SwipeHint()
+            // v5 R9：队尾轻提示已说明「没有下一张」，此时再显示「上滑看下一个 ↑」自相矛盾
+            //（分区最后一张卡上滑确实没有内容），故有 footerHint 时让位给轻提示
+            if (footerHint == null) SwipeHint()
+        }
+
+        // v5 R9 分区队尾轻提示：动作区**之后**的一行弱权重文案（专门放在最后，不挤占动作区）
+        footerHint?.let { hint ->
+            Spacer(Modifier.height(4.dp))
+            Text(
+                hint,
+                fontSize = 18.sp,
+                color = AppText2,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 6.dp),
+            )
         }
     }
 }

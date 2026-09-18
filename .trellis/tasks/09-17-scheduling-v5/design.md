@@ -11,6 +11,7 @@
 | P0-2 | 「忘了」词排序反向 | markForgot 写 {days=1, lastSeen=今天} → 次日 dueTime 全池最新 → dueTime 升序排池尾 | 超额日 take(quota) 首先挤掉昨天刚忘的词——最需要复现的词反而见不到 |
 | P1-1 | 复习卡点按泄题 | TermCard 主区域 clickable → onSpeakTerm 对所有形态生效 | 考试态未作答时一个 tap 听到「词+提示」，考回忆契约失效，连击虚高 |
 | P1-2 | 完成卡与队列完成度不一致 | ① 完成卡与队尾绑定（`pages` = 队列卡 + Done），滑到底 ≡ 完成；② 上一轮补救口径只数「未作答复习卡」，漏掉「整天都是新词卡被快速甩过」——新词卡未停稳就不触发教读，该口径恒为 0；③ 第二轮补救「滑过即回收队尾」保证了前向可达，但机制**不可见**且**不终止**（回收无次数上限、未答完时 FREE 页不追加）| 一张卡没答也能听到「今日任务完成」；完成卡变成固定在队尾的装饰，而不是成绩；第二轮之后的问题形态变成**无限循环**——同一批卡反复出现，没有完成卡、进不去温故、也没有任何解释 |
+| P1-3 | 分区被当成「第二个每日任务」 | 每个频道各有一套当日队列 + **一张完成卡**，文案一律「今日任务完成！」（一天最多能「完成」13 次）；场景频道沿用 `due + news` 全量入队。R7 改判后「不允许越过未处理的卡」在分区里**没有任何收尾页来终止它** | 进分区即约 120 张强制卡（15–20 分钟）；若分区按到期筛选，则刚毕业的分区（全部词 days ≥ 15 且未到期）pool 为空 → `pageCount == 0` **白屏**、可持续十几天 |
 
 ## 1. 决策
 
@@ -29,6 +30,10 @@
 | 待处理口径 | 新学卡按**是否已教读**、复习卡按**是否已作答**；FREE 卡不计入 | 新词卡是当日任务真实的一员，只数复习卡会整片漏判；停稳教读（markSeen）才等于这张新词卡真的被处理过 |
 | 战果数字 | 当日持久计数（`DayState` 增设认识/忘了次数），不用会话计数 | 完成是跨会话可达的事件（10 张配额约 30 张卡），会话计数重启归零会让最该真实的完成卡显示「认识了 0 个」 |
 | 作答后前进 | **自动前进**（等本次播报念完 + 最短停留的两段式等待；新词卡不适用） | 高龄用户答完停在原地、不知道下一步做什么。R7 管「没作答不能走」、R8 管「作答完自动走」——合起来 feed 只剩一种前进方式：处理完当前卡（§5.5） |
+| 分区定位 | **专题自主练习**：不设完成卡、不做前向拦截、不做到期筛选、滑完停住 | 「每日任务」应当只有一份。分区不设完成卡 → R7 前向拦截的**唯一存在理由**（保证完成卡 = 真做完，§5.2）随之消失；不做到期筛选 → 排除刚毕业分区的空队列白屏。详见 §5.6 |
+| 分区队列范围 | 该区**全部词**（已学按「lapses 降序 → dueTime 升序」在前，未学洗牌接后） | 「自主练习」= 进来就有东西练。若保留到期筛选，一个刚毕业的分区（全部词 days ≥ 15 且未到期）会在十几天里 pool 为空 |
+| 分区断点 | 上次滑到的那一页（**不是** frontier） | 自由划之后「在哪儿」≠「做到哪儿了」；用 frontier 会把用户拽回第一张未处理的卡 |
+| 分区收尾 | **轻提示**（最后一张卡底部 + 并入该卡播报），不是完成卡 | 分区没有「完成」语义；但上滑无反应会被高龄用户当成卡死，需要一句看得见也听得见的「就这些了」 |
 
 ## 2. 数据模型变更
 
@@ -48,19 +53,26 @@ data class TermState(val days: Int, val lastSeen: String, val lapses: Int = 0)
 ## 3. 排序与配额（buildQueue）
 
 ```kotlin
-val due = scope.filter { isDue(...) }
-    .sortedWith(
-        compareByDescending<Int> { termStates[it]?.lapses ?: 0 }
-            .thenBy { termStates[it]?.let { s -> dueTime(s) } ?: Long.MAX_VALUE }
-    )
+// 已学词统一排序（v5 双键）：lapses 降序（忘词先见）→ dueTime 升序（先清旧债）
+// ⚠️ 类型参数是**元素类型**（词 id = String），必须是 <String>：
+//    写 <Int> 会得到 Comparator<Int>——与 List<String>.sortedWith(Comparator<in String>) 不匹配，
+//    且 lambda 内 id: Int 会让 termStates[id] 直接编译不过（本轮修的就是这个）
+val learned = scope.filter { termStates[it] != null }.sortedWith(
+    compareByDescending<String> { id -> termStates[id]?.lapses ?: 0 }
+        .thenBy { id -> termStates[id]?.let { s -> dueTime(s) } ?: Long.MAX_VALUE }
+)
+val due  = learned.filter { isDue(termStates[it]!!) }
+val news = scope.filter { termStates[it] == null }.shuffled()
 val pool = when {
-    channel == "rec" && due.size >= DEBT_THRESHOLD -> due.take(DEBT_QUOTA)   // 清债模式
-    channel == "rec" -> (due + news).take(DAILY_POOL_QUOTA)                   // 现状
-    else -> due + news                                                        // 场景频道不变
+    channel == CHANNEL_DAILY && due.size >= DEBT_THRESHOLD -> due.take(DEBT_QUOTA)  // 清债模式
+    channel == CHANNEL_DAILY -> (due + news).take(DAILY_POOL_QUOTA)                 // 现状
+    else -> learned + news                                                          // 分区（R9）：不看到期日
 }
 ```
 
-常量：`INTERVALS = [1, 3, 7, 15, 30]`；`GRADUATED_DAYS = 15`（const，不再跟随 INTERVALS.last()）；`DEBT_THRESHOLD = 20`；`DEBT_QUOTA = 15`。
+> R9：分区（`channel != CHANNEL_DAILY`）**不做到期筛选**——`learned` 已按「忘得最多 / 最快到期」排序，整段入队，未学词接在后。`CHANNEL_DAILY = "rec"` 由常量统一，不再各处硬编码字符串。
+
+常量：`INTERVALS = [1, 3, 7, 15, 30]`；`GRADUATED_DAYS = 15`（const，不再跟随 INTERVALS.last()）；`DEBT_THRESHOLD = 20`；`DEBT_QUOTA = 15`；`CHANNEL_DAILY = "rec"`。
 
 > ⚠️ 有意打破 09-17-elderly-literacy-app/design.md §8「毕业阈值自动跟随阶梯」不变量：阶梯与毕业解耦后，改阶梯不再自动改毕业门槛。GRADUATED_DAYS 必须显式评审。
 
@@ -95,6 +107,8 @@ val pool = when {
 - 上一版「还有 N 张没作答 / 往下滑，回去把它们答完」分支与对应播报**删除**（条件出现后不可达，留作死代码只会误导）。
 - 播报去重键按**页身份**：`channel:seq:<seq>`（词卡）/ `channel:done`（完成卡），**不含下标**。列表已不重排，下标键本可工作；仍绑 `seq` 是为了让「页身份」与「列表位置」解耦——追加（考核卡 / 完成卡 / 自由刷页）与将来可能重新引入的重排都不会改到已播报的键。完成卡用常量键是安全的：`pending == 0` 之后不可能再产生待处理卡（追加只发生在未毕业词上，而此时任务区所有词都已毕业；自由刷作答不追加），所以完成卡一旦出现就不会再消失。
 ### 5.2 不允许越过未处理的卡（前向拦截）
+
+> **适用范围（R9）**：**仅每日任务频道（`CHANNEL_DAILY`）**。这条规则的全部意义是「让完成卡 = 真做完」（§5.1 的 `pending == 0`）；分区没有完成卡 → 没有「真做完」这个概念 → 分区**自由划**。分区若也拦，就是「全量入队 + 不可跳过 + 无收尾页」，是本版最糟的组合。
 
 - **规则**：pager 向前停稳到 `i` 时，若 `pages` 中在 `i` 之前仍存在待处理卡，则**退回最靠前的那一张**（`pagerState.animateScrollToPage(block)`），然后 `return`（本次不播被拦页的 cardSpeech）。**不播任何提示语**。**列表顺序完全不动**：不回收、不重排、不写任何学习状态（不碰 `revealed` / `peeked` / `results`，不调 repo）。
 - **判定式**：`block = pages.indexOfFirst { isPending(it) }`，当且仅当 `block >= 0 && block < i` 时拦截。**同一个 `isPending` 谓词同时定义「完成卡何时出现」与「何时拦人」**——一个口径，不会漂移。`pending == 0`（自由刷区）恒不拦。
@@ -131,8 +145,26 @@ val pool = when {
 - **落点 = `cur + 1`**：作答后未移除的考核卡追加在**队尾**，不改变下标关系；若当前卡是最后一张待处理卡，`syncDonePage()` 已在作答时同步插入完成卡，落点恰好是完成卡——当日会话自然收尾。
 - **取消机制**：用 `advanceAfterSpeechSeq`（记作答卡的 `seq`）作 `LaunchedEffect` 的 key，effect 收尾置回 -1。⚠️ **置回 -1 必须排在 `animateScrollToPage` 之后（finally），并且「比较后再清」**（`if (advanceAfterSpeechSeq == seq) advanceAfterSpeechSeq = -1`）：它是本 effect 自己会改写的 key，写在翻页之前会让 effect 被自己重启并取消、动画刚开始就被掐掉（spec/frontend/state-management.md Gotcha (2)）；而动画途中用户若已答下一张（key 已是新 `seq`），收尾也不能把新 key 抹掉。同理不能把 `delay` / `awaitQuiet` 包进同一个 finally。
 
+### 5.6 分区 = 专题自主练习（R9）
+
+- **完成卡只在每日任务频道存在**：`syncDonePage()` 在 `channel != CHANNEL_DAILY` 时直接 `return`。分区 feed 里没有任何收尾页，`pages` = 队列卡（+ 作答未移除时追加的考核卡）。
+- **前向拦截只在每日任务频道生效**：`blockingIndex(idx)` 在 `channel != CHANNEL_DAILY` 时返回 -1。分区自由划——快甩过任意多张未处理的卡都不被退回，`pages` 不动、连击/间隔/answered 不因此变化。
+- **队列 = 该区全部词**（§3）：不做到期筛选，因此**不存在空队列**。这是硬要求而非优化：若保留到期筛选，一个刚毕业的分区（全部词 `days ≥ 15` 且未到期，可持续十几天）会让 `pool` 为空 → `pageCount == 0` → `VerticalPager` **白屏**（现版本是靠「pool 空 → 队列只有完成卡 + 直接自由刷」兜住的，分区拿掉完成卡后就再没有东西兜了）。
+- **滑完停住 + 轻提示**：分区不再触发 `appendFreePages`——它本就以 `doneIdx >= 0` 为前提，而分区 `doneIdx` 恒为 -1，**无需改代码**即自然停住。最后一张卡追加一句轻提示：
+  - 视图：`TermCard(..., footerHint = ...)`，调用点判定 `channel != CHANNEL_DAILY && idx == pages.lastIndex` 时传入；**不新增页**——新增页会和完成卡长得像，正是 R9 要消除的混淆。
+  - 播报：在该页 `cardSpeech` 之后拼一句（⚠️ 必须与 cardSpeech 拼成**同一句** `speak`——`QUEUE_FLUSH` 下分两次 speak 会互相掐断，与 R7/R8 同一根因）。
+  - ⚠️ 「最后一张」**是会变的**：分区作答未移除时 `appendReviewCard` 仍会追加考核卡（`insertAt` 在无完成卡时天然落到 `pages.size`），提示随之移到新队尾；而分区**不做拦截**，用户快甩也能立刻抵达队尾。所以这句轻提示的准确含义是**「后面没有了」**（对当前位置而言），**不是「你练完了」**——这正是它必须是轻提示而不是完成卡的原因，读的时候不要把它当成完成语义。
+  - ⚠️ 有 `footerHint` 时**不渲染 `SwipeHint`**（`TermCard`）：「上滑看下一个 ↑」与「后面没有了」自相矛盾，高龄用户对矛盾的容忍度极低（同一处理在原型 `refreshTailHint` 里）。
+- **原型的已知简化**（不构成契约分歧，但别照着原型核对面）：原型没有 SRS 持久层，`buildQueue` 的场景分支是文档序（无法表达「已学在前」），作答也不追加考核卡（只换按钮区）——因此原型里的「最后一张」在 `renderFeed` 时定一次即可、不会移动。R9 的 5 条契约（无完成卡 / 不拦截 / 不做到期筛选 / 滑完停住 + 轻提示 / 断点语义）在原型侧均可验证，但**「提示随追加移走」这一条只能看安卓**。
+- **断点 = 上次滑到的那一页**：
+  - 装载：`restoreTo = if (channel == CHANNEL_DAILY) frontierIndex() else q.position.coerceIn(0, maxOf(0, pages.size - 1))`（`position` 落库时 clamp 到 `queue.size`、比 `pages.lastIndex` 大 1，需再夹一次）。
+  - 落库：翻页 effect 里 `saveQueuePosition(channel, if (channel == CHANNEL_DAILY) frontierIndex() else pagerState.currentPage)`。分区 `pages` 与队列一一对应（无完成卡、无自由刷页），页码即队列下标。
+- **双层状态机不变**：分区作答仍走 `markKnown` / `markForgot`（口径一致）；「忘了」⇒ days=1、lapses+1、连击清零；分区作答**计入当日战果**（`knownAnswers` / `forgotAnswers`，全局当日口径）。
+- **待处理谓词在分区不再被消费**：`isPending` / `pendingTaskCount()` / `frontierIndex()` 保持原样（只在每日任务频道被调用），不为分区额外分支——口径只有一套，避免漂移。
+
 ## 6. 回滚
 
+- R9（分区 = 自主练习）落在 StudyRepository.kt（`buildQueue` 的 `else` 分支 + `CHANNEL_DAILY` 常量）、AppRoot.kt（`syncDonePage` / `blockingIndex` 的频道收窄、断点两处、`footerHint` 传参）、TermCard.kt（新增可空 `footerHint` 参数）+ 原型 HTML（`refreshDoneCard` / `blockSkippedCards` 的频道判定 + 队尾轻提示）。`footerHint` 有缺省值，UI 侧改动向后兼容；调度侧 `learned + news` 只是把分区 pool 从 `due + news` 扩大，可单独 revert。
 - 全部改动集中在 StudyRepository.kt / TermCard.kt / AppRoot.kt / DoneCard.kt 四个文件 + 原型 HTML；按改动分层可分别 revert。
 - R7 本轮落在 AppRoot.kt / DoneCard.kt / 原型 HTML，并在 StudyRepository.kt 增设当日战果计数（`DayState.knownAnswers/forgotAnswers`，缺省读 0）——调度层（排序/配额/间隔/毕业）与防泄题逻辑不受影响，可单独 revert。
 - 本轮把上一版 R7 的「前向消化」整体删除（`recycleSkipped()`、`lastSettled` 锚点、装载稳定分区），改为前向拦截；拦截逻辑全在 AppRoot.kt（+ 原型对应函数），删掉即回到「自由划 + 完成卡条件出现」这一版。
@@ -143,3 +175,4 @@ val pool = when {
 
 - 编译：`gradlew assembleDebug`。
 - 手动场景走查（见 implement.md 清单）：升级播报 30 天、lapse 优先排序、清债配额、防泄题、peek 不写状态、旧 JSON 兼容、完成卡条件出现、向前越界被静默退回且列表不重排、回看与自由刷不受限、作答后等播报念完自动前进（含落在完成卡）、用户滑动时不抢方向、战果跨重启不归零。
+- 分区（R9）：非 `rec` 频道无完成卡与完成播报；自由划不被退回；全学完且未到期的分区不白屏；滑完停住并出现轻提示 + 同句播报；分区断点回到上次那一页；分区「忘了」仍写 days=1 / lapses+1。

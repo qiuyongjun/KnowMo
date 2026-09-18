@@ -19,7 +19,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | N/A（本项目是 Jetpack Compose，无 React hooks） |
 | [State Management](./state-management.md) | Local state, global state, server state | **Filled**（状态分层 / 派生状态 / effect 闭包陷阱） |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
+| [Type Safety](./type-safety.md) | Type patterns, validation | **Filled**（显式类型参数 = 元素类型；无 JDK 本地不能编译的自查清单） |
 
 ---
 

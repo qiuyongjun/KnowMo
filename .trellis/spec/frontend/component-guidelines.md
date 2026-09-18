@@ -27,10 +27,13 @@
 
 **契约（v5 R7）**：向前停稳到某页时，若其前方仍存在**待处理**卡（`isPending`，见下），则**静默退回最靠前的那一张**——只做 `animateScrollToPage`，**不播任何提示语**。**不得**用 `userScrollEnabled = false`，也不得做任何全向锁定。
 
+> **适用范围（v5 R9）**：**仅每日任务频道**（`StudyRepository.CHANNEL_DAILY` = `"rec"`）。拦截的**唯一**意义是「让完成卡 = 真做完」；分区没有完成卡，该理由不成立 → 分区**自由划**。分区若也拦，就是「全量入队 + 不可跳过 + 无收尾页」，是本版最糟的组合。
+
 判定与完成卡条件**共用同一个谓词**：
 
 ```kotlin
 fun blockingIndex(idx: Int): Int {
+    if (channel != StudyRepository.CHANNEL_DAILY) return -1   // R9：分区自由划
     val first = pages.indexOfFirst { isPending(it) }
     return if (first >= 0 && first < idx) first else -1   // -1 = 不拦
 }
@@ -59,9 +62,11 @@ fun blockingIndex(idx: Int): Int {
 >
 > **`awaitQuiet()` 的正确性依赖 `speaking` 的置位时机**：必须由 `speak()` **同步**置位、且 `onStart` 也置位——`QUEUE_FLUSH` 冲掉上一句时会先给**上一句**发 `onStop`，那一瞬间标志会被清成 `false`，而新那句整段播放期间若不再被置回，`awaitQuiet()` 会立刻返回。详见 `state-management.md` 的「TTS 播报完成信号」。
 
-### 完成度语义：完成卡是**事件**，不是**位置**
+### 完成度语义：完成卡是**事件**，不是**位置**（仅每日任务频道）
 
 **规则**：`Page.Done` 只在 `pendingTaskCount() == 0` 时**插入** feed（任务区末尾）。未做完时 feed 里根本没有收尾页，队尾就是最后一张待处理卡。
+
+**适用范围（v5 R9）**：`syncDonePage()` 开头 `if (channel != StudyRepository.CHANNEL_DAILY) return` —— **只有每日任务频道有完成卡**，分区 feed 里没有任何收尾页，也不播含完成语义的语音。
 
 ```kotlin
 fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
@@ -81,7 +86,26 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 
 - `VerticalPager` 的 `key` 不再是错位防线（列表不重排，index 已足够）；保留它是为了页身份与列表位置解耦，将来若重新引入重排不必再踩坑。
 - 装载时**不需要稳定分区**：拦截保证待处理卡不会被留在用户身后，且装载总是定位到 frontier。
-- **断点 = frontier**：`restoreTo` 与 `saveQueuePosition` 都取 `frontierIndex()`（第一张待处理卡；无待处理卡时取完成卡下标，都没有则 0）。本模型里「在哪儿」就等于「做到哪儿了」。
+- **断点（每日任务频道）= frontier**：`restoreTo` 与 `saveQueuePosition` 都取 `frontierIndex()`（第一张待处理卡；无待处理卡时取完成卡下标，都没有则 0）。本模型里「在哪儿」就等于「做到哪儿了」。
+- **断点（分区）= 上次滑到的那一页**（v5 R9）：分区自由划之后「在哪儿」≠「做到哪儿了」，用 frontier 会把用户拽回第一张未处理的卡。装载 `restoreTo = q.position.coerceIn(0, maxOf(0, pages.size - 1))`（`position` 落库时被 clamp 到 `queue.size`、比 `pages.lastIndex` 大 1，**必须再夹一次**），落库 `saveQueuePosition(channel, pagerState.currentPage)`。
+
+### 分区 = 专题自主练习（v5 R9）
+
+**契约**：场景分区（`channel != CHANNEL_DAILY`）与「每日任务」在语义上彻底分开——**它不参与每日任务，也不承载「完成」**。
+
+| 维度 | 每日任务频道（`rec`） | 分区（场景频道） |
+|---|---|---|
+| 完成卡 | `pending == 0` 时出现 | **没有**（`syncDonePage` 直接 return） |
+| 前向拦截 | 拦（静默退回） | **不拦**（`blockingIndex` 返回 -1） |
+| 队列范围 | `due + news` 配额 10 / 清债 15 | **该区全部词**（不做到期筛选） |
+| 收尾 | 完成卡 | 滑完停住 + 最后一张的**轻提示** |
+| 断点 | frontier | 上次滑到的那一页 |
+
+- **队列 = `learned + news`**（`learned` = 该区已学词按 `lapses 降序 → dueTime 升序`，`news` = 未学词洗牌接后）。**不做到期筛选是硬要求**：按到期筛选时，一个刚毕业的分区（全部词 `days ≥ 15` 且未到期，可持续十几天）pool 为空 → `pageCount == 0` → **白屏**；而分区没有完成卡，连兜底页都没有。`ensureQueue` 另加「分区空队列不复用」防空持久化队列（旧口径遗留）。
+- **轻提示**：`isSceneTail(idx) = channel != CHANNEL_DAILY && idx == pages.lastIndex`，视觉（`TermCard(footerHint = SCENE_TAIL_HINT)`）与播报（`SCENE_TAIL_SPEECH`）**共用同一判定**。播报必须拼在 `cardSpeech(p)` **之后、同一次 `speak`**（`QUEUE_FLUSH` 下分两次 speak 会互相掐断）。
+- ⚠️ 语义是「**后面没有了**」，不是「你练完了」——它挂在**当前末页**上，分区作答追加考核卡时提示会跟着移走；分区不拦截，快甩也能立刻抵达队尾。**不要**把它做成完成卡（不得出现 🎉 /「今日任务完成」）。
+- ⚠️ `footerHint != null` 时**不渲染 `SwipeHint`**：「上滑看下一个 ↑」与「后面没有了」自相矛盾（原型 `refreshTailHint` 同样移除该卡的 `.swipe-hint`）。
+- 分区作答走**同一套双层状态机**（`markKnown` / `markForgot`，口径一致），并计入当日战果（全局当日口径）。
 
 > **Warning**：`appendReviewCard` 的插入点是**任务区末尾**——`indexOfFirst { it is Page.Done }` 取不到时用 `pages.size`。写成 `coerceAtLeast(0)` 会在 Done 缺席（v5 常态）时把新卡插到**队首**，新卡就落到了用户身后。
 
@@ -112,3 +136,9 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 | 新追加的考核卡跑到队首 | `appendReviewCard` 用了 `coerceAtLeast(0)` | 取不到 Done 时用 `pages.size` |
 | 同一词的多张考核卡一起展开 | 用词 id 而非 `seq` 记录展开态 | 按页出现（`seq`）记录；队列用 `answered[i]` |
 | 复习卡点一下就把答案念出来 | 点卡回调没按形态分流 | 调用点按 `mode` + `revealed` + `peeked` 路由到提示语 |
+| 分区里冒出「今日任务完成」 | 完成卡对所有频道无条件插入 | `syncDonePage()` 开头 `if (channel != CHANNEL_DAILY) return` |
+| 分区上滑被退回、像被锁住 | 前向拦截被无条件应用 | `blockingIndex()` 仅 `CHANNEL_DAILY`；分区自由划 |
+| 毕业分区点进去白屏 | 分区按到期筛选 → pool 为空，而分区已无完成卡可兜底 | 分区 `learned + news`（不做到期筛选）；`ensureQueue` 对分区不复用空队列 |
+| 分区最后一张同时说「上滑看下一个 ↑」和「后面没有了」 | `SwipeHint` 与 `footerHint` 并存 | `footerHint != null` 时不渲染 `SwipeHint` |
+| 分区队尾提示语被卡片播报掐断 | 轻提示与 `cardSpeech` 分成两次 `speak` | 拼成**同一句** `speak` |
+| 回分区被拽回第一张未处理的卡 | 分区也用了 frontier 作断点 | 分区断点 = 上次滑到的那一页 |

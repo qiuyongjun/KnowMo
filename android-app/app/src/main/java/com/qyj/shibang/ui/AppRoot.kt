@@ -51,6 +51,15 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
 /** v5 防泄题：考试态（复习/温故）未作答且未 peek 时，点卡片只播这句提示语——不念词、不念提示 */
 private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
 
+/** v5 R9 分区队尾轻提示（视觉）：分区（非每日任务频道）滑到最后一张时挂在卡底部。
+ *  它是**轻提示**不是完成卡——分区没有「完成」语义，禁止 🎉 /「今日任务完成」类文案与播报。 */
+private const val SCENE_TAIL_HINT = "这个区就这些了 · 点上面的频道可以换区"
+
+/** v5 R9 分区队尾轻提示（播报）：与 SCENE_TAIL_HINT 在**同一条件**下拼在 `cardSpeech` **之后**，
+ *  且必须拼成**同一句** `speak`——`TTSSpeaker.speak` 是 QUEUE_FLUSH，分两次 speak 会互相掐断
+ *  （与 R7 解释语、R8 作答播报同一根因）。 */
+private const val SCENE_TAIL_SPEECH = "这个区就这些了。点上边的频道可以换个区。"
+
 /**
  * 根界面：抖音式垂直 feed（v4 第三轮定稿：连击 + 间隔双层模型，design.md §9）。
  * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.5）：
@@ -67,13 +76,14 @@ private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
  *    自由刷卡不追加。展开/作答状态按页出现（seq）记录；断点恢复按队列卡实例 answered[i]
  *    逐卡恢复（不按词级判定，防同词多卡一并展开卡死连击）
  * 5. 完成卡之后继续上滑 = 自由刷无限流（温故，可作答、连击/降级照算），pageCount 随滑动增长
+ *    ——**仅每日任务频道**（分区没有完成卡、也不追加自由刷页，第 10 条）
  * 6. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
  * 7. 分区完成（§9.5，v5：毕业判定 days >= 15 与间隔封顶 30 解耦）→ 频道栏加 🎓，毕业词升 30 后不回退；
  *    「忘了」days=1 即时回退
- * 8. 完成卡「真做完才出现」（v5 R7，§5.1）：`Page.Done` 仅在**待处理数 == 0** 时存在于 feed 尾；
+ * 8. 完成卡「真做完才出现」（v5 R7，§5.1，**仅每日任务频道**——R9 收窄）：`Page.Done` 仅在**待处理数 == 0** 时存在于 feed 尾；
  *    未做完时队尾就是最后一张待处理卡，feed 里没有任何含完成语义的页。文案与播报回到**单一形态**，
  *    战果用当日持久计数（§5.3，跨重启不归零）。
- *    **前向拦截**（§5.2）：向前停稳到某页时，若其前方仍存在待处理卡，则**静默**退回**最靠前的那一张**
+ *    **前向拦截**（§5.2，**仅每日任务频道**——R9 收窄）：向前停稳到某页时，若其前方仍存在待处理卡，则**静默**退回**最靠前的那一张**
  *    （不播任何提示语——滑不动本身就是结构性的反馈，逐次拦截都解释一句对高龄用户是噪声），
  *    然后 return（本次不播被拦页的 cardSpeech）。`pages` 顺序**完全不动**——不回收、不重排、
  *    不写任何学习状态（不碰 revealed / peeked / results，不调 repo）；被拦页的 `spokenKey` 不入
@@ -86,10 +96,18 @@ private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
  *    ——抢跑会被落点卡的播报 FLUSH 掉答案与反馈（`tts.speak` 是 QUEUE_FLUSH）。新词卡没有「作答完成」
  *    这个事件，**不**自动前进（`SwipeHint` 保留，节奏由用户自己掌握）；播报期间用户自己滑动
  *    （前进或回看）→ 放弃本次自动前进，不抢方向。
+ * 10. 分区 = 专题自主练习（v5 R9，§5.6）：**只有每日任务频道（`CHANNEL_DAILY` = "rec"）**有完成卡与前向
+ *    拦截（`syncDonePage` / `blockingIndex` 对分区直接放行）——分区的语义是「随时进、随时走、想练多久练多久」，
+ *    「完成」与「真做完」在分区里都不存在。分区因此：**自由划**（快甩过任意多张未处理的卡都不退回）、
+ *    **不做到期筛选**（队列 = 该区全部词，见 `StudyRepository.buildQueue`，故不会白屏）、**滑完停住**
+ *    （`appendFreePages` 以 `doneIdx >= 0` 为前提，分区 `doneIdx` 恒 -1，无需改代码即自然停住）+ 队尾
+ *    **轻提示**（`SCENE_TAIL_HINT` 显示在最后一张卡底部，并把 `SCENE_TAIL_SPEECH` 并入该卡**同一次**播报）。
+ *    分区作答仍走同一套双层状态机、同样计入当日战果；断点 = **上次滑到的那一页**（不是 frontier——
+ *    自由划之后「在哪儿」≠「做到哪儿了」）。
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
-    var channel by remember { mutableStateOf("rec") }
+    var channel by remember { mutableStateOf(StudyRepository.CHANNEL_DAILY) }
     var session by remember { mutableStateOf(SessionStats()) }
     val revealed = remember { mutableStateMapOf<Int, Boolean>() }      // seq -> 复习/温故卡是否已作答展开（按出现记，不按词记）
     val peeked = remember { mutableStateMapOf<Int, Boolean>() }        // seq -> 考试卡「想看答案」求助展开（v5：会话态不持久化，不写任何学习状态）
@@ -153,9 +171,21 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
      *  与 `isPending` 共用同一口径，故「完成卡何时出现」与「何时拦人」永不漂移；
      *  `isPending(FREE)` 恒 false，所以自由刷区永不拦。 */
     fun blockingIndex(idx: Int): Int {
+        // v5 R9（§5.6）：前向拦截**只在每日任务频道生效**。这条规则的全部意义是「让完成卡 = 真做完」
+        // （§5.1 的 pending == 0）；分区没有完成卡 → 没有「真做完」这个概念 → 分区**自由划**。
+        // 分区若也拦，就是「全量入队 + 不可跳过 + 无收尾页」，是本版最糟的组合。
+        if (channel != StudyRepository.CHANNEL_DAILY) return -1
         val first = pages.indexOfFirst { isPending(it) }
         return if (first >= 0 && first < idx) first else -1
     }
+
+    /** v5 R9（§5.6）分区队尾轻提示的判定式：**仅分区**（非每日任务频道）**且当前卡是该区最后一张**。
+     *  视觉（`footerHint`）与播报（`SCENE_TAIL_SPEECH`）共用这一个函数，条件不会漂移。
+     *  ⚠️「最后一张」是会变的：分区作答未移除时 `appendReviewCard` 仍会追加考核卡（无完成卡时
+     *  `insertAt` 天然落到 `pages.size`），所以轻提示只在**该区所有词都练到当日连击 3** 之后才出现
+     *  ——这正是它想表达的「这个区就这些了」。 */
+    fun isSceneTail(idx: Int): Boolean =
+        channel != StudyRepository.CHANNEL_DAILY && idx == pages.lastIndex
 
     /** 任务区去重词数 = 完成卡战果里的 N（§5.3：N = 任务区去重词数）。自由刷页不计入。 */
     fun taskWordCount(): Int = pages.asSequence()
@@ -167,8 +197,11 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
 
     /** v5 R7 完成卡「条件出现」（§5.1）：`pending == 0` 且还没有完成卡 → 追加到任务区末尾；
      *  反向保底（`pending > 0` 且完成卡还在队尾、其后无自由刷页）→ 移除。
-     *  单调性靠调用点保证：装载后、每次 `answer()` 后、追加考核卡后各调一次。 */
+     *  单调性靠调用点保证：装载后、每次 `answer()` 后、追加考核卡后各调一次。
+     *  v5 R9（§5.6）：**只有每日任务频道有完成卡**——分区 feed 里没有任何收尾页，也不播任何含完成
+     *  语义的语音（分区「练不完」不会产生任何误导）。 */
     fun syncDonePage() {
+        if (channel != StudyRepository.CHANNEL_DAILY) return
         val pending = pendingTaskCount()
         val doneIdx = pages.indexOfFirst { it is Page.Done }
         when {
@@ -200,7 +233,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 "继续上滑，随便看看，温故知新。"
     }
 
-    // 装载当日队列（repo 内 date 不符自动重建）：进入 / 切频道都回到 frontier（= 断点）
+    // 装载当日队列（repo 内 date 不符自动重建）：进入 / 切频道都回到断点（每日任务频道 = frontier，
+    // 分区 = 上次滑到的那一页，见下面 restoreTo 处的口径说明）
     LaunchedEffect(channel) {
         val announce = !firstChannelLoad
         firstChannelLoad = false
@@ -223,8 +257,18 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         freePool = emptyList()
         spokenKeys.clear()
         advanceAfterSpeechSeq = -1           // 队列已重建，丢弃上一队列未完成的自动前进
-        syncDonePage()                       // 完成卡条件出现：pending == 0 才有收尾页
-        restoreTo = frontierIndex()          // 断点 = frontier（第一张待处理卡；都做完了则是完成卡）
+        syncDonePage()                       // 完成卡条件出现：pending == 0 才有收尾页（分区直接 return）
+        // 断点（§5.2 / §5.6）：
+        // - 每日任务频道 = frontier（第一张待处理卡；都做完了则是完成卡）——本模型里「在哪儿」=「做到哪儿了」；
+        // - 分区 = **上次滑到的那一页**（R9：自由划之后「在哪儿」≠「做到哪儿了」，用 frontier 会把用户
+        //   拽回第一张未处理的卡）。⚠️ `position` 落库时被 `saveQueuePosition` clamp 到 `queue.size`，
+        //   比 `pages.lastIndex` 大 1，这里必须**再夹一次**；分区 `pages` 非空（buildQueue 全量入队，
+        //   不存在白屏），`maxOf(0, ...)` 只是空表兜底
+        restoreTo = if (channel == StudyRepository.CHANNEL_DAILY) {
+            frontierIndex()
+        } else {
+            q.position.coerceIn(0, maxOf(0, pages.size - 1))
+        }
         session = SessionStats(repo.todayKnown(), repo.todayForgot())   // 战果当日持久口径（§5.3）
         if (announce) pendingAnnounce = "换到${sceneName(channel)}频道。"
     }
@@ -258,7 +302,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
      *  ⚠️ 插入点 = 完成卡下标；完成卡在 v5 是**条件存在**（未做完时根本不在 `pages` 里），
      *  此时 `indexOfFirst` 返回 -1，必须落到 `pages.size`（任务区末尾）——若沿用旧写法
      *  `coerceAtLeast(0)`，-1 会变成 0 把新卡插到**队首**（用户身后），前向可达性直接破掉。
-     *  repo.appendQueue 追加成功返回队尾下标（作为该卡的 qIndex，markAnswered 用）；已移除返回 -1 不插入。 */
+     *  repo.appendQueue 追加成功返回队尾下标（作为该卡的 qIndex，markAnswered 用）；已移除返回 -1 不插入。
+     *  v5 R9：分区（无完成卡）永远走 `pages.size` 这条路——新追加的考核卡总是成为新的队尾，
+     *  队尾轻提示（`isSceneTail`）随之移到新队尾，于是它只在「该区所有词都练到当日连击 3」后出现。 */
     fun appendReviewCard(t: Term) {
         val qIndex = repo.appendQueue(channel, t.id)
         if (qIndex >= 0) {
@@ -270,11 +316,17 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         }
     }
 
-    // 翻页落库：保存当日断点（= frontier）+ 临近完成卡（差一页）预追加自由刷页。
-    // 完成卡条件存在（§5.1）：doneIdx < 0 时不追加——未做完时队尾是最后一张待处理卡，不是收尾页
+    // 翻页落库：保存当日断点 + 临近完成卡（差一页）预追加自由刷页。
+    // 断点口径（§5.2 / §5.6）：每日任务频道写 frontier；分区写**当前页**（自由划，「在哪儿」就是断点
+    // ——分区 `pages` 与队列一一对应：无完成卡、无自由刷页，页码即队列下标）。
+    // 完成卡条件存在（§5.1）：doneIdx < 0 时不追加——未做完时队尾是最后一张待处理卡，不是收尾页；
+    // 分区 `doneIdx` 恒为 -1（`syncDonePage` 对分区直接 return），故分区**滑完自然停住、不再追加页**。
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage }.collect { idx ->
-            repo.saveQueuePosition(channel, frontierIndex())
+            repo.saveQueuePosition(
+                channel,
+                if (channel == StudyRepository.CHANNEL_DAILY) frontierIndex() else idx,
+            )
             val doneIdx = pages.indexOfFirst { it is Page.Done }
             if (doneIdx >= 0 && idx >= doneIdx - 1) appendFreePages(FREE_BATCH)
         }
@@ -358,7 +410,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 }
                 val announce = pendingAnnounce
                 pendingAnnounce = null
-                val text = cardSpeech(p)
+                // v5 R9 分区队尾轻提示（§5.6）：与 footerHint **同一条件**（isSceneTail），拼在 cardSpeech
+                // **之后**。⚠️ 必须拼成**同一句** speak——`tts.speak` 是 QUEUE_FLUSH，分两次 speak 会互相
+                // 掐断（与 R7 解释语、R8 作答播报同一根因）。
+                val text = cardSpeech(p) + if (isSceneTail(idx)) SCENE_TAIL_SPEECH else ""
                 // 换频道播报与本卡播报拼成**一句**：分开 speak 会互相 FLUSH 掉
                 tts.speak(if (announce != null) announce + text else text)
             }
@@ -438,6 +493,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                     },
                     onCharClick = { charFor = it },
                     onAnswer = { known -> answer(p, known) },
+                    // v5 R9 分区队尾轻提示（§5.6）：仅分区（非每日任务频道）的最后一张卡，且**不新增页**
+                    // ——新增页会和完成卡长得像，正是 R9 要消除的混淆。播报侧用同一个 isSceneTail，
+                    // 见上面停稳 effect（同一句 speak）
+                    footerHint = if (isSceneTail(idx)) SCENE_TAIL_HINT else null,
                 )
                 Page.Done -> DoneCard(
                     known = session.known,

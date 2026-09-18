@@ -133,6 +133,8 @@ body{background:#ECEFF1;font-family:"Microsoft YaHei","PingFang SC","Noto Sans S
 .fb-result.ok{background:var(--known-bg);color:var(--known)}
 .fb-result.re{background:var(--accent-bg);color:var(--accent-dark)}
 .swipe-hint{flex:none;text-align:center;color:var(--text-2);font-size:calc(20px * var(--fscale));font-weight:700;padding:10px 0 2px;animation:bounce 1.6s infinite}
+/* v5 R9 分区队尾轻提示：轻权重（小字号、次级色、无动效）——它是**轻提示**不是完成卡 */
+.tail-hint{flex:none;text-align:center;color:var(--text-2);font-size:calc(18px * var(--fscale));font-weight:700;padding:8px 0 2px}
 @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
 
 /* ============ 完成卡 ============ */
@@ -377,11 +379,17 @@ document.getElementById("phone").addEventListener("click",e=>{
 });
 
 /* ==================== 频道与 Feed ==================== */
+/* v5 R9 分区 = 专题自主练习（与 App §5.6 同契约）：**只有每日任务频道（rec）**有完成卡与前向拦截。
+   分区滑到最后一张时，用一句轻提示代替收尾页（上滑无反应会被高龄用户当成卡死）。
+   视觉与播报共用这两个常量，条件判定也共用（见 refreshTailHint / onCardVisible），不会漂移。 */
+const SCENE_TAIL_HINT="这个区就这些了 · 点上面的频道可以换区";
+const SCENE_TAIL_SPEECH="这个区就这些了。点上边的频道可以换个区。";
 function buildQueue(channelId){
   let q;
   if(channelId==="rec"){
     q = REC_QUEUE.map(id=>TERM_MAP[id]);
   }else{
+    /* v5 R9：分区**不做到期筛选**，该区全部词入队（原型无到期概念，天然对齐 R9，故不改） */
     q = TERMS.filter(t=>t.scene===channelId);
   }
   return q;
@@ -408,6 +416,7 @@ function renderFeed(){
   /* v5 R7：完成卡**条件出现**——待处理数为 0 才追加收尾页，否则队尾就是最后一张待处理卡
      （feed 里没有任何含完成语义的页，「滑到底」≠「做完了」） */
   refreshDoneCard();
+  refreshTailHint();          /* v5 R9：分区队尾轻提示（rec 无） */
   renumberCards();
   feed.scrollTop=0;
   observeCards();
@@ -484,10 +493,20 @@ function doneCardInner(){
       <div class="dt" style="font-size:calc(24px * var(--fscale));color:var(--primary)">继续上滑，随便看看</div>
       <div class="swipe-hint">上滑看下一个 ↑</div>`;
 }
-/* v5 R7 完成卡「真做完才出现」：待处理数为 0 且无收尾页 → 追加到队尾；反之（保底）移除 */
+/* v5 R7 完成卡「真做完才出现」：待处理数为 0 且无收尾页 → 追加到队尾；反之（保底）移除。
+   v5 R9：**只有每日任务频道（rec）有完成卡**——分区是专题自主练习，没有「完成」语义，
+   直接返回；若 feed 里已残存完成页（从 rec 切过来的极端情形）一并移除。 */
 function refreshDoneCard(){
   const feed=document.getElementById("feed");
   const present=feed.querySelector(".fcard[data-done]");
+  if(state.channel!=="rec"){
+    if(present){
+      if(io) io.unobserve(present);
+      present.remove();
+      renumberCards();
+    }
+    return;
+  }
   const pending=pendingCardCount();
   if(pending===0 && !present){
     feed.insertAdjacentHTML("beforeend",doneCardHTML());
@@ -498,6 +517,28 @@ function refreshDoneCard(){
     present.remove();
   }
   renumberCards();
+}
+/* v5 R9 分区队尾轻提示（与 App §5.6 同契约）：**仅分区**（非 rec）时，在 feed 最后一张卡底部显示
+   一行轻提示（SCENE_TAIL_HINT），并用 data-tail 标出该卡——onCardVisible 按**同一标记**把
+   SCENE_TAIL_SPEECH 并入该卡的**同一次** speak（分两次 speak 会被 cancel 互相掐断）。
+   它是轻提示不是完成卡：不新增页、不出现 🎉 /「今日任务完成」类文案，DOM 顺序也不动。
+   注：原型不做考核卡追加（作答只换掉按钮区），故「最后一张」在 renderFeed 时定一次即可。 */
+function refreshTailHint(){
+  document.querySelectorAll("#feed .fcard[data-tail]").forEach(card=>{
+    delete card.dataset.tail;
+    const h=card.querySelector(".tail-hint");
+    if(h) h.remove();
+  });
+  if(state.channel==="rec") return;
+  const cards=document.querySelectorAll("#feed .fcard");
+  const last=cards[cards.length-1];
+  if(!last) return;
+  last.dataset.tail="1";
+  /* 与安卓 TermCard 同契约：队尾轻提示已说明「没有下一张」，此时再挂着「上滑看下一个 ↑」自相矛盾。
+     本函数只在 renderFeed（每次全量重建 innerHTML）之后调用一次，故移除是安全的、无需恢复。 */
+  const sh=last.querySelector(".swipe-hint");
+  if(sh) sh.remove();
+  last.insertAdjacentHTML("beforeend",`<div class="tail-hint">${SCENE_TAIL_HINT}</div>`);
 }
 /* 序号随完成卡条件出现重算（DOM 顺序即当前队序，本版不再有重排） */
 function renumberCards(){
@@ -608,8 +649,11 @@ function onFeedScroll(){
   scrollSettleTimer=setTimeout(()=>{ feedScrolling=false; blockSkippedCards(); },200);
 }
 /* 当前可见序号 i → 序号 < i 的第一张仍待处理的卡 block（没有则不拦）。
-   站在待处理卡上（block 就是当前卡）不算越界；自由刷区/完成卡之后同样不拦。 */
+   站在待处理卡上（block 就是当前卡）不算越界；自由刷区/完成卡之后同样不拦。
+   v5 R9：前向拦截**只在每日任务频道生效**——拦截的存在理由是「让完成卡 = 真做完」（App §5.1/§5.2），
+   分区没有完成卡 → 该理由不成立 → 分区**自由划**（快甩过任意多张未处理的卡都不退回）。 */
 function blockSkippedCards(){
+  if(state.channel!=="rec") return;
   const feed=document.getElementById("feed");
   const cards=[...feed.querySelectorAll(".fcard")];
   if(!cards.length) return;
@@ -666,13 +710,18 @@ function onCardVisible(card){
     speak("太棒了，今日任务完成！今天学完了"+taskWordCount()+"个词，认识了"+state.session.known+"次，忘了"+state.session.forgot+"次。继续上滑，随便看看，温故知新。");
   }else if(id){
     const t=TERM_MAP[id];
+    let text;
     if(t.kind==="review"){
       /* v5 防泄题：播报不念词、不念提示（与安卓 cardSpeech 一致）。
          念出 t.text 等于把答案念给用户，考试卡就失去"考回忆"的意义 */
-      speak("这个词，还记得它念什么吗？想一想，再按下面的按钮");
+      text="这个词，还记得它念什么吗？想一想，再按下面的按钮";
     }else{
-      speak(termFullText(t));
+      text=termFullText(t);
     }
+    /* v5 R9：分区最后一张卡（data-tail，refreshTailHint 按「非 rec + 队尾」标出）把队尾轻提示
+       并入**同一次** speak——分两次 speak 会被 cancel 互相掐断（同 R7 解释语 / R8 作答播报的根因） */
+    if(card.dataset.tail==="1") text+=SCENE_TAIL_SPEECH;
+    speak(text);
   }
 }
 function observeCards(){

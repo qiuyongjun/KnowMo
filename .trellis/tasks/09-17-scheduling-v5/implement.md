@@ -42,7 +42,19 @@
    - 新增 `LaunchedEffect(advanceAfterSpeechSeq)`：`seq < 0` 直接返回 → `delay(AUTO_ADVANCE_MIN_MS)`（1500L 兜底，TTS 不可用时也不瞬间翻走）→ `tts.awaitQuiet()` → 重读当前页：若 `pages[currentPage]` 不是该 `seq`（用户自己滑走了）或 `isScrollInProgress`，**放弃本次自动前进** → 否则 `animateScrollToPage(currentPage + 1)`（`currentPage < pages.lastIndex` 才动）→ **动画结束后（finally）置回 -1**
    - ⚠️ 置回 -1 **不能**写在 `animateScrollToPage` 之前、也不能把 `delay` / `awaitQuiet` 包进同一个 finally：前者会因「effect 体内写自己的 key」被自己重启取消（spec/frontend/state-management.md Gotcha (2)），翻页动画刚开始就胎死腹中；后者会在用户答下一张（key 换成新 seq）时把新 key 一并清成 -1。收尾要**比较后再清**（`if (advanceAfterSpeechSeq == seq)`），动画途中用户已答下一张时不得抹掉新 key
    - 只有 `answer()` 会置 key（新词卡不自动前进）；FREE 卡作答同样触发
-7. **验证**
+7. **场景分区 = 专题自主练习（R9，design.md §5.6）**
+   - StudyRepository：新增 `const val CHANNEL_DAILY = "rec"`；`scopeIds` / `buildQueue` 里硬编码的 `"rec"` 改用常量
+   - StudyRepository.buildQueue：把已学词排序提为 `learned`（lapses 降序 → dueTime 升序），`due = learned.filter { isDue(...) }`；`else` 分支（分区）改为 **`learned + news`**——不做到期筛选，因此分区**不存在空队列**（这是「全学完未到期 → `pageCount == 0` 白屏」的根治，不是优化）
+   - AppRoot `syncDonePage()`：开头 `if (channel != CHANNEL_DAILY) return`（分区不设完成卡）
+   - AppRoot `blockingIndex(idx)`：开头 `if (channel != CHANNEL_DAILY) return -1`（分区自由划）
+   - AppRoot 装载 effect：`restoreTo = if (channel == CHANNEL_DAILY) frontierIndex() else q.position.coerceIn(0, maxOf(0, pages.size - 1))`（`position` 落库时 clamp 到 `queue.size`，比 `pages.lastIndex` 大 1，需再夹一次）
+   - AppRoot 翻页 effect：`saveQueuePosition(channel, if (channel == CHANNEL_DAILY) frontierIndex() else pagerState.currentPage)`
+   - AppRoot：新增 `SCENE_TAIL_HINT`（视觉）与 `SCENE_TAIL_SPEECH`（播报）两个常量；TermCard 调用点传 `footerHint = if (channel != CHANNEL_DAILY && idx == pages.lastIndex) SCENE_TAIL_HINT else null`；播报处按**同一条件**把 `SCENE_TAIL_SPEECH` 拼在 `cardSpeech(p)` 之后——⚠️ 必须拼成**同一句** `speak`（分两次 speak 会被 `QUEUE_FLUSH` 互相掐断）
+   - TermCard：新增可空参数 `footerHint: String? = null`，渲染在底部提示附近
+   - DoneCard：不动（分区不再渲染它）
+   - `appendFreePages` 的触发条件（`doneIdx >= 0`）无需改动——分区 `doneIdx` 恒为 -1，**自然停住**
+   - prototype/index.html：`refreshDoneCard()` 在 `state.channel !== "rec"` 时直接返回（并移除可能已存在的完成页）；`blockSkippedCards()` 在 `state.channel !== "rec"` 时直接返回；`buildQueue` 场景分支保持「该区全部词」（原型无到期概念，天然对齐 R9）；队尾轻提示——可见卡为 feed 最后一张且非 `rec` 时，在卡片底部显示轻提示并入播报
+8. **验证**
    - `cd android-app && ./gradlew assembleDebug`（Windows: `gradlew.bat assembleDebug`）
    - 手动场景走查（下）
 
@@ -67,6 +79,12 @@
 | 15 | 答若干卡后杀进程重进 | 落在 frontier（第一张待处理卡）；完成卡战果数字不归零 |
 | 16 | 完成卡后继续上滑（自由刷） | 自由刷温故卡不计入待处理数、**不受拦截**；作答后同样自动前进；完成卡不因自由刷作答而消失 |
 | 17 | 站在未作答的卡上**向下**滑 | **不受限制**，可自由翻回以前任意一张已处理的卡（只拦前向；未引入 `userScrollEnabled = false`） |
+| 18 | 进入任一场景分区（如医院） | feed 里**没有**完成卡、也没有含完成语义的播报；一路向前快甩**不被退回**；「忘了」仍写 days=1 / lapses+1 |
+| 19 | 一个全部词都学过且都未到期的分区（刚毕业的分区） | 进入后有内容、**不白屏**；队列 = 该区全部词（已学在前、未学接后） |
+| 20 | 分区里把该区所有词练到当日连击 3（滑到最后一张） | 上滑停住、不再追加页；最后一张底部出现「这个区就这些了 · 点上面的频道可以换区」，且**并入该卡播报同一句** |
+| 21 | 分区滑到第 k 张后切频道再切回（或杀进程重进） | 落在第 k 张（不是第一张未处理的卡） |
+| 22 | 分区作答若干次 → 回推荐频道做完每日任务 | 完成卡「认识了 x 次 / 忘了 y 次」**包含分区作答**（全局当日口径）；N 仍只数每日任务区词数 |
+| 23 | 同一张卡：分区里点「忘了」→ 回推荐频道 | 该词按 days=1 回到推荐队列；分区里那次作答已计入战果 |
 
 ## 回滚点
 

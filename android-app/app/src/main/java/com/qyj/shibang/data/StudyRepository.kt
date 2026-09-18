@@ -63,6 +63,9 @@ data class DailyQueue(
  * 与封顶解耦；TermState 增 lapses 遗忘史（due 排序优先 + 升级减半）；推荐频道高债务日
  * （due ≥ DEBT_THRESHOLD）进清债模式扩配额全复习、不补新词。
  * v5 R7 附带当日战果计数（knownAnswers / forgotAnswers）——只加计数，不动调度逻辑。
+ * v5 R9（本轮）：场景分区改判为**专题自主练习**——完成卡与前向拦截只在每日任务频道
+ * （CHANNEL_DAILY = "rec"）生效；分区**不做到期筛选**（该区全部词入队，故不存在空队列白屏）。
+ * 调度层其余逻辑（间隔阶梯、lapses、毕业判定、清债模式、连击/战果计数）一律不动。
  */
 class StudyRepository(context: Context) {
 
@@ -194,45 +197,55 @@ class StudyRepository(context: Context) {
 
     /**
      * 已完成分区集合（**仅供频道栏徽章展示，不影响队列范围**）；
-     * `rec` 是聚合频道，不参与完成判定。
+     * 每日任务频道（`rec`）是聚合频道，不参与完成判定。
      */
     fun graduatedScenes(): Set<String> =
-        SCENES.map { it.id }.filter { it != "rec" && isSceneGraduated(it) }.toSet()
+        SCENES.map { it.id }.filter { it != CHANNEL_DAILY && isSceneGraduated(it) }.toSet()
 
     /* ---------- 每日队列调度器（design.md §9.3） ---------- */
 
     /**
      * 队列范围（每日队列与自由刷池共用）：
-     * - 推荐频道 = 全部词条（毕业分区不排除，纯进度标记）；
+     * - 每日任务频道（`rec`）= 全部词条（毕业分区不排除，纯进度标记）；
      * - 场景频道 = 该场景词条。
      */
     private fun scopeIds(channel: String): List<String> =
-        if (channel == "rec") STUDY_TERMS.map { it.id }
+        if (channel == CHANNEL_DAILY) STUDY_TERMS.map { it.id }
         else STUDY_TERMS.filter { it.scene == channel }.map { it.id }
 
     /**
-     * 当日队列生成（design.md §9.3）：
-     * - due  = 范围内到期词（isDue），v5 双键排序：lapses 降序优先（忘词先见）→ 到期日升序（先清旧债）；
-     * - news = 未学词洗牌；
-     * - 推荐频道 pool：due ≥ DEBT_THRESHOLD（20）→ 清债模式 due.take(DEBT_QUOTA)（15 张全复习、
-     *   不补新词，v5）；否则 (due + news).take(DAILY_POOL_QUOTA)（到期复核优先 + 新词补足，共 10 个，
-     *   当日冻结由 ensureQueue 持久化保证）；场景频道 pool 全量（不另设配额）。
+     * 当日队列生成（design.md §9.3；分区口径见 v5 §5.6）：
+     * - learned = 范围内**已学**词，双键排序：lapses 降序优先（忘词先见）→ 到期日升序（先清旧债）；
+     * - due     = learned 中到期的词（isDue）；
+     * - news    = 未学词洗牌；
+     * - 每日任务频道（CHANNEL_DAILY）pool：due ≥ DEBT_THRESHOLD（20）→ 清债模式 due.take(DEBT_QUOTA)
+     *   （15 张全复习、不补新词，v5）；否则 (due + news).take(DAILY_POOL_QUOTA)（到期复核优先 + 新词补足，
+     *   共 10 个，当日冻结由 ensureQueue 持久化保证）；
+     * - 其余频道（场景分区，v5 R9）= learned + news：**不做到期筛选**——进分区就是该区**全部词**
+     *   （已学在前、未学接后）。分区因此**不可能出现空队列**：若按到期筛选，一个刚毕业的分区
+     *   （全部词 days ≥ 15 且未到期，可持续十几天）会 pool 为空 → pageCount == 0 → 白屏；
+     *   而分区已不设完成卡，没有别的东西能兜住空 feed。
      * - queue 按 pool 原序（到期在前、每词一次），modes 按有无 TermState 标注，answered 全 false。
-     * pool 为空 → 队列只有完成卡，直接自由刷（prd：一个也没有当天直接自由刷）。
+     * - 每日任务频道 pool 为空（全部已学且都没到期）→ 队列只有完成卡，直接自由刷
+     *   （prd：一个也没有当天直接自由刷）；分区不适用（全量入队保证非空，见上）。
      */
     fun buildQueue(channel: String): DailyQueue {
         val scope = scopeIds(channel)
-        val due = scope
-            .filter { id -> termStates[id]?.let { isDue(it) } == true }
+        // ⚠️ 显式类型参数是**元素类型**（这里是词 id，String），不是选择器的返回类型：
+        //    写 <Int> 会得到 Comparator<Int>——既与 List<String>.sortedWith(Comparator<in String>) 不匹配，
+        //    lambda 里的 termStates[id] 也会因 id: Int 取不到值，两者都是编译错误。
+        val learned = scope
+            .filter { termStates[it] != null }
             .sortedWith(
-                compareByDescending<Int> { id -> termStates[id]?.lapses ?: 0 }
-                    .thenBy { id -> termStates[id]?.let { dueTime(it) } ?: Long.MAX_VALUE }
+                compareByDescending<String> { id -> termStates[id]?.lapses ?: 0 }
+                    .thenBy { id -> termStates[id]?.let { s -> dueTime(s) } ?: Long.MAX_VALUE }
             )
+        val due = learned.filter { isDue(termStates[it]!!) }
         val news = scope.filter { termStates[it] == null }.shuffled()
         val pool = when {
-            channel == "rec" && due.size >= DEBT_THRESHOLD -> due.take(DEBT_QUOTA)
-            channel == "rec" -> (due + news).take(DAILY_POOL_QUOTA)
-            else -> due + news
+            channel == CHANNEL_DAILY && due.size >= DEBT_THRESHOLD -> due.take(DEBT_QUOTA)  // 清债模式
+            channel == CHANNEL_DAILY -> (due + news).take(DAILY_POOL_QUOTA)                  // 到期复核 + 新词补足
+            else -> learned + news                                                           // 分区（R9）：不看到期日
         }
 
         val queue = ArrayList<String>(pool.size)
@@ -246,10 +259,18 @@ class StudyRepository(context: Context) {
         return DailyQueue(today(), channel, queue, modes, answered, 0)
     }
 
-    /** 当日有效队列：date 相符直接复用（断点续刷 + 当日冻结），否则重建并持久化 */
+    /**
+     * 当日有效队列：date 相符直接复用（断点续刷 + 当日冻结），否则重建并持久化。
+     * v5 R9：**分区**另加一条「空队列不复用」——R9 保证分区该区全部词入队（必非空），所以分区的
+     * 持久化空队列只可能来自 R9 之前的登录队列（旧口径 pool = due + news，刚毕业的分区当天为空）。
+     * 若照旧复用，`pageCount == 0` 会**白屏**（分区没有完成卡，连兜底页都没有）。每日任务频道不受影响
+     * （pool 空 → 队列只有完成卡，是既有设计）。
+     */
     fun ensureQueue(channel: String): DailyQueue {
         val existing = queues[channel]
-        if (existing != null && existing.date == today()) return existing
+        if (existing != null && existing.date == today() &&
+            (channel == CHANNEL_DAILY || existing.queue.isNotEmpty())
+        ) return existing
         val fresh = buildQueue(channel)
         queues[channel] = fresh
         persist()
@@ -421,10 +442,16 @@ class StudyRepository(context: Context) {
         const val MODE_NEW = "NEW"
         const val MODE_REVIEW = "REVIEW"
 
+        /** 每日任务频道 id（v5 R9）：**只有它有完成卡与前向拦截**；
+         *  其余频道（场景分区）= 专题自主练习（无完成卡、自由划、不做到期筛选，design.md §5.6）。
+         *  集中在此常量，避免各处硬编码字符串。 */
+        const val CHANNEL_DAILY = "rec"
+
         /** 连击目标：当日「认识」满 3 = 移出当日队列并升一级间隔；任何一次「忘了」清零（design.md §9.0） */
         const val DAILY_COMBO_TARGET = 3
 
-        /** 推荐频道每日任务池配额（到期复核优先 + 新词补足；场景频道不另设配额，design.md §9.3） */
+        /** 每日任务频道池配额（到期复核优先 + 新词补足，design.md §9.3）；
+         *  场景分区不设配额（v5 R9：该区全部词入队，design.md §5.6） */
         const val DAILY_POOL_QUOTA = 10
 
         /** 间隔阶梯（design.md §9.1；v5 延长封顶压稳态到期量）：1→3→7→15→30 */
