@@ -26,11 +26,11 @@ import com.qyj.shibang.tts.TTSSpeaker
 import com.qyj.shibang.ui.theme.AppSurface
 import kotlinx.coroutines.delay
 
-/** feed 页：词条卡（mode 由调度器运行时计算：新学/复习/温故）或完成卡。
+/** feed 页：词条卡（mode 由调度器运行时计算：新学/复习/浏览）或完成卡。
  *  seq = 本会话内的出现序号：v4 中同一词会出现多张卡（学 1 次 + 连击考核若干次），
  *  展开/作答状态必须按「出现」记录而非按词记录——否则第一次作答会把后续追加的
  *  考核卡一并展开。
- *  qIndex = 该卡在持久化当日队列中的下标（作答时 markAnswered 用）；自由刷页 = -1（不落库）。 */
+ *  qIndex = 该卡在持久化当日队列中的下标（作答时 markAnswered 用）；池型页（温故流 / 分区浏览）= -1（不落库）。 */
 sealed interface Page {
     data class TermPage(val t: Term, val mode: CardMode, val seq: Int, val qIndex: Int) : Page
     data object Done : Page
@@ -38,8 +38,8 @@ sealed interface Page {
 
 data class SessionStats(val known: Int = 0, val forgot: Int = 0)
 
-/** 每次预追加的自由刷页数（临近完成卡时预追加，池空重洗） */
-private const val FREE_BATCH = 2
+/** 池型频道的预追加页数（v5 R10：温故流与分区共用同一条追加逻辑；临近队尾 / 完成卡时预追加，池空重洗） */
+private const val POOL_BATCH = 2
 
 /** 停稳判定后的播报去抖（ms）：滑动进行中不播，停稳后再等这么久，快速连滑不闪播 */
 private const val SETTLE_SPEECH_DELAY_MS = 200L
@@ -48,38 +48,31 @@ private const val SETTLE_SPEECH_DELAY_MS = 200L
  *  TTS 不可用时也不至于瞬间翻走（§5.5 两段式等待的第一段） */
 private const val AUTO_ADVANCE_MIN_MS = 1500L
 
-/** v5 防泄题：考试态（复习/温故）未作答且未 peek 时，点卡片只播这句提示语——不念词、不念提示 */
+/** v5 防泄题：复习卡未作答且未 peek 时，点卡片只播这句提示语——不念词、不念提示。
+ *  R10 后作答入口只剩复习卡（温故流与分区都是**浏览卡**：点一下直接念词，见第 10 条），
+ *  故这句与「👀 想看答案」按钮都只对 REVIEW 卡可达。 */
 private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
-
-/** v5 R9 分区队尾轻提示（视觉）：分区（非每日任务频道）滑到最后一张时挂在卡底部。
- *  它是**轻提示**不是完成卡——分区没有「完成」语义，禁止 🎉 /「今日任务完成」类文案与播报。 */
-private const val SCENE_TAIL_HINT = "这个区就这些了 · 点上面的频道可以换区"
-
-/** v5 R9 分区队尾轻提示（播报）：与 SCENE_TAIL_HINT 在**同一条件**下拼在 `cardSpeech` **之后**，
- *  且必须拼成**同一句** `speak`——`TTSSpeaker.speak` 是 QUEUE_FLUSH，分两次 speak 会互相掐断
- *  （与 R7 解释语、R8 作答播报同一根因）。 */
-private const val SCENE_TAIL_SPEECH = "这个区就这些了。点上边的频道可以换个区。"
 
 /**
  * 根界面：抖音式垂直 feed（v4 第三轮定稿：连击 + 间隔双层模型，design.md §9）。
- * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.5）：
+ * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.7）：
  * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播
- * 2. 复习/温故卡未作答只念"还记得它念什么吗"，绝不念词的读音；认识/忘了后才念词+提示
+ * 2. **复习卡**未作答只念"还记得它念什么吗"，绝不念词的读音；认识/忘了后才念词+提示
  *    （v5 防泄题：考试态未作答**点卡片**也只播「再想一想，想起来了吗？」，分流在 TermCard 调用点
  *    ——按形态传对应的 onSpeakTerm；「想看答案」peek 只展开拼音/提示 + 念一遍，不写任何学习状态，
- *    作答按钮保留，看完仍走正常状态机）
+ *    作答按钮保留，看完仍走正常状态机）。**浏览卡**（温故流/分区）不考：点一下直接念「词 + 用途」。
  * 3. 新词卡停稳播报 = markSeen（当日幂等，首次返回 true）+ 立即追加该词复习卡到队尾
  *    （开始当日 3 次认识连击考核）；教读不写 TermState（间隔层）
- * 4. 作答走同一双层状态机（任何频道/自由刷口径一致）：连击层「认识」+1、「忘了」清零
- *    （跨频道共享，当日有效）；满 3 = 移出当日队列 + 间隔层升一级（1→3→7→15→30，每日最多
- *    升一级闸门）；未满 3 的作答不写 TermState。任务卡答后未移除追加队尾（REVIEW 形态），
- *    自由刷卡不追加。展开/作答状态按页出现（seq）记录；断点恢复按队列卡实例 answered[i]
- *    逐卡恢复（不按词级判定，防同词多卡一并展开卡死连击）
- * 5. 完成卡之后继续上滑 = 自由刷无限流（温故，可作答、连击/降级照算），pageCount 随滑动增长
- *    ——**仅每日任务频道**（分区没有完成卡、也不追加自由刷页，第 10 条）
+ * 4. 作答走同一双层状态机（v5 R10：作答入口只剩每日任务的复习卡）：连击层「认识」+1、「忘了」清零
+ *    （当日有效）；满 3 = 移出当日队列 + 间隔层升一级（1→3→7→15→30，每日最多升一级闸门）；
+ *    未满 3 的作答不写 TermState。任务卡答后未移除追加队尾（REVIEW 形态），浏览卡不作答也不追加。
+ *    展开/作答状态按页出现（seq）记录；断点恢复按队列卡实例 answered[i] 逐卡恢复
+ *    （不按词级判定，防同词多卡一并展开卡死连击）
+ * 5. 完成卡之后继续上滑 = **温故流**（v5 R10：池型 + 浏览卡 —— 从池里抽卡、无限追加、不落库；
+ *    pageCount 随滑动增长）——**仅每日任务频道**（分区整体是池型，第 10 条）
  * 6. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
  * 7. 分区完成（§9.5，v5：毕业判定 days >= 15 与间隔封顶 30 解耦）→ 频道栏加 🎓，毕业词升 30 后不回退；
- *    「忘了」days=1 即时回退
+ *    「忘了」days=1 即时回退（R10：只有每日任务的复习卡能写这些状态）
  * 8. 完成卡「真做完才出现」（v5 R7，§5.1，**仅每日任务频道**——R9 收窄）：`Page.Done` 仅在**待处理数 == 0** 时存在于 feed 尾；
  *    未做完时队尾就是最后一张待处理卡，feed 里没有任何含完成语义的页。文案与播报回到**单一形态**，
  *    战果用当日持久计数（§5.3，跨重启不归零）。
@@ -91,26 +84,32 @@ private const val SCENE_TAIL_SPEECH = "这个区就这些了。点上边的频�
  *    **只拦前向**：下滑回看（含翻回以前任意一张已处理的卡）与完成卡之后的自由刷不受限制——**不得**
  *    设 `userScrollEnabled = false`（全向开关会把回看一起锁死，且卡片静止不动会被高龄用户误读为卡死）。
  *    **不存在「跳过 / 延后」这个动作**：待处理卡的唯一出口是 √ / ×（可先「👀 想看答案」再作答）。
- * 9. 作答后自动前进（v5 R8，§5.5）：复习/温故卡完成作答（√ / ×）后，等本次播报「词 + 提示 + 反馈」
+ * 9. 作答后自动前进（v5 R8，§5.5）：**复习卡**完成作答（√ / ×）后，等本次播报「词 + 提示 + 反馈」
  *    整句念完（最短停留 AUTO_ADVANCE_MIN_MS + `tts.awaitQuiet()`）再 `animateScrollToPage(cur + 1)`
  *    ——抢跑会被落点卡的播报 FLUSH 掉答案与反馈（`tts.speak` 是 QUEUE_FLUSH）。新词卡没有「作答完成」
- *    这个事件，**不**自动前进（`SwipeHint` 保留，节奏由用户自己掌握）；播报期间用户自己滑动
- *    （前进或回看）→ 放弃本次自动前进，不抢方向。
- * 10. 分区 = 专题自主练习（v5 R9，§5.6）：**只有每日任务频道（`CHANNEL_DAILY` = "rec"）**有完成卡与前向
- *    拦截（`syncDonePage` / `blockingIndex` 对分区直接放行）——分区的语义是「随时进、随时走、想练多久练多久」，
- *    「完成」与「真做完」在分区里都不存在。分区因此：**自由划**（快甩过任意多张未处理的卡都不退回）、
- *    **不做到期筛选**（队列 = 该区全部词，见 `StudyRepository.buildQueue`，故不会白屏）、**滑完停住**
- *    （`appendFreePages` 以 `doneIdx >= 0` 为前提，分区 `doneIdx` 恒 -1，无需改代码即自然停住）+ 队尾
- *    **轻提示**（`SCENE_TAIL_HINT` 显示在最后一张卡底部，并把 `SCENE_TAIL_SPEECH` 并入该卡**同一次**播报）。
- *    分区作答仍走同一套双层状态机、同样计入当日战果；断点 = **上次滑到的那一页**（不是 frontier——
- *    自由划之后「在哪儿」≠「做到哪儿了」）。
+ *    这个事件、**浏览卡没有作答入口**，**都不**自动前进（`SwipeHint` 保留，节奏由用户自己掌握）；
+ *    播报期间用户自己滑动（前进或回看）→ 放弃本次自动前进，不抢方向。
+ * 10. 频道分两类（v5 R10，§5.7）：
+ *    **队列型 = 只有每日任务频道**（`CHANNEL_DAILY` = "rec"）——`repo.ensureQueue()` / `DailyQueue` /
+ *    完成卡 / 前向拦截 / 断点 = frontier 都只属于它；
+ *    **池型 = 12 个场景分区 + 推荐频道的温故流**——运行时从池里抽卡、无限追加、**不落库**
+ *    （`appendPoolPages`）。两处的卡都是**浏览卡**（沿用 `CardMode.FREE`：词 + 逐字拼音 + 用途全展开、
+ *    无 √/×、无「想看答案」、点卡重听、点单字看讲解）。
+ *    分区因此：**无完成卡**（`syncDonePage` 对非每日任务频道直接 return）、**无前向拦截**
+ *    （`blockingIndex` 返回 -1）、**不做到期筛选**（池 = 该区全部词含未学词 → 池必非空 → 不白屏）、
+ *    **不恢复位置**（D6：每次进区都是一轮新的随机；装载时 `restoreTo = 0` 必须**显式归零**——
+ *    切频道时 `pagerState.currentPage` 可能还是上一个频道的旧值，而新 `pages` 只有 2 张）。
+ *    池型频道**零写入**：浏览卡不调 `markSeen`、没有作答入口 → 不写 `TermState` / `DayState`
+ *    （分区里未学词只看不算学，学会它的唯一路径是每日任务——D4 新词入口唯一化）。
+ *    作答入口只剩复习卡，故防泄题话术、R8 自动前进、完成卡战果计数（known/forgot）**天然**只统计
+ *    每日任务频道（§5.7-7，不需要额外代码）。
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     var channel by remember { mutableStateOf(StudyRepository.CHANNEL_DAILY) }
     var session by remember { mutableStateOf(SessionStats()) }
-    val revealed = remember { mutableStateMapOf<Int, Boolean>() }      // seq -> 复习/温故卡是否已作答展开（按出现记，不按词记）
-    val peeked = remember { mutableStateMapOf<Int, Boolean>() }        // seq -> 考试卡「想看答案」求助展开（v5：会话态不持久化，不写任何学习状态）
+    val revealed = remember { mutableStateMapOf<Int, Boolean>() }      // seq -> 复习卡是否已作答展开（按出现记，不按词记；浏览卡恒展开、不写这里）
+    val peeked = remember { mutableStateMapOf<Int, Boolean>() }        // seq -> 复习卡「想看答案」求助展开（v5：会话态不持久化，不写任何学习状态）
     val taught = remember { mutableStateMapOf<Int, Boolean>() }        // seq -> 新词卡当日是否已教读（v5 R7 待处理口径；装载时按 repo.wasSeenToday 恢复）
     val results = remember { mutableStateMapOf<Int, String>() }        // seq -> 反馈文案
     var seqGen by remember { mutableStateOf(0) }                       // 页出现序号发生器（只在 effect/回调中递增）
@@ -118,9 +117,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     var charFor by remember { mutableStateOf<TermChar?>(null) }
     var graduated by remember { mutableStateOf(emptySet<String>()) }   // 已完成分区（频道栏 🎓）
 
-    // feed 页面：当日队列 + 完成卡（条件存在）+ 自由刷追加页（无限流）
+    // feed 页面：队列型 = 当日队列 + 完成卡（条件存在）+ 温故流追加页；池型（分区）= 池型浏览页（无限流）
     var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
-    var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 自由刷池：顺序抽取，池空重洗
+    var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 池型抽取池：顺序抽取，池空重洗（两个频道类型共用）
     var restoreTo by remember { mutableStateOf<Int?>(null) }             // 断点/频道切换的目标页
     var pendingAnnounce by remember { mutableStateOf<String?>(null) }    // 频道播报（与首卡合并成一句播）
     var firstChannelLoad by remember { mutableStateOf(true) }
@@ -142,7 +141,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     fun termSpeech(t: Term) = "${t.text}。${t.tip}"
 
     /** v5 R7 待处理（pending）口径（design.md §5.1）：新词卡**当日未被教读** 或 复习卡**未作答**；
-     *  温故/自由刷（FREE）卡恒不计入（自由刷是完成之后的消遣，不属于当日任务）。 */
+     *  浏览卡（`CardMode.FREE`：温故流 / 分区）恒不计入——它们不是当日任务，也没有作答入口。 */
     fun isPending(p: Page): Boolean = p is Page.TermPage && when (p.mode) {
         CardMode.NEW -> taught[p.seq] != true
         CardMode.REVIEW -> revealed[p.seq] != true
@@ -179,15 +178,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         return if (first >= 0 && first < idx) first else -1
     }
 
-    /** v5 R9（§5.6）分区队尾轻提示的判定式：**仅分区**（非每日任务频道）**且当前卡是该区最后一张**。
-     *  视觉（`footerHint`）与播报（`SCENE_TAIL_SPEECH`）共用这一个函数，条件不会漂移。
-     *  ⚠️「最后一张」是会变的：分区作答未移除时 `appendReviewCard` 仍会追加考核卡（无完成卡时
-     *  `insertAt` 天然落到 `pages.size`），所以轻提示只在**该区所有词都练到当日连击 3** 之后才出现
-     *  ——这正是它想表达的「这个区就这些了」。 */
-    fun isSceneTail(idx: Int): Boolean =
-        channel != StudyRepository.CHANNEL_DAILY && idx == pages.lastIndex
-
-    /** 任务区去重词数 = 完成卡战果里的 N（§5.3：N = 任务区去重词数）。自由刷页不计入。 */
+    /** 任务区去重词数 = 完成卡战果里的 N（§5.3：N = 任务区去重词数）。池型页（浏览卡）不计入。 */
     fun taskWordCount(): Int = pages.asSequence()
         .filterIsInstance<Page.TermPage>()
         .filter { it.mode != CardMode.FREE }
@@ -211,7 +202,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         }
     }
 
-    /** 自动朗读去重键：按**页身份**（seq）而非下标——追加（考核卡 / 完成卡 / 自由刷页）会改变下标，
+    /** 自动朗读去重键：按**页身份**（seq）而非下标——追加（考核卡 / 完成卡 / 池型页）会改变下标，
      *  绑 seq 让「页身份」与「列表位置」解耦。完成卡回到单一形态（§5.1），故用 `channel:done` 即可
      *  （完成卡一旦出现就不会再消失）。 */
     fun spokenKey(p: Page) = "$channel:" + when (p) {
@@ -219,11 +210,14 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         Page.Done -> "done"
     }
 
-    /** 停稳后播报文案（design.md §9 契约）：复习/温故卡未作答绝不念词的读音。
-     *  v5 R7：完成卡回到**单一形态**（条件出现后不存在「还没答完」的完成卡，故不再分流）。 */
+    /** 停稳后播报文案（design.md §9 契约）：复习卡未作答绝不念词的读音。
+     *  v5 R7：完成卡回到**单一形态**（条件出现后不存在「还没答完」的完成卡，故不再分流）。
+     *  v5 R10（§5.7-1 ⚠️）：**浏览卡必须显式先判 `FREE`**——浏览卡永远不写 `revealed`，
+     *  若落到 `else` 就会播防泄题话术（「这个词，还记得它念什么吗？」），在浏览卡上是错的。 */
     fun cardSpeech(p: Page): String = when (p) {
         is Page.TermPage -> when {
             p.mode == CardMode.NEW -> termSpeech(p.t)          // 新学：词 + 提示语，全展开
+            p.mode == CardMode.FREE -> termSpeech(p.t)         // 浏览卡（温故流/分区）：全展开，直接念词 + 用途
             revealed[p.seq] == true -> termSpeech(p.t)         // 已作答：词 + 提示语
             else -> "这个词，还记得它念什么吗？想一想，再按下面的按钮"
         }
@@ -233,63 +227,18 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 "继续上滑，随便看看，温故知新。"
     }
 
-    // 装载当日队列（repo 内 date 不符自动重建）：进入 / 切频道都回到断点（每日任务频道 = frontier，
-    // 分区 = 上次滑到的那一页，见下面 restoreTo 处的口径说明）
-    LaunchedEffect(channel) {
-        val announce = !firstChannelLoad
-        firstChannelLoad = false
-        val q = repo.ensureQueue(channel)
-        val taskPages = q.queue.mapIndexedNotNull { i, id ->
-            val t = termById(id) ?: return@mapIndexedNotNull null
-            val mode = if (q.modes[i] == StudyRepository.MODE_NEW) CardMode.NEW else CardMode.REVIEW
-            val seq = nextSeq()
-            // 断点恢复：按该卡实例的 answered[i] 逐卡恢复展开态（design.md §9.1）。
-            // 不按词级 lastSeen 判定——v4 同词多卡，词级判定会把剩余连击考核卡一并展开，重启后卡死
-            if (q.answered[i]) revealed[seq] = true
-            // v5 R7：新词卡当日已教读过（上一会话 markSeen）→ 不算待处理。教读态不持久化，
-            // 按当日 seen 集合恢复（wasSeenToday），否则重启后同一张新词卡会被再算一次待处理
-            if (mode == CardMode.NEW && repo.wasSeenToday(id)) taught[seq] = true
-            Page.TermPage(t, mode, seq, i)
-        }
-        // v5 R7：列表只追加不重排，`taskPages` 的顺序就是队列顺序——不再需要上一版的「稳定分区」
-        // （前向拦截保证了待处理卡不会被留在身后，且用户总会被放到第一张待处理卡上）
-        pages = taskPages
-        freePool = emptyList()
-        spokenKeys.clear()
-        advanceAfterSpeechSeq = -1           // 队列已重建，丢弃上一队列未完成的自动前进
-        syncDonePage()                       // 完成卡条件出现：pending == 0 才有收尾页（分区直接 return）
-        // 断点（§5.2 / §5.6）：
-        // - 每日任务频道 = frontier（第一张待处理卡；都做完了则是完成卡）——本模型里「在哪儿」=「做到哪儿了」；
-        // - 分区 = **上次滑到的那一页**（R9：自由划之后「在哪儿」≠「做到哪儿了」，用 frontier 会把用户
-        //   拽回第一张未处理的卡）。⚠️ `position` 落库时被 `saveQueuePosition` clamp 到 `queue.size`，
-        //   比 `pages.lastIndex` 大 1，这里必须**再夹一次**；分区 `pages` 非空（buildQueue 全量入队，
-        //   不存在白屏），`maxOf(0, ...)` 只是空表兜底
-        restoreTo = if (channel == StudyRepository.CHANNEL_DAILY) {
-            frontierIndex()
-        } else {
-            q.position.coerceIn(0, maxOf(0, pages.size - 1))
-        }
-        session = SessionStats(repo.todayKnown(), repo.todayForgot())   // 战果当日持久口径（§5.3）
-        if (announce) pendingAnnounce = "换到${sceneName(channel)}频道。"
-    }
-
-    // 分区完成徽章：进入 / 切频道 / 每次作答（session 变化）后刷新。
-    // 注：完成判定只依赖间隔层 days（design.md §9.5），徽章即时更新；「忘了」days=1 → 即时退出完成状态。
-    LaunchedEffect(channel, session) { graduated = repo.graduatedScenes() }
-
-    // 断点/频道切换跳页（restoreTo 置空防重复；需先于停稳监听声明，保证跳页先行）
-    LaunchedEffect(pages, restoreTo) {
-        val target = restoreTo ?: return@LaunchedEffect
-        restoreTo = null
-        if (pages.isNotEmpty()) pagerState.scrollToPage(target.coerceIn(0, pages.lastIndex))
-    }
-
-    /** 自由刷：从池里顺序取 count 张追加到尾部；池空重洗（无限流，随时可停）。qIndex = -1：不落库 */
-    fun appendFreePages(count: Int) {
+    /** 池型追加（v5 R10 §5.7-2）：从池里顺序取 count 张追加到**尾部**；池空用 `repo.poolIds(channel)`
+     *  重洗补满（**无限流**，随时可停）。qIndex = -1 → 不落库。两个频道类型共用同一实现：
+     *  - 队列型（`rec`）= 完成卡之后的温故流；池 = 推荐范围**已学词**（等概率）；
+     *  - 池型（分区）= 该区**全部词**（含未学词，加权随机）。
+     *  追加只发生在**列表尾部**（与「只追加不重排」的既有不变量一致），`spokenKeys` / pager `key`
+     *  的页身份机制不受影响。
+     *  ⚠️ 池型频道必非空（每区 ≥ 30 词，§5.7-8）→ 追加总能拿到内容，不存在 `pageCount == 0` 白屏。 */
+    fun appendPoolPages(count: Int) {
         val extra = ArrayList<Page>(count)
         repeat(count) {
             if (freePool.isEmpty()) {
-                freePool = repo.freePoolIds(channel).mapNotNull(::termById)
+                freePool = repo.poolIds(channel).mapNotNull(::termById)
             }
             val next = freePool.firstOrNull() ?: return@repeat
             freePool = freePool.drop(1)
@@ -298,15 +247,67 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         if (extra.isNotEmpty()) pages = pages + extra
     }
 
+    // 装载：**队列型频道**（只有每日任务）走当日队列 + frontier 断点；**池型频道**（场景分区）
+    // 没有队列——直接填一批池型浏览页开始无限流（`pages` 不能为空：`VerticalPager` 的 pageCount == 0
+    // 就是白屏）。repo 内 date 不符自动重建队列。
+    LaunchedEffect(channel) {
+        val announce = !firstChannelLoad
+        firstChannelLoad = false
+        freePool = emptyList()
+        spokenKeys.clear()
+        advanceAfterSpeechSeq = -1           // 频道已切换，丢弃上一频道未完成的自动前进
+        if (channel == StudyRepository.CHANNEL_DAILY) {
+            val q = repo.ensureQueue()
+            pages = q.queue.mapIndexedNotNull { i, id ->
+                val t = termById(id) ?: return@mapIndexedNotNull null
+                val mode = if (q.modes[i] == StudyRepository.MODE_NEW) CardMode.NEW else CardMode.REVIEW
+                val seq = nextSeq()
+                // 断点恢复：按该卡实例的 answered[i] 逐卡恢复展开态（design.md §9.1）。
+                // 不按词级 lastSeen 判定——v4 同词多卡，词级判定会把剩余连击考核卡一并展开，重启后卡死
+                if (q.answered[i]) revealed[seq] = true
+                // v5 R7：新词卡当日已教读过（上一会话 markSeen）→ 不算待处理。教读态不持久化，
+                // 按当日 seen 集合恢复（wasSeenToday），否则重启后同一张新词卡会被再算一次待处理
+                if (mode == CardMode.NEW && repo.wasSeenToday(id)) taught[seq] = true
+                Page.TermPage(t, mode, seq, i)
+            }
+            // v5 R7：列表只追加不重排，`taskPages` 的顺序就是队列顺序——不再需要上一版的「稳定分区」
+            // （前向拦截保证了待处理卡不会被留在身后，且用户总会被放到第一张待处理卡上）
+            syncDonePage()                   // 完成卡条件出现：pending == 0 才有收尾页
+            // 断点（§5.2）：frontier = 第一张待处理卡（都做完了则是完成卡）——本模型里「在哪儿」=「做到哪儿了」
+            restoreTo = frontierIndex()
+        } else {
+            // v5 R10（§5.7-3）：池型频道 = 池 + 浏览卡，没有队列、也没有断点——**显式归零**，
+            // 用 `0` 而**不是** `null`：切频道时 `pagerState.currentPage` 可能还是上一个频道的旧值
+            // （比如 7），而新 `pages` 只有 2 张。D6：不恢复位置，每次进区都是一轮新的随机。
+            pages = emptyList()
+            appendPoolPages(POOL_BATCH)
+            restoreTo = 0
+        }
+        session = SessionStats(repo.todayKnown(), repo.todayForgot())   // 战果当日持久口径（§5.3）
+        if (announce) pendingAnnounce = "换到${sceneName(channel)}频道。"
+    }
+
+    // 分区完成徽章：进入 / 切频道 / 每次作答（session 变化）后刷新。
+    // 注：完成判定只依赖间隔层 days（design.md §9.5），徽章即时更新；「忘了」days=1 → 即时退出完成状态。
+    // v5 R10：间隔层只由每日任务复习卡作答写入 → 分区 🎓 只能靠每日任务推进（浏览不写状态）。
+    LaunchedEffect(channel, session) { graduated = repo.graduatedScenes() }
+
+    // 断点/频道切换跳页（restoreTo 置空防重复；需先于停稳监听声明，保证跳页先行）
+    // v5 R10：队列型取 frontier；池型恒为 0（D6 不恢复位置）
+    LaunchedEffect(pages, restoreTo) {
+        val target = restoreTo ?: return@LaunchedEffect
+        restoreTo = null
+        if (pages.isNotEmpty()) pagerState.scrollToPage(target.coerceIn(0, pages.lastIndex))
+    }
+
     /** 该词未被移除（当日连击 <3）时追加到持久化队列尾，并在 feed「任务区末尾」插入一张复习卡（当天再见）。
      *  ⚠️ 插入点 = 完成卡下标；完成卡在 v5 是**条件存在**（未做完时根本不在 `pages` 里），
      *  此时 `indexOfFirst` 返回 -1，必须落到 `pages.size`（任务区末尾）——若沿用旧写法
      *  `coerceAtLeast(0)`，-1 会变成 0 把新卡插到**队首**（用户身后），前向可达性直接破掉。
      *  repo.appendQueue 追加成功返回队尾下标（作为该卡的 qIndex，markAnswered 用）；已移除返回 -1 不插入。
-     *  v5 R9：分区（无完成卡）永远走 `pages.size` 这条路——新追加的考核卡总是成为新的队尾，
-     *  队尾轻提示（`isSceneTail`）随之移到新队尾，于是它只在「该区所有词都练到当日连击 3」后出现。 */
+     *  v5 R10：只有队列型频道（每日任务）的复习卡会走到这里。 */
     fun appendReviewCard(t: Term) {
-        val qIndex = repo.appendQueue(channel, t.id)
+        val qIndex = repo.appendQueue(t.id)
         if (qIndex >= 0) {
             val doneIdx = pages.indexOfFirst { it is Page.Done }
             val insertAt = if (doneIdx >= 0) doneIdx else pages.size
@@ -316,29 +317,32 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         }
     }
 
-    // 翻页落库：保存当日断点 + 临近完成卡（差一页）预追加自由刷页。
-    // 断点口径（§5.2 / §5.6）：每日任务频道写 frontier；分区写**当前页**（自由划，「在哪儿」就是断点
-    // ——分区 `pages` 与队列一一对应：无完成卡、无自由刷页，页码即队列下标）。
-    // 完成卡条件存在（§5.1）：doneIdx < 0 时不追加——未做完时队尾是最后一张待处理卡，不是收尾页；
-    // 分区 `doneIdx` 恒为 -1（`syncDonePage` 对分区直接 return），故分区**滑完自然停住、不再追加页**。
+    // 翻页落库（仅队列型）+ 临近队尾预追加池型页（v5 R10 §5.7-2）。
+    // - **队列型**（每日任务）：断点写 frontier（§5.2：本模型里「在哪儿」=「做到哪儿了」）；追加的触发是
+    //   `doneIdx >= 0 && idx >= doneIdx - 1`——**完成卡之前不追加**，即未做完就进不了温故流（保持现状）；
+    // - **池型**（分区）：**不落库**（顺序随机，页码没有意义）+ 任何时候都追加 = **无限流**（D2）。
+    // 追加只发生在**列表尾部**，与「只追加不重排」的既有不变量一致。
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage }.collect { idx ->
-            repo.saveQueuePosition(
-                channel,
-                if (channel == StudyRepository.CHANNEL_DAILY) frontierIndex() else idx,
-            )
-            val doneIdx = pages.indexOfFirst { it is Page.Done }
-            if (doneIdx >= 0 && idx >= doneIdx - 1) appendFreePages(FREE_BATCH)
+            if (channel == StudyRepository.CHANNEL_DAILY) {
+                repo.saveQueuePosition(frontierIndex())
+                val doneIdx = pages.indexOfFirst { it is Page.Done }
+                if (doneIdx >= 0 && idx >= doneIdx - 1) appendPoolPages(POOL_BATCH)
+            } else {
+                if (idx >= pages.lastIndex - 1) appendPoolPages(POOL_BATCH)
+            }
         }
     }
 
-    /** 作答（认识/忘了）：所有卡型共用同一双层状态机（design.md §9.2，任何频道/自由刷口径一致）。
+    /** 作答（认识/忘了）：双层状态机（design.md §9.2）。v5 R10：作答入口只剩**每日任务的复习卡**
+     *  （温故流与分区都是浏览卡，没有 √/×）——`knownAnswers` / `forgotAnswers` 只在这里 +1，
+     *  故完成卡战果天然只统计每日任务频道。
      *  展开/文案按 seq（本次出现）记录：同一词的多张考核卡互不影响，各自可再作答；
      *  作答同时按卡实例落库 answered（断点恢复用，design.md §9.1）。 */
     fun answer(p: Page.TermPage, known: Boolean) {
         val t = p.t
         revealed[p.seq] = true
-        if (p.qIndex >= 0) repo.markAnswered(channel, p.qIndex)   // 自由刷页 qIndex=-1 不落库
+        if (p.qIndex >= 0) repo.markAnswered(p.qIndex)   // 池型页 qIndex=-1 不落库
         if (known) {
             // 双层状态机（design.md §9.2）：连击层 +1（满 3 = 移除当日队列，不追加）；
             // 间隔层仅满 3 时升级（1→3→7→15→30，受每日最多升一级闸门约束）
@@ -360,14 +364,13 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
             tts.speak("${termSpeech(t)}。没关系，再学一遍。")
         }
         // 作答后未移除（当日连击 <3）→ 追加队尾（REVIEW 形态，当天再见；repo 内按最新计数判定）。
-        // 自由刷（Done 之后）不追加：插入点在完成卡之前 = 已滑过的位置（还会引发 pager 错位），
-        // 当天再见由自由刷池循环自然覆盖，次日回池由 days=1 + buildQueue 保证（design.md §9.4）
+        // 池型浏览卡没有作答入口，这里只为队列型频道的复习卡服务（`!= FREE` 的判断留作不变量表达）
         if (p.mode != CardMode.FREE) appendReviewCard(t)
         // v5 R7 完成卡条件出现：答完最后一张待处理卡 → 完成卡此时才出现在队尾
         syncDonePage()
         // v5 R8 作答后自动前进（§5.5）：置触发键，由下面 keyed 该 seq 的 effect 等播报念完再翻页
-        //（必须放在 `tts.speak(...)` 之后）。只有 √ / × 会走到这里 —— 新词卡没有「作答完成」这个事件，
-        // 天然不自动前进（它也不显示作答按钮）。
+        //（必须放在 `tts.speak(...)` 之后）。只有 √ / × 会走到这里 —— 新词卡与浏览卡都没有「作答完成」
+        // 这个事件，天然不自动前进（它们也不显示作答按钮）。
         advanceAfterSpeechSeq = p.seq
     }
 
@@ -410,17 +413,16 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 }
                 val announce = pendingAnnounce
                 pendingAnnounce = null
-                // v5 R9 分区队尾轻提示（§5.6）：与 footerHint **同一条件**（isSceneTail），拼在 cardSpeech
-                // **之后**。⚠️ 必须拼成**同一句** speak——`tts.speak` 是 QUEUE_FLUSH，分两次 speak 会互相
-                // 掐断（与 R7 解释语、R8 作答播报同一根因）。
-                val text = cardSpeech(p) + if (isSceneTail(idx)) SCENE_TAIL_SPEECH else ""
+                // v5 R10：池型页与队列型页共用同一句播报（浏览卡由 `cardSpeech` 直接念「词 + 用途」）。
                 // 换频道播报与本卡播报拼成**一句**：分开 speak 会互相 FLUSH 掉
+                val text = cardSpeech(p)
                 tts.speak(if (announce != null) announce + text else text)
             }
     }
 
     // v5 R8 作答后自动前进（§5.5）：必须等这句播报念完再翻，否则落点卡的播报会把答案与反馈掐掉。
-    // key 只用作答卡的 seq：`answer()` 置位触发，effect 收尾置回 -1；新词卡不经过 `answer()`，故不触发。
+    // key 只用作答卡的 seq：`answer()` 置位触发，effect 收尾置回 -1。
+    // R10：`answer()` 只剩每日任务的复习卡一条入口 → 新词卡与浏览卡天然不自动前进（用户还没看完就翻页是打扰）。
     LaunchedEffect(advanceAfterSpeechSeq) {
         val seq = advanceAfterSpeechSeq
         if (seq < 0) return@LaunchedEffect
@@ -475,28 +477,27 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 is Page.TermPage -> TermCard(
                     term = p.t,
                     mode = p.mode,
-                    revealed = p.mode == CardMode.NEW || revealed[p.seq] == true,
+                    // v5 R10（§5.7-1）：只有复习卡是考试态——温故流/分区的浏览卡（FREE）恒展开
+                    revealed = p.mode != CardMode.REVIEW || revealed[p.seq] == true,
                     peeked = peeked[p.seq] == true,
                     resultText = results[p.seq],
                     // v5 防泄题分流（在本调用点按形态选回调，TermCard 不感知）：
-                    // 考试态未作答且未 peek → 点卡片只播提示语；其余（新学/已作答/peek 后）重听词+提示
+                    // **复习卡**未作答且未 peek → 点卡片只播提示语；其余（新学 / 已作答 / peek 后 /
+                    // 浏览卡）重听「词 + 用途」。R10：收窄为 `== REVIEW`，否则浏览卡会播防泄题话术。
                     onSpeakTerm = {
-                        val examUnanswered = p.mode != CardMode.NEW && revealed[p.seq] != true
+                        val examUnanswered = p.mode == CardMode.REVIEW && revealed[p.seq] != true
                         if (examUnanswered && peeked[p.seq] != true) tts.speak(EXAM_TAP_HINT_SPEECH)
                         else tts.speak(termSpeech(p.t))
                     },
                     // v5 求助通道：只置会话态 + 念出词和提示（用户主动求助，给足信息）；
-                    // 不写 repo 任何状态、不 markAnswered、不追加队列——作答仍走正常状态机
+                    // 不写 repo 任何状态、不 markAnswered、不追加队列——作答仍走正常状态机。
+                    // R10：按钮只在复习卡上渲染（TermCard 的 isExam），浏览卡不可达。
                     onPeek = {
                         peeked[p.seq] = true
                         tts.speak(termSpeech(p.t))
                     },
                     onCharClick = { charFor = it },
                     onAnswer = { known -> answer(p, known) },
-                    // v5 R9 分区队尾轻提示（§5.6）：仅分区（非每日任务频道）的最后一张卡，且**不新增页**
-                    // ——新增页会和完成卡长得像，正是 R9 要消除的混淆。播报侧用同一个 isSceneTail，
-                    // 见上面停稳 effect（同一句 speak）
-                    footerHint = if (isSceneTail(idx)) SCENE_TAIL_HINT else null,
                 )
                 Page.Done -> DoneCard(
                     known = session.known,

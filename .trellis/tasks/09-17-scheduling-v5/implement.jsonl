@@ -1,2 +1,4 @@
 {"file": ".trellis/tasks/09-17-elderly-literacy-app/design.md", "reason": "v4 连击+间隔双层模型的完整契约（§9），v5 改动的语义基线；实现时必须保持双层结构与交互契约其余部分不变"}
 {"file": ".trellis/tasks/09-17-scheduling-v5/research/v4-analysis.md", "reason": "v5 立项依据：到期债务测算、lapse 排序反向根因、泄题漏洞定位，以及已核对无问题不得误改的部分"}
+{"file": ".trellis/tasks/09-17-scheduling-v5/research/daily-quota-and-self-study-review.md", "reason": "R10 的论证依据与决策记录（D1–D6 六条决策、P1–P7 连锁结论、§6 完整变更清单）：实现 R10 前必读，决定「哪些是刻意设计、哪些是待改」"}
+{"file": ".trellis/tasks/09-17-scheduling-v5/research/learning-mechanism-review.md", "reason": "机制量化分析（模拟器数据）：1 词 = 3 张卡的汇率、n 的隐式上限 ≈ 30n、churn 是主要成本——R10 两条已接受代价的来源，也是 R10 后「机制杠杆成为唯一调节手段」的背景"}

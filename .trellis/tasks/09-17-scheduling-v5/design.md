@@ -12,6 +12,7 @@
 | P1-1 | 复习卡点按泄题 | TermCard 主区域 clickable → onSpeakTerm 对所有形态生效 | 考试态未作答时一个 tap 听到「词+提示」，考回忆契约失效，连击虚高 |
 | P1-2 | 完成卡与队列完成度不一致 | ① 完成卡与队尾绑定（`pages` = 队列卡 + Done），滑到底 ≡ 完成；② 上一轮补救口径只数「未作答复习卡」，漏掉「整天都是新词卡被快速甩过」——新词卡未停稳就不触发教读，该口径恒为 0；③ 第二轮补救「滑过即回收队尾」保证了前向可达，但机制**不可见**且**不终止**（回收无次数上限、未答完时 FREE 页不追加）| 一张卡没答也能听到「今日任务完成」；完成卡变成固定在队尾的装饰，而不是成绩；第二轮之后的问题形态变成**无限循环**——同一批卡反复出现，没有完成卡、进不去温故、也没有任何解释 |
 | P1-3 | 分区被当成「第二个每日任务」 | 每个频道各有一套当日队列 + **一张完成卡**，文案一律「今日任务完成！」（一天最多能「完成」13 次）；场景频道沿用 `due + news` 全量入队。R7 改判后「不允许越过未处理的卡」在分区里**没有任何收尾页来终止它** | 进分区即约 120 张强制卡（15–20 分钟）；若分区按到期筛选，则刚毕业的分区（全部词 days ≥ 15 且未到期）pool 为空 → `pageCount == 0` **白屏**、可持续十几天 |
+| P1-4 | 自主学习（温故流 + 分区）与每日任务共用「考试态」与「队列」模型 | 温故与分区沿用复习卡的考试交互（√/× 自评 + 防泄题），且作答**写间隔层**；分区还用 `DailyQueue`（`modes`/`answered`/`position`）表达一条**固定顺序**的队列 | ① 「自主学习」成了第二个考试流：老人想随便看看却被要求自评，随手一点就改写间隔层（√ 可提前升级 / × 打回 days=1，见 `learning-mechanism-review.md` C 项）；② 固定顺序 → 用户设想的「不固定次序」无法表达；③ 分区 pool 含 `news` = 绕开每日配额教新词，且次日全部到期抢配额（埋债）；④ R9 的「滑完停住 + 轻提示」与「自主学习没有限制」自相矛盾 |
 
 ## 1. 决策
 
@@ -30,7 +31,7 @@
 | 待处理口径 | 新学卡按**是否已教读**、复习卡按**是否已作答**；FREE 卡不计入 | 新词卡是当日任务真实的一员，只数复习卡会整片漏判；停稳教读（markSeen）才等于这张新词卡真的被处理过 |
 | 战果数字 | 当日持久计数（`DayState` 增设认识/忘了次数），不用会话计数 | 完成是跨会话可达的事件（10 张配额约 30 张卡），会话计数重启归零会让最该真实的完成卡显示「认识了 0 个」 |
 | 作答后前进 | **自动前进**（等本次播报念完 + 最短停留的两段式等待；新词卡不适用） | 高龄用户答完停在原地、不知道下一步做什么。R7 管「没作答不能走」、R8 管「作答完自动走」——合起来 feed 只剩一种前进方式：处理完当前卡（§5.5） |
-| 分区定位 | **专题自主练习**：不设完成卡、不做前向拦截、不做到期筛选、滑完停住 | 「每日任务」应当只有一份。分区不设完成卡 → R7 前向拦截的**唯一存在理由**（保证完成卡 = 真做完，§5.2）随之消失；不做到期筛选 → 排除刚毕业分区的空队列白屏。详见 §5.6 |
+| 分区定位 | **专题自主练习**：不设完成卡、不做前向拦截、不做到期筛选（~~滑完停住~~ → **[R10 改为无限流]**，见 §5.7） | 「每日任务」应当只有一份。分区不设完成卡 → R7 前向拦截的**唯一存在理由**（保证完成卡 = 真做完，§5.2）随之消失；不做到期筛选 → 排除刚毕业分区的空队列白屏。详见 §5.6（形态部分已被 §5.7 取代） |
 | 分区队列范围 | 该区**全部词**（已学按「lapses 降序 → dueTime 升序」在前，未学洗牌接后） | 「自主练习」= 进来就有东西练。若保留到期筛选，一个刚毕业的分区（全部词 days ≥ 15 且未到期）会在十几天里 pool 为空 |
 | 分区断点 | 上次滑到的那一页（**不是** frontier） | 自由划之后「在哪儿」≠「做到哪儿了」；用 frontier 会把用户拽回第一张未处理的卡 |
 | 分区收尾 | **轻提示**（最后一张卡底部 + 并入该卡播报），不是完成卡 | 分区没有「完成」语义；但上滑无反应会被高龄用户当成卡死，需要一句看得见也听得见的「就这些了」 |
@@ -50,7 +51,9 @@ data class TermState(val days: Int, val lastSeen: String, val lapses: Int = 0)
 | 满 3 连击升级（lastSeen≠今天） | days=nextInterval、lastSeen=今天、**lapses/2** |
 | 满 3 连击但闸门挡住 / 无状态首次完成 | lapses 不变（首次完成写 {1, 今天, 0}） |
 
-## 3. 排序与配额（buildQueue）
+## 3. 排序与配额（buildQueue）+ 池型抽取（poolIds）
+
+**队列型只有每日任务频道**（R10 §5.7）。`buildQueue` / `ensureQueue` / `appendQueue` / `markAnswered` / `saveQueuePosition` 的 `channel` 参数**一律删掉**，内部固定用 `CHANNEL_DAILY`——让「队列 = 每日任务」成为签名层面的事实，而不是靠调用方自觉（P1-4 ③ 的根源正是「同一个函数服务两种频道类型」）。
 
 ```kotlin
 // 已学词统一排序（v5 双键）：lapses 降序（忘词先见）→ dueTime 升序（先清旧债）
@@ -63,16 +66,52 @@ val learned = scope.filter { termStates[it] != null }.sortedWith(
 )
 val due  = learned.filter { isDue(termStates[it]!!) }
 val news = scope.filter { termStates[it] == null }.shuffled()
-val pool = when {
-    channel == CHANNEL_DAILY && due.size >= DEBT_THRESHOLD -> due.take(DEBT_QUOTA)  // 清债模式
-    channel == CHANNEL_DAILY -> (due + news).take(DAILY_POOL_QUOTA)                 // 现状
-    else -> learned + news                                                          // 分区（R9）：不看到期日
+val pool = if (due.size >= DEBT_THRESHOLD) due.take(DEBT_QUOTA)   // 清债模式：全复习、不补新词
+           else (due + news).take(DAILY_POOL_QUOTA)               // 到期复核 + 新词补足
+```
+
+> ⚠️ **R10 删掉了 `else -> learned + news` 分支**（R9 的分区全量入队）。分区已不再生成队列（池型，§5.7），保留这个分支就是留一段永远不会被走到、却看起来仍在服务分区的死代码。
+
+### 3.1 池型抽取（R10）
+
+温故流与分区共用同一条追加逻辑，差别只在池的构成：
+
+```kotlin
+/**
+ * 池型频道的抽取池（R10 §5.7）：
+ * - 每日任务频道（温故流）= 该范围**已学词**洗牌（等概率，保持 v4 既有行为）
+ * - 分区 = 该区**全部词**（含未学），加权随机（抽完由调用方重洗）
+ */
+fun poolIds(channel: String): List<String> =
+    if (channel == CHANNEL_DAILY) scopeIds(channel).filter { termStates[it] != null }.shuffled()
+    else weightedShuffle(scopeIds(channel))
+
+/** 加权随机排列（Efraimidis–Spirakis 指数键）：key = -ln(u)/w，升序即无放回加权抽样 */
+private fun weightedShuffle(ids: List<String>): List<String> {
+    val rnd = Random.Default
+    return ids.map { id ->
+        val w = poolWeight(id)
+        val u = 1.0 - rnd.nextDouble()      // u ∈ (0,1]：避免 nextDouble() 返回 0 时 ln(0) → +Inf
+        id to (-ln(u) / w)
+    }.sortedBy { it.second }.map { it.first }
+}
+
+/** 分区抽词权重（**只读**：忘得越多、越久没看 → 越容易被抽到；未学词固定中等权重） */
+private fun poolWeight(id: String): Double {
+    val st = termStates[id] ?: return SCENE_NEW_WEIGHT            // 2.0
+    val last = runCatching { fmt.parse(st.lastSeen)?.time }.getOrNull()
+    val now = runCatching { fmt.parse(today())?.time }.getOrNull()
+    val daysAgo = if (last == null || now == null) 0L else ((now - last) / DAY_MS).coerceAtLeast(0L)
+    return 1.0 + 2.0 * st.lapses + minOf(daysAgo, 60L) / 30.0
 }
 ```
 
-> R9：分区（`channel != CHANNEL_DAILY`）**不做到期筛选**——`learned` 已按「忘得最多 / 最快到期」排序，整段入队，未学词接在后。`CHANNEL_DAILY = "rec"` 由常量统一，不再各处硬编码字符串。
+- 新常量：`SCENE_NEW_WEIGHT = 2.0`（未学词的固定中等权重）。
+- 为什么用指数键而不是「按权重轮盘逐个抽」：前者一趟 `sortedBy` 完成（O(n log n)，n ≤ 368），且天然是无放回加权抽样；后者 O(n²) 且更容易写错边界。
+- 权重公式的三段含义：`1.0` 基础（刚复习过的词也不是 0 概率）；`2×lapses` 遗忘史（忘一次翻倍权重）；`min(天数, 60)/30` 久未复习（两个月封顶，避免「一年没看」把权重拉到压倒性）。
+- **只读**：`poolWeight` 不写任何状态；浏览卡不作答 → `poolIds` 的调用链上没有 `persist()`（§5.7 只读保证）。
 
-常量：`INTERVALS = [1, 3, 7, 15, 30]`；`GRADUATED_DAYS = 15`（const，不再跟随 INTERVALS.last()）；`DEBT_THRESHOLD = 20`；`DEBT_QUOTA = 15`；`CHANNEL_DAILY = "rec"`。
+常量：`INTERVALS = [1, 3, 7, 15, 30]`；`GRADUATED_DAYS = 15`（const，不再跟随 INTERVALS.last()）；`DEBT_THRESHOLD = 20`；`DEBT_QUOTA = 15`；`CHANNEL_DAILY = "rec"`；`SCENE_NEW_WEIGHT = 2.0`。
 
 > ⚠️ 有意打破 09-17-elderly-literacy-app/design.md §8「毕业阈值自动跟随阶梯」不变量：阶梯与毕业解耦后，改阶梯不再自动改毕业门槛。GRADUATED_DAYS 必须显式评审。
 
@@ -147,6 +186,8 @@ val pool = when {
 
 ### 5.6 分区 = 专题自主练习（R9）
 
+> ⚠️ **本节的「分区形态」部分已被 §5.7 取代**（R10）：池型纯浏览、无限流、不恢复位置、不作答。**仍然有效**的部分：完成卡只在每日任务频道（本节第 1 条）、前向拦截只在每日任务频道（第 2 条）、分区不做到期筛选且因此不白屏（第 3 条）、「分区队列含该区全部词」的范围口径。读本节时请以 §5.7 为准判断哪些还在生效。
+
 - **完成卡只在每日任务频道存在**：`syncDonePage()` 在 `channel != CHANNEL_DAILY` 时直接 `return`。分区 feed 里没有任何收尾页，`pages` = 队列卡（+ 作答未移除时追加的考核卡）。
 - **前向拦截只在每日任务频道生效**：`blockingIndex(idx)` 在 `channel != CHANNEL_DAILY` 时返回 -1。分区自由划——快甩过任意多张未处理的卡都不被退回，`pages` 不动、连击/间隔/answered 不因此变化。
 - **队列 = 该区全部词**（§3）：不做到期筛选，因此**不存在空队列**。这是硬要求而非优化：若保留到期筛选，一个刚毕业的分区（全部词 `days ≥ 15` 且未到期，可持续十几天）会让 `pool` 为空 → `pageCount == 0` → `VerticalPager` **白屏**（现版本是靠「pool 空 → 队列只有完成卡 + 直接自由刷」兜住的，分区拿掉完成卡后就再没有东西兜了）。
@@ -162,6 +203,73 @@ val pool = when {
 - **双层状态机不变**：分区作答仍走 `markKnown` / `markForgot`（口径一致）；「忘了」⇒ days=1、lapses+1、连击清零；分区作答**计入当日战果**（`knownAnswers` / `forgotAnswers`，全局当日口径）。
 - **待处理谓词在分区不再被消费**：`isPending` / `pendingTaskCount()` / `frontierIndex()` 保持原样（只在每日任务频道被调用），不为分区额外分支——口径只有一套，避免漂移。
 
+### 5.7 自主学习 = 纯浏览的池型频道（R10）
+
+**0. 一句话**：频道分成**队列型（只有 `rec`）**与**池型（12 个场景分区）**两类；完成卡之后的**温故流**与**分区**都是「池型 + 纯浏览卡」。
+
+**1. 卡形态：浏览卡沿用 `CardMode.FREE`，只改呈现**
+
+- **不新增也不重命名 `CardMode` 成员**：`FREE` 本义就是「自由刷」，语义仍然成立；而重命名要动 4 个文件的十余处引用，在**本机无法编译**的条件下不值这个风险。
+- 呈现：`TermCard` 的 `isExam` 从 `mode != CardMode.NEW` 改为 **`mode == CardMode.REVIEW`** → FREE 卡自动走「全展开 + 无动作区」那条路（与新学卡同一形态）。`peeked` / `onPeek`（「👀 想看答案」）**保留但只剩复习卡可达**——不要删，删了复习卡的求助通道就没了。
+- 调用点：`revealed = p.mode != CardMode.REVIEW || revealed[p.seq] == true`（FREE 恒展开）。
+- 徽标：`CardMode.FREE` 文案从「📖 温故」改为「**📖 看看**」——同一个徽标要同时服务「推荐频道的温故流」与「分区浏览」，而分区里的词可能是**未学词**，叫「温故」不成立。
+- ⚠️ **`cardSpeech` 必须显式加 `p.mode == CardMode.FREE -> termSpeech(p.t)` 分支**：现在它靠 `revealed[p.seq] == true` 判定展开，而浏览卡永远不写 `revealed`，会掉进 `else` 播防泄题话术（「这个词，还记得它念什么吗？」）——在浏览卡上是错的。
+- ⚠️ 点按分流（AppRoot 的 `onSpeakTerm` 调用点）必须从 `p.mode != CardMode.NEW && revealed[p.seq] != true` 收窄为 **`p.mode == CardMode.REVIEW && revealed[p.seq] != true`**：否则浏览卡会播提示语而不是念词。
+
+**2. 池与追加：一条追加逻辑服务两种频道**
+
+- 池：`repo.poolIds(channel)`（§3.1）。
+- `appendFreePages(count)` 改名 **`appendPoolPages(count)`**：从 `freePool` 顺序取，池空时用 `repo.poolIds(channel)` 重洗补满。两个频道类型共用同一实现。
+- 触发（翻页 effect 的 `snapshotFlow { pagerState.currentPage }` 内）：
+  - **队列型**（`rec`）：`doneIdx >= 0 && idx >= doneIdx - 1` → 追加（**保持现状**：完成卡之前不追加 = 未做完不进温故流）；
+  - **池型**（分区）：`idx >= pages.lastIndex - 1` → 追加（**无限流**，任何时候都追加）。
+- 装载时池型频道先填一批（`POOL_BATCH`）：`pages` 不能为空——`VerticalPager` 的 `pageCount == 0` 就是白屏。
+- 常量 `FREE_BATCH` 改名 `POOL_BATCH = 2`（两个频道类型共用）。
+- 追加只会**发生在列表尾部**：与「只追加不重排」的既有不变量一致，`spokenKeys` / `key` 的页身份机制不受影响。
+
+**3. 断点：队列型 = frontier，池型 = 不恢复**
+
+- 装载：`restoreTo = if (channel == CHANNEL_DAILY) frontierIndex() else 0`——池型频道**滚回第一张**（D6：每次进分区都是一轮新的随机）。用 `0` 而**不是** `null`：切频道时 `pagerState.currentPage` 可能还是上一个频道的旧值（比如 7），而新 `pages` 只有 2 张，必须显式归零。
+- 落库：翻页 effect 里**只对队列型**调 `repo.saveQueuePosition(frontierIndex())`；池型不落库（页码无意义）。
+
+**4. 三样东西整个删掉**
+
+- `TermCard` 的 `footerHint` 参数与调用点；
+- `AppRoot` 的 `SCENE_TAIL_HINT` / `SCENE_TAIL_SPEECH` / `isSceneTail()`；
+- 池型频道的队列持久化（见下条）。
+
+**5. 持久化：只留每日任务队列**
+
+- `ensureQueue` / `appendQueue` / `markAnswered` / `saveQueuePosition` 删掉 `channel` 参数，内部固定 `CHANNEL_DAILY`；`buildQueue` 去掉 `channel` 参数与 `else` 分支（§3）。`ensureQueue` 的「空队列不复用」补丁随之简化——分区不再有队列，而每日任务的**空队列是合法状态**（pool 空 → 队列只有完成卡 → 直接温故流，prd 已定义）。
+- `load()` 只读入 `CHANNEL_DAILY` 的队列：旧版本写下的分区队列在下次 `persist()` 时自然消失（一次性清理，**不需要迁移代码**）。`DailyQueue.channel` 字段保留（读写对称）。
+
+**6. 只读保证（D4：新词入口唯一化）**
+
+浏览卡没有作答入口 → `answer()` 在池型频道不可达 → 不写 `TermState`、不追加考核卡；且浏览卡**不调 `markSeen`**（`markSeen` 只在队列型频道的 `NEW` 卡停稳分支里被调用）。故：
+
+- 分区里浏览过的**未学词永远拿不到 `TermState`** → 下次仍以「未学」出现，学会它的唯一路径是每日任务；
+- `DayState`（`counts` / `seen` / 战果计数）在池型频道**零写入**。
+
+**7. 自动收窄（这些地方不需要额外代码，别误改）**
+
+- `answer()` 只剩复习卡一条入口 → **R8 自动前进**（`advanceAfterSpeechSeq` 在 `answer()` 末尾置位）天然只对复习卡生效；浏览卡不自动前进（用户还没看完就翻页是打扰）。
+- **战果计数**（`knownAnswers` / `forgotAnswers`）只在 `answer()` 里 +1 → 天然只统计每日任务频道。
+- `isPending` 里 `CardMode.FREE -> false` 保持；池型频道全页 FREE → `pendingTaskCount() == 0`，但 `syncDonePage()` / `blockingIndex()` 已被频道判定拦在前面（R9 保留部分）——**不要**为了「统一」去掉那两处 `if (channel != CHANNEL_DAILY)`。
+
+**8. 不变式**
+
+- 每个场景频道在 `WordBank` 里有 ≥ 30 词（实测 hospital / food / phone / weather = 32，其余 = 30）→ 池型频道的池**必非空** → 不存在 `pageCount == 0` 白屏。这是 D3（不做到期筛选）之外的**第二重**保证。
+- 每日任务频道的全套行为（R1–R8）不变。
+
+**9. 本条已接受的代价**（用户 2026-09-18 明确接受）
+
+- **温故流与分区不再产生任何学习记录**：间隔层唯一写入来源 = 复习卡作答；分区 🎓 毕业徽章只能靠每日任务推进。
+- **学习效果全押在每日任务 n 个词上**：机制杠杆（连击目标 / 新词保底 / 封顶 / 配额）从「可选优化」变成唯一调节手段；n 的隐式上限 ≈ 30n（n = 10 → 约 300 词 < 词库 368）随之成为必须处理的问题（prd Out of Scope 已记）。
+
+**10. 原型的已知简化**
+
+`prototype/index.html` 没有 SRS 持久层 → **加权不可复现**，分区只能做**等概率随机**（本次唯一允许的原型偏差，必须在原型注释里写明）。其余契约（浏览卡形态 / 无限流追加 / 无队尾轻提示 / 不恢复位置 / 无完成卡 / 不拦截）都要在原型里成立。原型此前**整个缺温故流**——本轮把池型追加机制做出来后，推荐频道完成卡之后的温故流用同一套机制补上（同一个函数 + 一个触发条件）。
+
 ## 6. 回滚
 
 - R9（分区 = 自主练习）落在 StudyRepository.kt（`buildQueue` 的 `else` 分支 + `CHANNEL_DAILY` 常量）、AppRoot.kt（`syncDonePage` / `blockingIndex` 的频道收窄、断点两处、`footerHint` 传参）、TermCard.kt（新增可空 `footerHint` 参数）+ 原型 HTML（`refreshDoneCard` / `blockSkippedCards` 的频道判定 + 队尾轻提示）。`footerHint` 有缺省值，UI 侧改动向后兼容；调度侧 `learned + news` 只是把分区 pool 从 `due + news` 扩大，可单独 revert。
@@ -176,3 +284,4 @@ val pool = when {
 - 编译：`gradlew assembleDebug`。
 - 手动场景走查（见 implement.md 清单）：升级播报 30 天、lapse 优先排序、清债配额、防泄题、peek 不写状态、旧 JSON 兼容、完成卡条件出现、向前越界被静默退回且列表不重排、回看与自由刷不受限、作答后等播报念完自动前进（含落在完成卡）、用户滑动时不抢方向、战果跨重启不归零。
 - 分区（R9）：非 `rec` 频道无完成卡与完成播报；自由划不被退回；全学完且未到期的分区不白屏；滑完停住并出现轻提示 + 同句播报；分区断点回到上次那一页；分区「忘了」仍写 days=1 / lapses+1。
+- 自主学习（R10）：温故流与分区都是浏览卡（全展开、无 √/×、点按念词）；分区池含未学词且浏览后仍无 `TermState`；分区顺序两次不同、池尾继续追加（无限流）、重进从第一张开始；温故流里看完一个词其 days / lapses 不变；完成卡战果只来自复习卡作答；每日任务频道 R1–R8 全套不回归。

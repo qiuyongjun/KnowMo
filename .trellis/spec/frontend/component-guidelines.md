@@ -27,19 +27,19 @@
 
 **契约（v5 R7）**：向前停稳到某页时，若其前方仍存在**待处理**卡（`isPending`，见下），则**静默退回最靠前的那一张**——只做 `animateScrollToPage`，**不播任何提示语**。**不得**用 `userScrollEnabled = false`，也不得做任何全向锁定。
 
-> **适用范围（v5 R9）**：**仅每日任务频道**（`StudyRepository.CHANNEL_DAILY` = `"rec"`）。拦截的**唯一**意义是「让完成卡 = 真做完」；分区没有完成卡，该理由不成立 → 分区**自由划**。分区若也拦，就是「全量入队 + 不可跳过 + 无收尾页」，是本版最糟的组合。
+> **适用范围（v5 R9；R10 后措辞更新）**：**仅每日任务频道**（`StudyRepository.CHANNEL_DAILY` = `"rec"`）。拦截的**唯一**意义是「让完成卡 = 真做完」；池型频道（分区 / 温故流）没有完成卡，该理由不成立 → **自由划**。若池型也拦，就是「全部词入池 + 不可跳过 + 无收尾页」，是最糟的组合。
 
 判定与完成卡条件**共用同一个谓词**：
 
 ```kotlin
 fun blockingIndex(idx: Int): Int {
-    if (channel != StudyRepository.CHANNEL_DAILY) return -1   // R9：分区自由划
+    if (channel != StudyRepository.CHANNEL_DAILY) return -1   // R9/R10：池型频道（分区 / 温故流）自由划
     val first = pages.indexOfFirst { isPending(it) }
     return if (first >= 0 && first < idx) first else -1   // -1 = 不拦
 }
 ```
 
-- 站在待处理卡**自身**上不拦（`first == idx`）；`pending == 0`（完成卡与自由刷区）恒不拦；FREE 页恒不计入。
+- 站在待处理卡**自身**上不拦（`first == idx`）；`pending == 0`（完成卡之后）恒不拦；FREE 页恒不计入（v5 R10：池型频道全页都是浏览卡，`isPending` 恒 false）。
 - **只拦前向**：下滑回看（含翻回以前任意一张已处理的卡）是用户的自由动作，必须保持可用。用 `userScrollEnabled` 是错的——它是全向开关，会连回看一起锁死，且卡片静止不动会被高龄用户误读为卡死。
 - 一次 fast fling 跨多页只做**一次**退回（退回最靠前的那张），不逐页拦截。
 - 退回**不写任何学习状态**：不碰 `revealed` / `peeked` / `results`，不调 repo，列表顺序完全不动（不回收、不重排）。
@@ -50,9 +50,11 @@ fun blockingIndex(idx: Int): Int {
 
 ### 作答后自动前进（v5 R8）
 
-可作答卡（REVIEW / FREE）上 √ / × 之后**自动前进一张**（`animateScrollToPage(cur + 1)`）。
+**复习卡（`CardMode.REVIEW`）**上 √ / × 之后**自动前进一张**（`animateScrollToPage(cur + 1)`）。
 
-- **新词卡（NEW）不自动前进**：它没有「作答完成」这个事件，`SwipeHint` 保留，由用户自己上滑（手动上滑也永远是「不想等」时的加速通道）。
+> **适用范围（v5 R10）**：作答入口只剩每日任务的复习卡——温故流与分区都是**浏览卡**（没有 √/×，也就没有「作答完成」这个事件），因此自动前进天然只对复习卡生效。R10 之前 FREE 卡也走这条路，现在已收窄。
+
+- **新词卡（NEW）与浏览卡（FREE）都不自动前进**：它们没有「作答完成」这个事件（浏览卡用户还没看完就翻页是打扰），`SwipeHint` 保留，由用户自己上滑（手动上滑也永远是「不想等」时的加速通道）。
 - **不抢用户方向**：翻页前重读当前页，若已不是刚才作答的那张（用户自己滑走了）或 `isScrollInProgress`，放弃本次自动前进。
 - **落点 = `cur + 1`**：作答后未移除的考核卡追加在**队尾**，不改变下标关系；若当前卡是最后一张待处理卡，`syncDonePage()` 已在作答时同步插入完成卡，落点恰好是完成卡。
 
@@ -72,7 +74,7 @@ fun blockingIndex(idx: Int): Int {
 fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
     CardMode.NEW -> taught[p.seq] != true      // 新词卡按「是否已教读」
     CardMode.REVIEW -> revealed[p.seq] != true // 复习卡按「是否已作答」
-    CardMode.FREE -> false                     // 自由刷不计入
+    CardMode.FREE -> false                     // 浏览卡（温故流 / 分区）不计入：不是当日任务，也没有作答入口
 }
 ```
 
@@ -80,32 +82,37 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 
 ### 列表只追加不重排（前向拦截的副产品）
 
-**契约**：`pages` 只在**尾部追加**——教读后追加考核卡、`pending == 0` 时追加完成卡、临近完成卡时追加自由刷页。**永不移动、永不重排**（前向拦截靠「退人」而不是「移卡」）。
+**契约**：`pages` 只在**尾部追加**——教读后追加考核卡、`pending == 0` 时追加完成卡、临近队尾时追加**池型页**。**永不移动、永不重排**（前向拦截靠「退人」而不是「移卡」）。
 
 由此：
 
 - `VerticalPager` 的 `key` 不再是错位防线（列表不重排，index 已足够）；保留它是为了页身份与列表位置解耦，将来若重新引入重排不必再踩坑。
 - 装载时**不需要稳定分区**：拦截保证待处理卡不会被留在用户身后，且装载总是定位到 frontier。
-- **断点（每日任务频道）= frontier**：`restoreTo` 与 `saveQueuePosition` 都取 `frontierIndex()`（第一张待处理卡；无待处理卡时取完成卡下标，都没有则 0）。本模型里「在哪儿」就等于「做到哪儿了」。
-- **断点（分区）= 上次滑到的那一页**（v5 R9）：分区自由划之后「在哪儿」≠「做到哪儿了」，用 frontier 会把用户拽回第一张未处理的卡。装载 `restoreTo = q.position.coerceIn(0, maxOf(0, pages.size - 1))`（`position` 落库时被 clamp 到 `queue.size`、比 `pages.lastIndex` 大 1，**必须再夹一次**），落库 `saveQueuePosition(channel, pagerState.currentPage)`。
+- **断点（队列型 = 每日任务频道）= frontier**：`restoreTo` 与 `saveQueuePosition` 都取 `frontierIndex()`（第一张待处理卡；无待处理卡时取完成卡下标，都没有则 0）。本模型里「在哪儿」就等于「做到哪儿了」。
+- **断点（池型 = 分区）= 不恢复位置**（v5 R10）：顺序是加权随机，第 k 页没有稳定所指。装载 `restoreTo = 0`（**必须是 `0`，不能是 `null`**——切频道时 `pagerState.currentPage` 可能还是上一个频道的旧值，而新 `pages` 只有 2 张），且池型**不调 `saveQueuePosition`**。
 
-### 分区 = 专题自主练习（v5 R9）
+### 频道分两类：队列型 vs 池型（v5 R10；R9 的「分区队列 + 轻提示」形态已废止）
 
-**契约**：场景分区（`channel != CHANNEL_DAILY`）与「每日任务」在语义上彻底分开——**它不参与每日任务，也不承载「完成」**。
+**契约**：**队列型 = 只有每日任务频道**（`StudyRepository.CHANNEL_DAILY` = `"rec"`）；**池型 = 12 个场景分区 + 每日任务完成卡之后的温故流**（运行时从池里抽卡、无限追加、**不落库**）。
 
-| 维度 | 每日任务频道（`rec`） | 分区（场景频道） |
+| 维度 | 队列型（`rec` 每日任务） | 池型（分区 / 温故流） |
 |---|---|---|
+| 数据结构 | `DailyQueue`（`queue`/`modes`/`answered`/`position`） | 无——运行时池（`repo.poolIds(channel)` + `freePool`），不落库 |
 | 完成卡 | `pending == 0` 时出现 | **没有**（`syncDonePage` 直接 return） |
 | 前向拦截 | 拦（静默退回） | **不拦**（`blockingIndex` 返回 -1） |
-| 队列范围 | `due + news` 配额 10 / 清债 15 | **该区全部词**（不做到期筛选） |
-| 收尾 | 完成卡 | 滑完停住 + 最后一张的**轻提示** |
-| 断点 | frontier | 上次滑到的那一页 |
+| 池范围 | `due + news` 配额 10 / 清债 15 | 温故流 = 推荐范围**已学词**（等概率）；分区 = 该区**全部词含未学词**（加权随机） |
+| 卡形态 | 新学（NEW）/ 复习（REVIEW，**唯一考试态**） | **浏览卡**（`CardMode.FREE`：词 + 逐字拼音 + 用途全展开、无 √/×、无「想看答案」） |
+| 追加 | **仅完成卡之后**（`doneIdx >= 0 && idx >= doneIdx - 1`） | **无限流**（`idx >= pages.lastIndex - 1`，池空重洗） |
+| 断点 | frontier | **不恢复位置**（每次从第一张开始） |
 
-- **队列 = `learned + news`**（`learned` = 该区已学词按 `lapses 降序 → dueTime 升序`，`news` = 未学词洗牌接后）。**不做到期筛选是硬要求**：按到期筛选时，一个刚毕业的分区（全部词 `days ≥ 15` 且未到期，可持续十几天）pool 为空 → `pageCount == 0` → **白屏**；而分区没有完成卡，连兜底页都没有。`ensureQueue` 另加「分区空队列不复用」防空持久化队列（旧口径遗留）。
-- **轻提示**：`isSceneTail(idx) = channel != CHANNEL_DAILY && idx == pages.lastIndex`，视觉（`TermCard(footerHint = SCENE_TAIL_HINT)`）与播报（`SCENE_TAIL_SPEECH`）**共用同一判定**。播报必须拼在 `cardSpeech(p)` **之后、同一次 `speak`**（`QUEUE_FLUSH` 下分两次 speak 会互相掐断）。
-- ⚠️ 语义是「**后面没有了**」，不是「你练完了」——它挂在**当前末页**上，分区作答追加考核卡时提示会跟着移走；分区不拦截，快甩也能立刻抵达队尾。**不要**把它做成完成卡（不得出现 🎉 /「今日任务完成」）。
-- ⚠️ `footerHint != null` 时**不渲染 `SwipeHint`**：「上滑看下一个 ↑」与「后面没有了」自相矛盾（原型 `refreshTailHint` 同样移除该卡的 `.swipe-hint`）。
-- 分区作答走**同一套双层状态机**（`markKnown` / `markForgot`，口径一致），并计入当日战果（全局当日口径）。
+- **考试态只有 `REVIEW`**：`TermCard` 的 `isExam = mode == CardMode.REVIEW`（原 `mode != CardMode.NEW`——那个写法会把浏览卡也当成考试卡）。浏览卡由调用点传 `revealed = true` 恒展开。
+- ⚠️ **`cardSpeech` 必须显式先判 `FREE`**：浏览卡永远不写 `revealed`，若落到 `else` 就会播防泄题话术（「这个词，还记得它念什么吗？」）——在浏览卡上是错的。
+- ⚠️ **点按分流必须收窄为 `p.mode == CardMode.REVIEW && revealed[p.seq] != true`**：否则浏览卡点一下播提示语而不是念词。
+- **池型频道零写入**：浏览卡不调 `markSeen`、也没有作答入口 → `TermState` / `DayState` 零写入。分区里的未学词**只看不算学**（学会它的唯一路径是每日任务，新词入口唯一化）；分区 🎓 也只能靠每日任务推进。`answer()` / `markKnown` / `markForgot` / `appendQueue` / `markAnswered` / `saveQueuePosition` 在池型频道**一律不可达**。
+- **池必非空是硬要求**：分区池 = 该区全部词（含未学词，每区 ≥ 30 词）→ 不存在 `pageCount == 0` 白屏。R9 的「`ensureQueue` 空队列不复用」补丁已随分区队列一起删除——每日任务的空队列是**合法**状态（pool 空 → 队列只有完成卡 → 直接温故流），不要把它当异常「修」掉。
+- **加权随机（分区）**：`w = 1 + 2×lapses + min(距上次学习天数, 60)/30`，未学词固定 `SCENE_NEW_WEIGHT = 2.0`；用 Efraimidis–Spirakis 指数键（`key = -ln(u)/w`，升序）实现无放回加权抽样，`u = 1.0 - random` 防 `ln(0) → +Inf`（O(n log n)，n ≤ 368，比轮盘逐个抽更少边界）。**只读**：权重计算不写任何状态。
+- **温故流与分区共用同一条追加逻辑**（`appendPoolPages`），差别只在池的构成。R9 的队尾轻提示（`footerHint` / `SCENE_TAIL_HINT` / `SCENE_TAIL_SPEECH` / `isSceneTail`）**已整体删除**——无限流之后不存在「最后一张」，轻提示失去出现时机。
+- **持久化**：`buildQueue` / `ensureQueue` / `appendQueue` / `markAnswered` / `saveQueuePosition` **不带 `channel` 参数**（内部固定 `CHANNEL_DAILY`）——让「队列 = 每日任务」成为签名层面的事实。`load()` 只读入 `CHANNEL_DAILY` 的队列条目（旧版本写下的分区队列在下次 `persist()` 自然消失，无需迁移代码）。
 
 > **Warning**：`appendReviewCard` 的插入点是**任务区末尾**——`indexOfFirst { it is Page.Done }` 取不到时用 `pages.size`。写成 `coerceAtLeast(0)` 会在 Done 缺席（v5 常态）时把新卡插到**队首**，新卡就落到了用户身后。
 
@@ -113,7 +120,9 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 
 去重键 = `"$channel:seq:${p.seq}"`，完成卡 = `"$channel:done"`。
 
-**不要**把下标或会变动的派生值放进键：追加（考核卡 / 完成卡 / 自由刷页）会让同一张卡在不同时刻对应不同下标，绑 `seq` 才能让「页身份」与「列表位置」解耦。完成卡用常量键是安全的——`pending == 0` 之后不可能再产生待处理卡，它一旦出现就不会消失。
+**不要**把下标或会变动的派生值放进键：追加（考核卡 / 完成卡 / 池型页）会让同一张卡在不同时刻对应不同下标，绑 `seq` 才能让「页身份」与「列表位置」解耦。完成卡用常量键是安全的——`pending == 0` 之后不可能再产生待处理卡，它一旦出现就不会消失。
+
+⚠️ **池型页要按「页身份」而不是「词 id」入键**：池抽完会重洗，同一个词在同一次会话里可能出现两次；按词 id 入键会让第二次出现被当成「已播报过」而**静默不播**。原型的做法是给每张池卡一个自增 `data-page`，键为 `channel:page:N`。
 
 ## 适老化硬约束
 
@@ -135,10 +144,14 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 | 追加 / 插入后该次播报消失 | 播报 effect 的 key 含它自己会改写的 `pages` | key 只留 `pagerState`；`pages` 在 collect 体内读 |
 | 新追加的考核卡跑到队首 | `appendReviewCard` 用了 `coerceAtLeast(0)` | 取不到 Done 时用 `pages.size` |
 | 同一词的多张考核卡一起展开 | 用词 id 而非 `seq` 记录展开态 | 按页出现（`seq`）记录；队列用 `answered[i]` |
-| 复习卡点一下就把答案念出来 | 点卡回调没按形态分流 | 调用点按 `mode` + `revealed` + `peeked` 路由到提示语 |
+| 复习卡点一下就把答案念出来 | 点卡回调没按形态分流 | 调用点按 `mode` + `revealed` + `peeked` 路由到提示语（**R10 收窄为 `mode == REVIEW`**，否则浏览卡也会播提示语） |
 | 分区里冒出「今日任务完成」 | 完成卡对所有频道无条件插入 | `syncDonePage()` 开头 `if (channel != CHANNEL_DAILY) return` |
-| 分区上滑被退回、像被锁住 | 前向拦截被无条件应用 | `blockingIndex()` 仅 `CHANNEL_DAILY`；分区自由划 |
-| 毕业分区点进去白屏 | 分区按到期筛选 → pool 为空，而分区已无完成卡可兜底 | 分区 `learned + news`（不做到期筛选）；`ensureQueue` 对分区不复用空队列 |
-| 分区最后一张同时说「上滑看下一个 ↑」和「后面没有了」 | `SwipeHint` 与 `footerHint` 并存 | `footerHint != null` 时不渲染 `SwipeHint` |
-| 分区队尾提示语被卡片播报掐断 | 轻提示与 `cardSpeech` 分成两次 `speak` | 拼成**同一句** `speak` |
-| 回分区被拽回第一张未处理的卡 | 分区也用了 frontier 作断点 | 分区断点 = 上次滑到的那一页 |
+| 分区上滑被退回、像被锁住 | 前向拦截被无条件应用 | `blockingIndex()` 仅 `CHANNEL_DAILY`；池型自由划 |
+| 毕业分区点进去白屏 | 池按到期筛选 → 空池 | 池 = 该区**全部词**（含未学词，每区 ≥ 30 词 → 必非空）；不要给池加到期筛选 |
+| 浏览卡播成「这个词，还记得它念什么吗？」 | `cardSpeech` 漏了 `FREE` 分支（浏览卡不写 `revealed`，落进 `else`） | `cardSpeech` 在 `NEW` 之后显式判 `FREE -> termSpeech(t)` |
+| 在温故流里随手一点就改写了间隔层 | 浏览卡仍是考试态（`isExam = mode != NEW`） | `isExam` 只认 `REVIEW`；`answer()` 只能由复习卡触达 |
+| 在分区里「学会」了新词（其实没学会） | 池型频道写了 `markSeen` / `TermState` | 池型**零写入**：浏览卡不调 `markSeen`，没有作答入口；未学词只「看」不算学 |
+| 进分区被拽回上次那一页 | 池型也用了页码断点 | 池型**不恢复位置**：装载 `restoreTo = 0`（必须是 `0` 而非 `null`——切频道时 `pagerState.currentPage` 可能是旧值） |
+| 分区 / 温故流上滑到底就没了 | 池型追加条件抄成了队列型的 `doneIdx >= 0` | 队列型 `doneIdx >= 0 && idx >= doneIdx - 1`；池型 `idx >= pages.lastIndex - 1`（无限流） |
+| 旧版本的分区队列一直躺在持久化里 | `load()` 仍读入全部频道 | `load()` 只读 `CHANNEL_DAILY`（旧条目在下次 `persist()` 自然消失） |
+| 池型频道的卡排到一半顺序变了 | 追加时重排了 `pages` | 池型页**只在尾部追加**；顺序随机靠「重新进入频道时换一批池」表达，不是靠重排 |

@@ -74,21 +74,29 @@ fun ChannelBar(current: String, graduated: Set<String>, onSelect: (String) -> Un
 
 /**
  * 卡片形态（v4 运行时计算，不再是静态数据字段）：
- * 新学 = 无学习记录（无 TermState）；复习 = 任务池内到期/考核中的词；
- * 温故 = 自由刷池抽出的已学词（有 TermState 即已学，含毕业词），与复习卡同交互：先考回忆，作答后展开。
+ * 新学（NEW）= 无学习记录（无 TermState），全展开、无动作区；
+ * 复习（REVIEW）= 每日任务队列里到期/考核中的词，考试交互（先考回忆，作答后展开）；
+ * 浏览（FREE，v5 R10）= 池型频道（完成卡之后的温故流 + 场景分区）抽出的词，与新学卡同一呈现：
+ * 词 + 逐字拼音 + 用途全展开、**无 √/×**、点卡重听、点单字看讲解。
+ * 它**不作答**，因此不写任何学习状态（`TermState` / `DayState` 零写入）——分区里的未学词
+ * 只「看」不算学会，新词入口唯一化到每日任务。
+ * ⚠️ R10 刻意**不新增也不重命名**成员：`FREE` 本义「自由刷」语义仍成立，而重命名要动 4 个文件的
+ * 十余处引用，在本机无法编译的条件下不值这个风险。
  */
 enum class CardMode { NEW, REVIEW, FREE }
 
 /**
  * 词条角标：三态。
- * 新学=蓝 / 复习=橙 / 温故=绿（绿色=正面回炉，与「认识」配色同系，不与另两态冲突）。
+ * 新学=蓝 / 复习=橙 / 浏览=绿（绿色=正面回炉，与「认识」配色同系，不与另两态冲突）。
+ * v5 R10：浏览态文案「📖 温故」→「📖 看看」——同一徽标要同时服务推荐频道的温故流与场景分区，
+ * 而分区池含**未学词**，叫「温故」不成立。
  */
 @Composable
 fun TermBadge(mode: CardMode) {
     val (bg, fg, label) = when (mode) {
         CardMode.NEW -> Triple(BlueBg, BlueDark, "✨ 新学")
         CardMode.REVIEW -> Triple(OrangeBg, OrangeDark, "🔁 复习")
-        CardMode.FREE -> Triple(GreenBg, GreenKnown, "📖 温故")
+        CardMode.FREE -> Triple(GreenBg, GreenKnown, "📖 看看")
     }
     Surface(color = bg, shape = RoundedCornerShape(50)) {
         Text(

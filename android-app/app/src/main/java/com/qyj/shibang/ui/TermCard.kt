@@ -41,17 +41,14 @@ import com.qyj.shibang.ui.theme.RedForgot
 
 /**
  * 学习卡（v4 双层模型）：形态由调度器运行时计算——
- * 新学（词组+逐字拼音+用途全展开，无按钮）/ 复习与温故（同一考试交互：
- * 先只出词→认识/忘了按钮→作答展开+反馈文案）。
- * 温故 = 自由刷池抽出的已学词（有 TermState 即已学，含毕业词 days >= 15），
- * 作答同样走连击+间隔双层状态机（design.md §9.2/§9.4）。
- * v5 防泄题 + 求助通道：考试态未作答时点卡片的分流逻辑在调用方（AppRoot 传对应的 onSpeakTerm）；
- * peeked = 「想看答案」求助展开（会话态，不写任何学习状态）——拼音/提示显示但认识/忘了按钮保留，可继续作答。
+ * 新学（NEW）与浏览（FREE，v5 R10：温故流 / 场景分区）/ 复习（REVIEW，考试交互）。
+ * 浏览卡 = 词 + 逐字拼音 + 用途**全展开**、**无动作区**（没有 √/×、也没有「👀 想看答案」）：
+ * 点卡片重听「词 + 提示」、点单字看讲解；它不作答，因此不改写任何学习状态（design.md §5.7-1）。
+ * v5 防泄题 + 求助通道：**仅复习卡**（考试态未作答时点卡片的分流逻辑在调用方 `AppRoot`，
+ * 由它传对应的 onSpeakTerm）；`peeked` = 「想看答案」求助展开（会话态，不写任何学习状态）——
+ * 拼音/提示显示但认识/忘了按钮保留，可继续作答。R10 后 peek 只剩复习卡可达（浏览卡不需要求助）。
  * 不再展示"第 x/y 张"进度条（队列边界对用户不可见）。
- * v5 R9 队尾轻提示（footerHint）：**仅分区**（专题自主练习）的最后一张卡传入，在动作区之下渲染一行弱权重文案
- * ——分区没有完成卡，用一句轻提示代替收尾页（否则上滑无反应会被高龄用户当成卡死）。它是**轻提示**不是完成卡，
- * 故刻意做得比正文弱（小字号、次级色、无动效）；播报侧由 AppRoot 按同一条件并入该卡的同一句 speak。
- * footerHint 非空时**不渲染 `SwipeHint`**——轻提示已说明「没有下一张」，再显示「上滑看下一个 ↑」自相矛盾。
+ * v5 R10：删除 R9 的 `footerHint`（分区队尾轻提示）——分区改无限流后没有「最后一张」，轻提示失去时机。
  */
 @Composable
 fun TermCard(
@@ -64,18 +61,19 @@ fun TermCard(
     onPeek: () -> Unit,
     onCharClick: (TermChar) -> Unit,
     onAnswer: (Boolean) -> Unit,
-    footerHint: String? = null,
 ) {
-    // 新学卡无反馈按钮；复习/温故卡在作答前都出「认识/忘了」（v4：自由刷同样可作答，走同一双层状态机）
-    val isExam = mode != CardMode.NEW
+    // v5 R10（§5.7-1）：**只有复习卡**是考试态（先只出词 → 认识/忘了）；新学卡与浏览卡同走
+    // 「全展开 + 无动作区」那条路。原判定是 `mode != CardMode.NEW`，会把浏览卡也当成考试卡。
+    val isExam = mode == CardMode.REVIEW
     // 答案区展示：作答展开 || peek 求助展开（peek 不等于作答——按钮判定仍只看 revealed）
+    // 浏览卡由调用点传 revealed = true（恒展开）
     val showAnswer = revealed || peeked
     Column(
         Modifier
             .fillMaxSize()
             .padding(horizontal = 20.dp, vertical = 14.dp),
     ) {
-        // 卡片主体：点任意处重听（考试态未作答的分流见 onSpeakTerm 调用方）；点单字看讲解
+        // 卡片主体：点任意处重听（**复习卡**未作答的分流见 onSpeakTerm 调用方）；点单字看讲解
         Column(
             Modifier
                 .weight(1f)
@@ -127,7 +125,7 @@ fun TermCard(
             }
             Spacer(Modifier.height(10.dp))
 
-            // 逐字拼音：新学卡常显；复习/温故卡作答前隐藏（考回忆），peek 求助后显示（v5）
+            // 逐字拼音：新学卡与浏览卡（FREE）常显；复习卡作答前隐藏（考回忆），peek 求助后显示（v5）
             if (showAnswer) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     term.chars.forEach { ch ->
@@ -209,23 +207,7 @@ fun TermCard(
                 )
                 Spacer(Modifier.height(6.dp))
             }
-            // v5 R9：队尾轻提示已说明「没有下一张」，此时再显示「上滑看下一个 ↑」自相矛盾
-            //（分区最后一张卡上滑确实没有内容），故有 footerHint 时让位给轻提示
-            if (footerHint == null) SwipeHint()
-        }
-
-        // v5 R9 分区队尾轻提示：动作区**之后**的一行弱权重文案（专门放在最后，不挤占动作区）
-        footerHint?.let { hint ->
-            Spacer(Modifier.height(4.dp))
-            Text(
-                hint,
-                fontSize = 18.sp,
-                color = AppText2,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 6.dp),
-            )
+            SwipeHint()
         }
     }
 }

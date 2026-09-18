@@ -20,6 +20,13 @@
   **作答后自动前进**（√ / × 之后等「词 + 提示 + 反馈」整句念完再滚到下一张；新词卡没有作答事件、
   不自动前进；播报期间用户自己滑动则放弃本次自动前进）、
   完成卡单一形态（战果：今天学完了 N 个词 · 认识了 x 次，忘了 y 次）。
+  v5 R10 本轮改判：**频道分两类**——队列型 = 只有 `rec`（有完成卡 / 有前向拦截 / 有断点），
+  池型 = 各场景分区 **+ `rec` 完成卡之后的温故流**（运行时抽取、无限追加、不落库）。两块都是
+  **浏览卡**：词 + 逐字拼音 + 用途全展开、**无 √/×**、**无「想看答案」**、点卡重听、点单字看讲解。
+  分区因此：无完成卡、不拦截（R9 保留）、池 = 该区**全部词**（含未学词）、**无限流**（滑到底继续追加，
+  不再有队尾轻提示）、**不恢复位置**（每次进区都是一轮新的随机，从第一张开始）。
+  ⚠️ **原型唯一的被允许偏差**：原型没有 SRS 持久层 → 加权不可复现，分区抽词只能做**等概率随机**
+  （工程版按 `w = 1 + 2×lapses + min(距上次学习天数, 60)/30` 加权，见 design.md §3.1）。
   这些差异不是缺陷，请勿据此反推工程版行为。
   工程实现的当前状态以 .trellis/tasks/09-17-elderly-literacy-app/prd.md 为准。
 -->
@@ -96,6 +103,8 @@ body{background:#ECEFF1;font-family:"Microsoft YaHei","PingFang SC","Noto Sans S
 .badge{display:inline-flex;align-items:center;gap:6px;padding:6px 16px;border-radius:999px;font-size:calc(19px * var(--fscale));font-weight:800}
 .badge.new{background:var(--primary-bg);color:var(--primary-dark)}
 .badge.review{background:var(--accent-bg);color:var(--accent-dark)}
+/* v5 R10 浏览卡角标（温故流 / 分区共用，与工程版 CardMode.FREE 文案一致） */
+.badge.free{background:var(--known-bg);color:var(--known)}
 /* 卡片主体 */
 .card-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;cursor:pointer}
 .scene-icon{width:110px;height:110px;border-radius:28px;display:flex;align-items:center;justify-content:center;font-size:64px}
@@ -133,8 +142,6 @@ body{background:#ECEFF1;font-family:"Microsoft YaHei","PingFang SC","Noto Sans S
 .fb-result.ok{background:var(--known-bg);color:var(--known)}
 .fb-result.re{background:var(--accent-bg);color:var(--accent-dark)}
 .swipe-hint{flex:none;text-align:center;color:var(--text-2);font-size:calc(20px * var(--fscale));font-weight:700;padding:10px 0 2px;animation:bounce 1.6s infinite}
-/* v5 R9 分区队尾轻提示：轻权重（小字号、次级色、无动效）——它是**轻提示**不是完成卡 */
-.tail-hint{flex:none;text-align:center;color:var(--text-2);font-size:calc(18px * var(--fscale));font-weight:700;padding:8px 0 2px}
 @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
 
 /* ============ 完成卡 ============ */
@@ -379,20 +386,92 @@ document.getElementById("phone").addEventListener("click",e=>{
 });
 
 /* ==================== 频道与 Feed ==================== */
-/* v5 R9 分区 = 专题自主练习（与 App §5.6 同契约）：**只有每日任务频道（rec）**有完成卡与前向拦截。
-   分区滑到最后一张时，用一句轻提示代替收尾页（上滑无反应会被高龄用户当成卡死）。
-   视觉与播报共用这两个常量，条件判定也共用（见 refreshTailHint / onCardVisible），不会漂移。 */
-const SCENE_TAIL_HINT="这个区就这些了 · 点上面的频道可以换区";
-const SCENE_TAIL_SPEECH="这个区就这些了。点上边的频道可以换个区。";
-function buildQueue(channelId){
-  let q;
-  if(channelId==="rec"){
-    q = REC_QUEUE.map(id=>TERM_MAP[id]);
-  }else{
-    /* v5 R9：分区**不做到期筛选**，该区全部词入队（原型无到期概念，天然对齐 R9，故不改） */
-    q = TERMS.filter(t=>t.scene===channelId);
+/* v5 R10 频道分两类（与 App §5.7 同契约）：
+   - **队列型 = 只有 `rec`**（每日任务）：当日队列 + 完成卡（条件出现）+ 前向拦截（R9 保留）+ 断点；
+   - **池型 = 各场景分区 + `rec` 完成卡之后的温故流**：运行时抽取、无限追加、不落库。
+   两块都是**浏览卡**（词 + 逐字拼音 + 用途全展开、无 √/×、无「想看答案」、点卡重听）。
+   分区因此无完成卡、不拦截（R9 保留）、池 = 该区**全部词**（含未学词）、无限流（R9 的队尾轻提示随之删除）、
+   不恢复位置（D6：每次进区都是一轮新的随机，从第一张开始）。 */
+const POOL_BATCH=2;                  /* 池型页每次追加的张数（与 App 的 POOL_BATCH 同值） */
+let pool=[];                         /* 池型频道：从池里顺序取，抽完重洗（无限流） */
+let pageSeq=0;                       /* 池型页身份：同一词可能在重洗后再次出现，故按页而非按词去重播报 */
+/* 队列型频道的任务卡（`rec` 的静态演示队列：复习与新学交错）。
+   R10：分区不再走这里——它没有队列，只有池（见 poolIds）。 */
+function buildQueue(){
+  return REC_QUEUE.map(id=>TERM_MAP[id]);
+}
+/* 池型频道的抽取池（与 App §3.1 同构）：
+   - `rec` 的**温故流** = 推荐范围的词（原型不建模「已学」态 → 等价于 App 的 scopeIds("rec") 全量）；
+   - 分区 = 该区**全部词**（含未学词）。
+   ⚠️ 原型没有 SRS 持久层 → 工程版的加权（1 + 2×lapses + min(距上次学习天数,60)/30）不可复现，
+   这里只能等概率随机：这是本轮**唯一允许的原型偏差**，不要据此反推工程版顺序。 */
+function poolIds(channelId){
+  const ids=channelId==="rec"
+    ? REC_QUEUE.slice()
+    : TERMS.filter(t=>t.scene===channelId).map(t=>t.id);
+  for(let i=ids.length-1;i>0;i--){       /* Fisher–Yates：等概率随机 */
+    const j=Math.floor(Math.random()*(i+1));
+    [ids[i],ids[j]]=[ids[j],ids[i]];
   }
-  return q;
+  return ids;
+}
+/* 浏览卡（温故流 / 分区共用同一形态，与 App 的 CardMode.FREE 同契约）：
+   词 + 逐字拼音 + 💡用途**全展开**、**无动作区**（没有 √/×，也没有「👀 想看答案」）。
+   点卡片重听「词 + 用途」，点单字仍看讲解。data-pool 标记它属于池型页：不计入完成卡口径、
+   不计入任务区词数 N、播报按**页身份**去重。 */
+function poolCardHTML(t){
+  const chars=t.chars.map(ch=>
+    `<span class="tchar" data-say="${ch.c}" onclick="event.stopPropagation();openCharSheet('${ch.c}')">${ch.c}</span>`).join("");
+  const pinyins=t.chars.map(ch=>`<span>${ch.p}</span>`).join("");
+  pageSeq++;
+  return `
+  <section class="fcard" data-term="${t.id}" data-kind="free" data-pool="1" data-page="${pageSeq}" data-pending="0" data-idx="">
+    <div class="progress-row">
+      <span class="prog-text"></span>
+      <span class="prog-bar"><span class="fill"></span></span>
+    </div>
+    <div class="card-body" onclick="speakPoolTerm('${t.id}')">
+      <div class="scene-icon" style="background:${SCENES.find(s=>s.id===t.scene).color}">${t.icon}</div>
+      <span class="badge free">📖 看看</span>
+      <div class="term len${t.chars.length}">${chars}</div>
+      <div class="pinyin">${pinyins}</div>
+      <div class="tip">💡 ${t.tip}</div>
+      <div class="relisten">👆 点一下再听 · 点单字看讲解</div>
+    </div>
+    <div class="swipe-hint">上滑看下一个 ↑</div>
+  </section>`;
+}
+/* 浏览卡点按 = 重听「词 + 用途」（浏览卡不考，没有防泄题分流） */
+function speakPoolTerm(id){
+  const t=TERM_MAP[id];
+  if(t) speak(termFullText(t));
+}
+/* 池型追加（无限流）：从池里顺序取 count 张追加到**尾部**；池空重洗（抽完再来一轮）。
+   追加只发生在列表尾部 → DOM 顺序（即队序）永不动。 */
+function appendPoolCards(count){
+  const feed=document.getElementById("feed");
+  let html="";
+  for(let k=0;k<count;k++){
+    if(!pool.length) pool=poolIds(state.channel).map(id=>TERM_MAP[id]).filter(Boolean);
+    if(!pool.length) break;               /* 理论上不会：每个分区都有词（工程版每区 ≥ 30 词） */
+    html+=poolCardHTML(pool.shift());
+  }
+  if(!html) return;
+  feed.insertAdjacentHTML("beforeend",html);
+  renumberCards();
+  observeCards();                          /* 新加入的卡也要能被自动播报 */
+}
+/* 可见卡临近 feed 末尾 → 继续追加（v5 R10 D2：分区无限流）。
+   队列型（`rec`）只在**完成卡之后**追加——未做完时不进温故流（与 App 的 `doneIdx >= 0` 前提一致）；
+   池型（分区）任何时候都追加。 */
+function maybeAppendPool(){
+  const feed=document.getElementById("feed");
+  const cards=feed.querySelectorAll(".fcard");
+  if(!cards.length) return;
+  const i=visibleIndex();
+  if(i<0) return;
+  if(state.channel==="rec" && !feed.querySelector(".fcard[data-done]")) return;
+  if(i>=cards.length-2) appendPoolCards(POOL_BATCH);   /* 与 App 的 `idx >= pages.lastIndex - 1` 同口径 */
 }
 function renderChannels(){
   const bar=document.getElementById("channelbar");
@@ -409,17 +488,25 @@ function switchChannel(id){
   speak("换到"+SCENES.find(s=>s.id===id).name+"频道");
 }
 function renderFeed(){
-  const q=buildQueue(state.channel);
   const feed=document.getElementById("feed");
   cancelAutoAdvance();        /* DOM 全量重建，旧卡元素作废 → 丢弃未完成的自动前进 */
-  feed.innerHTML=q.map(t=>termCardHTML(t)).join("");
-  /* v5 R7：完成卡**条件出现**——待处理数为 0 才追加收尾页，否则队尾就是最后一张待处理卡
-     （feed 里没有任何含完成语义的页，「滑到底」≠「做完了」） */
-  refreshDoneCard();
-  refreshTailHint();          /* v5 R9：分区队尾轻提示（rec 无） */
-  renumberCards();
-  feed.scrollTop=0;
-  observeCards();
+  pool=[];                    /* v5 R10 D6：**不恢复位置**——每次进频道都是新一轮随机，从第一张开始 */
+  if(state.channel==="rec"){
+    /* 队列型：任务卡 → 完成卡（条件出现，见 refreshDoneCard）→ 温故流（池型追加） */
+    feed.innerHTML=buildQueue().map(t=>termCardHTML(t)).join("");
+    /* v5 R7：完成卡**条件出现**——待处理数为 0 才追加收尾页，否则队尾就是最后一张待处理卡
+       （feed 里没有任何含完成语义的页，「滑到底」≠「做完了」） */
+    refreshDoneCard();
+    renumberCards();
+    feed.scrollTop=0;
+    observeCards();
+  }else{
+    /* 池型（分区）：没有队列、没有完成卡、没有拦截——直接开始无限浏览流。
+       R10：从第一张开始（D6 不恢复位置），不再有队尾轻提示（无限流之后没有「最后一张」）。 */
+    feed.innerHTML="";
+    feed.scrollTop=0;
+    appendPoolCards(POOL_BATCH);   /* 内部 renumberCards + observeCards */
+  }
 }
 function termCardHTML(t){
   const isReview=t.kind==="review";
@@ -478,10 +565,11 @@ function doneCardHTML(){
 function pendingCardCount(){
   return document.querySelectorAll(".fcard[data-pending='1']").length;
 }
-/* N = 任务区去重词数（与 App §5.3 同口径）：列表只追加不重排，故这个数在当日是恒定的 */
+/* N = 任务区去重词数（与 App §5.3 同口径）：列表只追加不重排，故这个数在当日是恒定的。
+   R10：**池型页（温故流 / 分区浏览）不计入**——与 App 的 `taskWordCount()` 过滤 FREE 卡等价。 */
 function taskWordCount(){
   const ids=new Set();
-  document.querySelectorAll(".fcard[data-term]").forEach(c=>ids.add(c.dataset.term));
+  document.querySelectorAll(".fcard[data-term]:not([data-pool])").forEach(c=>ids.add(c.dataset.term));
   return ids.size;
 }
 /* v5 R7 完成卡单一形态（条件出现后不存在「还有 N 张没作答」分支，不再按完成度分流） */
@@ -495,7 +583,8 @@ function doneCardInner(){
 }
 /* v5 R7 完成卡「真做完才出现」：待处理数为 0 且无收尾页 → 追加到队尾；反之（保底）移除。
    v5 R9：**只有每日任务频道（rec）有完成卡**——分区是专题自主练习，没有「完成」语义，
-   直接返回；若 feed 里已残存完成页（从 rec 切过来的极端情形）一并移除。 */
+   直接返回；若 feed 里已残存完成页（从 rec 切过来的极端情形）一并移除。
+   R10：池型页 `data-pending="0"`（浏览卡不是任务卡）→ 温故流的追加不会把完成卡挤掉。 */
 function refreshDoneCard(){
   const feed=document.getElementById("feed");
   const present=feed.querySelector(".fcard[data-done]");
@@ -517,28 +606,6 @@ function refreshDoneCard(){
     present.remove();
   }
   renumberCards();
-}
-/* v5 R9 分区队尾轻提示（与 App §5.6 同契约）：**仅分区**（非 rec）时，在 feed 最后一张卡底部显示
-   一行轻提示（SCENE_TAIL_HINT），并用 data-tail 标出该卡——onCardVisible 按**同一标记**把
-   SCENE_TAIL_SPEECH 并入该卡的**同一次** speak（分两次 speak 会被 cancel 互相掐断）。
-   它是轻提示不是完成卡：不新增页、不出现 🎉 /「今日任务完成」类文案，DOM 顺序也不动。
-   注：原型不做考核卡追加（作答只换掉按钮区），故「最后一张」在 renderFeed 时定一次即可。 */
-function refreshTailHint(){
-  document.querySelectorAll("#feed .fcard[data-tail]").forEach(card=>{
-    delete card.dataset.tail;
-    const h=card.querySelector(".tail-hint");
-    if(h) h.remove();
-  });
-  if(state.channel==="rec") return;
-  const cards=document.querySelectorAll("#feed .fcard");
-  const last=cards[cards.length-1];
-  if(!last) return;
-  last.dataset.tail="1";
-  /* 与安卓 TermCard 同契约：队尾轻提示已说明「没有下一张」，此时再挂着「上滑看下一个 ↑」自相矛盾。
-     本函数只在 renderFeed（每次全量重建 innerHTML）之后调用一次，故移除是安全的、无需恢复。 */
-  const sh=last.querySelector(".swipe-hint");
-  if(sh) sh.remove();
-  last.insertAdjacentHTML("beforeend",`<div class="tail-hint">${SCENE_TAIL_HINT}</div>`);
 }
 /* 序号随完成卡条件出现重算（DOM 顺序即当前队序，本版不再有重排） */
 function renumberCards(){
@@ -646,12 +713,16 @@ function onFeedScroll(){
   feedScrolling=true;
   cancelAutoAdvance();        /* 用户自己动了（前进/回看）→ 放弃本次自动前进，不抢方向 */
   clearTimeout(scrollSettleTimer);
-  scrollSettleTimer=setTimeout(()=>{ feedScrolling=false; blockSkippedCards(); },200);
+  scrollSettleTimer=setTimeout(()=>{
+    feedScrolling=false;
+    maybeAppendPool();        /* v5 R10：池型无限流（分区随时；rec 仅完成卡之后） */
+    blockSkippedCards();
+  },200);
 }
 /* 当前可见序号 i → 序号 < i 的第一张仍待处理的卡 block（没有则不拦）。
-   站在待处理卡上（block 就是当前卡）不算越界；自由刷区/完成卡之后同样不拦。
+   站在待处理卡上（block 就是当前卡）不算越界；完成卡之后同样不拦（此时待处理数已为 0）。
    v5 R9：前向拦截**只在每日任务频道生效**——拦截的存在理由是「让完成卡 = 真做完」（App §5.1/§5.2），
-   分区没有完成卡 → 该理由不成立 → 分区**自由划**（快甩过任意多张未处理的卡都不退回）。 */
+   分区没有完成卡 → 该理由不成立 → 分区**自由划**（快甩过任意多张卡都不退回，R10 保留）。 */
 function blockSkippedCards(){
   if(state.channel!=="rec") return;
   const feed=document.getElementById("feed");
@@ -666,9 +737,10 @@ function blockSkippedCards(){
 document.getElementById("feed").addEventListener("scroll",onFeedScroll);
 
 /* ==================== v5 R8 作答后自动前进 ==================== */
-/* 与 App §5.5 同契约：复习/温故卡作答（√ / ×）后自动滚到下一张，但**必须等本次播报念完**——
+/* 与 App §5.5 同契约：**复习卡**作答（√ / ×）后自动滚到下一张，但**必须等本次播报念完**——
    抢跑会被落点卡的播报 cancel 掉「词 + 提示 + 反馈」整句；另加最短停留兜底（TTS 不可用时也不瞬间
-   翻走）。用户自己滑动（前进/回看）→ 放弃本次自动前进，不抢方向。新词卡没有作答事件，故不前进。 */
+   翻走）。用户自己滑动（前进/回看）→ 放弃本次自动前进，不抢方向。
+   R10 收窄：温故流与分区都是**浏览卡**（没有作答事件），故只有 `rec` 的复习卡会触发自动前进。 */
 const AUTO_ADVANCE_MIN_MS=1500;
 let autoAdvanceToken=0;
 function cancelAutoAdvance(){ autoAdvanceToken++; }
@@ -693,16 +765,21 @@ function armAutoAdvance(card){
 let io=null;
 function onCardVisible(card){
   const id=card.dataset.term;
-  /* v5 R7：完成卡单一形态，故按**页身份**入键（channel:done / channel:词id）——列表只追加不重排，
-     但仍绑页身份而非下标：追加（完成卡）会改变下标，用下标入键会重复播报；完成卡一旦出现就不会再消失。 */
   const done=!id && !!card.dataset.done;
+  const isPool=!!card.dataset.pool;
+  /* v5 R7：完成卡单一形态，故按**页身份**入键（channel:done / channel:页序号 / channel:词id）——
+     列表只追加不重排，但仍绑页身份而非下标：追加（完成卡 / 池型页）会改变下标，用下标入键会重复播报；
+     完成卡一旦出现就不会再消失。R10：池型页按 `data-page`（同一词在重洗后可能再次出现，按词去重会漏播）。 */
   /* 待处理口径（与 App §5.1 对齐）：未作答的复习卡 + 尚未看过的温故卡（「看过」= 本函数触发过）。
-     温故/新学卡看过即处理完毕；复习卡的处理完毕只认作答（reviewAnswer）。 */
+     温故/新学卡看过即处理完毕；复习卡的处理完毕只认作答（reviewAnswer）。
+     R10：池型浏览卡 data-pending="0"，恒不计入。 */
   if(!done && card.dataset.pending==="1" && card.dataset.kind==="new"){
     card.dataset.pending="0";
     refreshDoneCard();                 /* 待处理数可能归零 → 完成卡此时才出现在队尾 */
   }
-  const key=done?state.channel+":done":state.channel+":"+id;
+  const key=done?state.channel+":done"
+           :isPool?state.channel+":page:"+card.dataset.page
+           :state.channel+":"+id;
   if(state.spokenSet[key]) return;     /* 已播报过：v5 R7 静默退回，不再补播任何解释语 */
   state.spokenSet[key]=true;
   if(done){
@@ -711,16 +788,16 @@ function onCardVisible(card){
   }else if(id){
     const t=TERM_MAP[id];
     let text;
-    if(t.kind==="review"){
+    if(isPool){
+      /* R10 浏览卡：不考，直接念「词 + 用途」（与 App 的 cardSpeech FREE 分支一致） */
+      text=termFullText(t);
+    }else if(t.kind==="review"){
       /* v5 防泄题：播报不念词、不念提示（与安卓 cardSpeech 一致）。
          念出 t.text 等于把答案念给用户，考试卡就失去"考回忆"的意义 */
       text="这个词，还记得它念什么吗？想一想，再按下面的按钮";
     }else{
       text=termFullText(t);
     }
-    /* v5 R9：分区最后一张卡（data-tail，refreshTailHint 按「非 rec + 队尾」标出）把队尾轻提示
-       并入**同一次** speak——分两次 speak 会被 cancel 互相掐断（同 R7 解释语 / R8 作答播报的根因） */
-    if(card.dataset.tail==="1") text+=SCENE_TAIL_SPEECH;
     speak(text);
   }
 }
