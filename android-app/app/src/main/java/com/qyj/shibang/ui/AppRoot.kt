@@ -27,9 +27,9 @@ import com.qyj.shibang.ui.theme.AppSurface
 import kotlinx.coroutines.delay
 
 /** feed 页：词条卡（mode 由调度器运行时计算：新学/复习/浏览）或完成卡。
- *  seq = 本会话内的出现序号：v4 中同一词会出现多张卡（学 1 次 + 连击考核若干次），
- *  展开/作答状态必须按「出现」记录而非按词记录——否则第一次作答会把后续追加的
- *  考核卡一并展开。
+ *  seq = 本会话内的出现序号：v5 R11 后同一词最多两张卡（新词教读卡 + 教读后追加的一张考核卡），
+ *  但**旧数据迁移日**的队列里可能仍有同词多张考核卡，故展开/作答状态仍须按「出现」记录而非按词记录
+ *  ——否则第一次作答会把旧数据里后续的考核卡一并展开。
  *  qIndex = 该卡在持久化当日队列中的下标（作答时 markAnswered 用）；池型页（温故流 / 分区浏览）= -1（不落库）。 */
 sealed interface Page {
     data class TermPage(val t: Term, val mode: CardMode, val seq: Int, val qIndex: Int) : Page
@@ -54,20 +54,23 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
 private const val EXAM_TAP_HINT_SPEECH = "再想一想，想起来了吗？"
 
 /**
- * 根界面：抖音式垂直 feed（v4 第三轮定稿：连击 + 间隔双层模型，design.md §9）。
- * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.7）：
+ * 根界面：抖音式垂直 feed（v4 连击 + 间隔双层模型，design.md §9；v5 R11 起连击层降级为「当日已作答标记」，
+ * 升级判据改首答定调度，见第 4 条）。
+ * 交互契约（见任务 design.md §9 与 v5 §5.1–§5.8）：
  * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播
  * 2. **复习卡**未作答只念"还记得它念什么吗"，绝不念词的读音；认识/忘了后才念词+提示
  *    （v5 防泄题：考试态未作答**点卡片**也只播「再想一想，想起来了吗？」，分流在 TermCard 调用点
  *    ——按形态传对应的 onSpeakTerm；「想看答案」peek 只展开拼音/提示 + 念一遍，不写任何学习状态，
  *    作答按钮保留，看完仍走正常状态机）。**浏览卡**（温故流/分区）不考：点一下直接念「词 + 用途」。
- * 3. 新词卡停稳播报 = markSeen（当日幂等，首次返回 true）+ 立即追加该词复习卡到队尾
- *    （开始当日 3 次认识连击考核）；教读不写 TermState（间隔层）
- * 4. 作答走同一双层状态机（v5 R10：作答入口只剩每日任务的复习卡）：连击层「认识」+1、「忘了」清零
- *    （当日有效）；满 3 = 移出当日队列 + 间隔层升一级（1→3→7→15→30，每日最多升一级闸门）；
- *    未满 3 的作答不写 TermState。任务卡答后未移除追加队尾（REVIEW 形态），浏览卡不作答也不追加。
+ * 3. 新词卡停稳播报 = markSeen（当日幂等，首次返回 true）+ 立即追加**恰好一张**该词考核卡到队尾
+ *    （v5 R11：「学会」必须经过一次提取测试，新词入口唯一化）；教读不写 TermState（间隔层）
+ * 4. 作答走同一双层状态机（v5 R10：作答入口只剩每日任务的复习卡）：**首答定调度**（v5 R11）——
+ *    当日首次作答即写间隔层并把该词**当日移除**（counts 降级为已作答标记，√/× 都写 1）：
+ *    认识 → 无状态首写 {1,今天,0} / 有状态且 lastSeen≠今天 升一级（1→3→7→15→30、lapses 减半；
+ *    lastSeen==今天 由「每日最多升一级」闸门兜底不升级，仅旧数据迁移日可达）；
+ *    忘了 → {1,今天,lapses+1}。作答后**不再追加**任何考核卡（feed 长度只随新词教读 +1）；
  *    展开/作答状态按页出现（seq）记录；断点恢复按队列卡实例 answered[i] 逐卡恢复
- *    （不按词级判定，防同词多卡一并展开卡死连击）
+ *    （不按词级判定，防旧数据同词多卡一并展开）
  * 5. 完成卡之后继续上滑 = **温故流**（v5 R10：池型 + 浏览卡 —— 从池里抽卡、无限追加、不落库；
  *    pageCount 随滑动增长）——**仅每日任务频道**（分区整体是池型，第 10 条）
  * 6. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
@@ -300,12 +303,13 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
         if (pages.isNotEmpty()) pagerState.scrollToPage(target.coerceIn(0, pages.lastIndex))
     }
 
-    /** 该词未被移除（当日连击 <3）时追加到持久化队列尾，并在 feed「任务区末尾」插入一张复习卡（当天再见）。
-     *  ⚠️ 插入点 = 完成卡下标；完成卡在 v5 是**条件存在**（未做完时根本不在 `pages` 里），
-     *  此时 `indexOfFirst` 返回 -1，必须落到 `pages.size`（任务区末尾）——若沿用旧写法
-     *  `coerceAtLeast(0)`，-1 会变成 0 把新卡插到**队首**（用户身后），前向可达性直接破掉。
-     *  repo.appendQueue 追加成功返回队尾下标（作为该卡的 qIndex，markAnswered 用）；已移除返回 -1 不插入。
-     *  v5 R10：只有队列型频道（每日任务）的复习卡会走到这里。 */
+    /** v5 R11 后**只由新词教读触发**（停稳播报 effect 的 markSeen 分支）：追加**恰好一张**考核卡到
+     *  持久化队列尾，并在 feed「任务区末尾」插入该复习卡——「作答后不再追加考核卡」使它再无其他调用方
+     *  （旧连击口径的「作答未满 3 追加」已删除）。
+     *  ⚠️ 插入点 = 完成卡下标；完成卡是**条件存在**（未做完时根本不在 `pages` 里），此时 `indexOfFirst`
+     *  返回 -1，必须落到 `pages.size`（任务区末尾）——若写成 `coerceAtLeast(0)`，-1 会把新卡插到
+     *  **队首**（用户身后），前向可达性直接破掉。
+     *  repo.appendQueue 追加成功返回队尾下标（作为该卡的 qIndex，markAnswered 用）；已作答返回 -1 不插入。 */
     fun appendReviewCard(t: Term) {
         val qIndex = repo.appendQueue(t.id)
         if (qIndex >= 0) {
@@ -337,36 +341,39 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
     /** 作答（认识/忘了）：双层状态机（design.md §9.2）。v5 R10：作答入口只剩**每日任务的复习卡**
      *  （温故流与分区都是浏览卡，没有 √/×）——`knownAnswers` / `forgotAnswers` 只在这里 +1，
      *  故完成卡战果天然只统计每日任务频道。
-     *  展开/文案按 seq（本次出现）记录：同一词的多张考核卡互不影响，各自可再作答；
+     *  v5 R11 首答定调度：当日首次作答即写间隔层并把该词当日移除，**作答后不再追加任何考核卡**
+     *  （feed 长度只随新词教读 +1）。
+     *  展开/文案按 seq（本次出现）记录：旧数据的同词多张考核卡互不影响，各自可作答（闸门防双升级）；
      *  作答同时按卡实例落库 answered（断点恢复用，design.md §9.1）。 */
     fun answer(p: Page.TermPage, known: Boolean) {
         val t = p.t
         revealed[p.seq] = true
         if (p.qIndex >= 0) repo.markAnswered(p.qIndex)   // 池型页 qIndex=-1 不落库
         if (known) {
-            // 双层状态机（design.md §9.2）：连击层 +1（满 3 = 移除当日队列，不追加）；
-            // 间隔层仅满 3 时升级（1→3→7→15→30，受每日最多升一级闸门约束）
-            val (count, upgraded, daysAfter) = repo.markKnown(t.id)
+            // R11 首答定调度：首答即写间隔层并当日移除；scheduled = 本次作答决定了间隔层
+            //（首写 / 升级 / 封顶同值刷新都算 true；闸门挡住为 false，仅旧数据迁移日可达）
+            val (_, scheduled, daysAfter) = repo.markKnown(t.id)
             session = session.copy(known = session.known + 1)
-            val (msg, spoken) = when (count) {
-                1 -> "👍 记得牢！再认对 2 次就学会" to "记得牢！再认对2次就学会。"
-                2 -> "👍 再认对 1 次" to "再认对1次。"
-                else -> "👍 这个词学会啦！" to "这个词学会啦！"
+            // R11：播报不再有连击话术——daysAfter == 1 念「明天」（「1 天后」生硬）
+            val (msg, spoken) = if (scheduled) {
+                if (daysAfter == 1)
+                    "👍 这个词学会啦！明天再来复习" to "这个词学会啦！明天再来复习。"
+                else
+                    "👍 这个词学会啦！${daysAfter} 天后再来复习" to "这个词学会啦！${daysAfter}天后再来复习。"
+            } else {
+                "👍 这个词今天学过啦" to "这个词今天学过啦。"
             }
-            // 升级发生时追加播报天数；闸门挡住（同日已升级/已忘了）不播（design.md §9.2）
-            val full = if (upgraded) "$spoken${daysAfter}天后再来复习。" else spoken
             results[p.seq] = msg
-            tts.speak("${termSpeech(t)}。$full")
+            tts.speak("${termSpeech(t)}。$spoken")
         } else {
+            // R11：忘了同样当日移除（不追加、当天不复现），错误纠正由这句整句播报承担
             repo.markForgot(t.id)
             session = session.copy(forgot = session.forgot + 1)
-            results[p.seq] = "没关系，再学一遍 💪"
-            tts.speak("${termSpeech(t)}。没关系，再学一遍。")
+            results[p.seq] = "没关系，明天再学 💪"
+            tts.speak("${termSpeech(t)}。没关系，明天再来学它。")
         }
-        // 作答后未移除（当日连击 <3）→ 追加队尾（REVIEW 形态，当天再见；repo 内按最新计数判定）。
-        // 池型浏览卡没有作答入口，这里只为队列型频道的复习卡服务（`!= FREE` 的判断留作不变量表达）
-        if (p.mode != CardMode.FREE) appendReviewCard(t)
         // v5 R7 完成卡条件出现：答完最后一张待处理卡 → 完成卡此时才出现在队尾
+        //（R11：作答即当日移除，任务区答完就封闭；旧「作答未满 3 追加考核卡」已删，此处不再追加）
         syncDonePage()
         // v5 R8 作答后自动前进（§5.5）：置触发键，由下面 keyed 该 seq 的 effect 等播报念完再翻页
         //（必须放在 `tts.speak(...)` 之后）。只有 √ / × 会走到这里 —— 新词卡与浏览卡都没有「作答完成」
@@ -402,8 +409,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
                 }
                 val p = pages.getOrNull(idx) ?: return@collect
                 if (!spokenKeys.add(spokenKey(p))) return@collect
-                // 新词卡首次停稳播报 = 当日首次教读：markSeen 幂等，返回 true 才追加该词的
-                // 复习卡到队尾（开始当日连击考核，design.md §9.2）；教读不写 TermState。
+                // 新词卡首次停稳播报 = 当日首次教读：markSeen 幂等，返回 true 才追加**恰好一张**
+                // 该词考核卡到队尾（v5 R11：首答定调度——「学会」必须经过一次提取测试）；教读不写 TermState。
                 // 无论 markSeen 返回什么都标记本页已教读——v5 R7 待处理口径看的是「是否教读过」
                 if (p is Page.TermPage && p.mode == CardMode.NEW) {
                     val firstTeachToday = repo.markSeen(p.t.id)
@@ -433,8 +440,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker) {
             val curPage = pages.getOrNull(cur)
             // 用户已自己动过（手动上滑 / 回看）→ 放弃本次自动前进，不抢方向
             if (curPage !is Page.TermPage || curPage.seq != seq || pagerState.isScrollInProgress) return@LaunchedEffect
-            // 落点 = 下一张：未移除的考核卡追加在队尾，不影响下标关系；若当前卡是最后一张待处理卡，
-            // `syncDonePage()` 已在 `answer()` 里同步插入完成卡，落点恰好是完成卡（当日会话自然收尾）
+            // 落点 = 下一张：v5 R11 后作答不再追加考核卡（教读追加落在队尾，不改变当前卡下标关系）；
+            // 若当前卡是最后一张待处理卡，`syncDonePage()` 已在 `answer()` 里同步插入完成卡，
+            // 落点恰好是完成卡（当日会话自然收尾）
             if (cur < pages.lastIndex) pagerState.animateScrollToPage(cur + 1)
         } finally {
             // ⚠️ 置回 -1 必须排在 `animateScrollToPage` **之后**（用 finally 保证用户抢方向打断动画时也归位）：

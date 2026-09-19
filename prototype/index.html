@@ -10,7 +10,7 @@
     · 静态 REC_QUEUE 演示队列（工程版：每日队列调度器 + 清债模式）
     · 仍有「第 x/y 张」进度条（工程版：已删除）
     · 含设置页与生词本入口（工程版：已按决策删除）
-    · 无持久层（工程版：SharedPreferences + 连击/间隔双层状态机）
+    · 无持久层（工程版：SharedPreferences + 间隔层 + 当日已作答标记——R11 后连击层不再有「满 3」语义）
   v5（09-17-scheduling-v5）已同步的交互契约：复习卡未作答点按不泄读音（播「再想一想」）、
   「想看答案」peek 求助按钮（展开不写状态）、间隔阶梯 1→3→7→15→30（毕业判定 15 为工程版概念，原型仅演示阶梯）、
   **完成卡「真做完才出现」**（待处理数为 0 才渲染收尾页，否则队尾就是最后一张待处理卡）、
@@ -25,6 +25,12 @@
   **浏览卡**：词 + 逐字拼音 + 用途全展开、**无 √/×**、**无「想看答案」**、点卡重听、点单字看讲解。
   分区因此：无完成卡、不拦截（R9 保留）、池 = 该区**全部词**（含未学词）、**无限流**（滑到底继续追加，
   不再有队尾轻提示）、**不恢复位置**（每次进区都是一轮新的随机，从第一张开始）。
+  v5 R11 本轮改判：**首答定调度**（工程版连击目标 3 → 1）——当日首次作答即写间隔层并当日移除该词：
+  认识 → 升一级（1→3→7→15→30，每日最多一级）、忘了 → 打回 1 天且次日优先回池；作答后**不再追加
+  任何考核卡**、同日不再出现该词；作答播报不再有连击话术（「这个词学会啦！明天 / X 天后再来复习」/
+  「没关系，明天再来学它」，整句含词 + 提示）；队列新词**交错**编排（工程版 interleave：格号 % 3 == 1
+  优先新词，前 3 张内必有新词——原型 REC_QUEUE 静态演示已按此序排列）。工程版另附 f30 观测计数
+  （答前 days==30 → 独立 prefs key，不改行为），原型无持久层不演示。
   ⚠️ **原型唯一的被允许偏差**：原型没有 SRS 持久层 → 加权不可复现，分区抽词只能做**等概率随机**
   （工程版按 `w = 1 + 2×lapses + min(距上次学习天数, 60)/30` 加权，见 design.md §3.1）。
   这些差异不是缺陷，请勿据此反推工程版行为。
@@ -329,8 +335,10 @@ const TERMS = [
 ];
 const TERM_MAP = {}; TERMS.forEach(t=>TERM_MAP[t.id]=t);
 
-/* 推荐频道：复习与新学交错（记忆曲线混排演示） */
-const REC_QUEUE = ["transit-1","transit-2","hospital-1","hospital-2","market-1","market-2"];
+/* 推荐频道：复习与新学交错（记忆曲线混排演示）。
+   R11-2：下标 1、4、5 为新词——即工程版 interleave 对「复习 3 + 新词 3」池的实际输出
+   （格号 % 3 == 1 优先放新词、due 空则 news 顶上），保证前 3 张内必有新词且新词不垫底。 */
+const REC_QUEUE = ["transit-1","transit-2","hospital-1","market-1","hospital-2","market-2"];
 const INTERVALS = [1,3,7,15,30];
 
 /* ==================== 应用状态 ==================== */
@@ -395,7 +403,9 @@ document.getElementById("phone").addEventListener("click",e=>{
 const POOL_BATCH=2;                  /* 池型页每次追加的张数（与 App 的 POOL_BATCH 同值） */
 let pool=[];                         /* 池型频道：从池里顺序取，抽完重洗（无限流） */
 let pageSeq=0;                       /* 池型页身份：同一词可能在重洗后再次出现，故按页而非按词去重播报 */
-/* 队列型频道的任务卡（`rec` 的静态演示队列：复习与新学交错）。
+/* 队列型频道的任务卡（`rec` 的静态演示队列：复习与新学**交错**——R11-2 新词不垫底：
+   REC_QUEUE 即工程版 interleave（design §3）对「复习 3 + 新词 3」池的输出，下标 1、4、5 为新词
+   （格号 % 3 == 1 优先放新词、due 空则 news 顶上），前 3 张内必有新词。
    R10：分区不再走这里——它没有队列，只有池（见 poolIds）。 */
 function buildQueue(){
   return REC_QUEUE.map(id=>TERM_MAP[id]);
@@ -666,14 +676,18 @@ function reviewAnswer(id,known){
     const cur=INTERVALS.indexOf(t.days);
     const next=INTERVALS[Math.min(cur+1,INTERVALS.length-1)];
     t.days=next;
-    resultHTML=`<div class="fb-result ok">👍 记得牢！${next} 天后再见</div>`;
-    feedbackText=`认识，真棒！${next} 天后再见`;
+    /* R11 首答定调度（与 App §5.8 同口径）：播报不再有连击话术；next==1 念「明天」。
+       整句 = 词 + 提示 + 反馈（App 的 `${termSpeech(t)}。$spoken`），R8 自动前进等这句念完 */
+    const whenNext=next===1?"明天":next+" 天后";
+    resultHTML=`<div class="fb-result ok">👍 这个词学会啦！${whenNext}再来复习</div>`;
+    feedbackText=`${termFullText(t)}。这个词学会啦！${next===1?"明天":next+"天后"}再来复习。`;
   }else{
     state.session.forgot++;
     state.forgot[id]=(state.forgot[id]||0)+1;
     t.days=1;
-    resultHTML=`<div class="fb-result re">没关系，明天再来一遍 💪 已加入生词本</div>`;
-    feedbackText=`忘了没关系，明天再来一遍。我们再听一遍：${t.text}`;
+    /* R11：忘了同样当日移除（不追加、当天不复现），错误纠正由这句整句播报承担（与 App 一致） */
+    resultHTML=`<div class="fb-result re">没关系，明天再学 💪</div>`;
+    feedbackText=`${termFullText(t)}。没关系，明天再来学它。`;
     updateWordbookBadge();
   }
   fb.outerHTML=resultHTML+`<div class="swipe-hint">上滑看下一个 ↑</div>`;

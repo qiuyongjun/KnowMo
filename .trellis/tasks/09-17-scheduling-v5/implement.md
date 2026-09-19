@@ -92,8 +92,24 @@
      - 分区（`state.channel !== "rec"`）：卡渲染为**浏览形态**（词 + 拼音 + 提示全展开、**无** √/×、**无**「想看答案」按钮、点卡重听）；**无限流**——可见到末尾时继续追加（等概率随机；原型无持久层 → 加权不可复现，注释写明这是唯一允许的偏差）；**不恢复位置**（每次进区从头）
      - 推荐频道：完成卡之后的**温故流**用**同一套池机制**补上（浏览形态 + 无限追加）
      - 保留：分区无完成卡、分区不拦截（R9）；`node --check` 过语法
-9. **验证**
-   - `cd android-app && ./gradlew assembleDebug`（Windows: `gradlew.bat assembleDebug`）
+9. **R11：首答定调度 + 新词交错 + f30 观测（design.md §5.8）**
+   - **A. StudyRepository.kt**
+     - 删除 `DAILY_COMBO_TARGET` 常量；`isRemovedById(id)` 改为 `dayCount(id) >= 1`（counts 非空即已作答；旧数据 1/2/3 兼容）。⚠️ 删完 grep 全部引用（含 `MainActivity.kt`、AppRoot 播报的旧连击话术）
+     - `markKnown(id)`：**首答即写间隔层**——三分支：无 `TermState` → 首写 `TermState(1, today(), 0)`；`lastSeen != today()` → `nextInterval` + `lapses / 2`（封顶同值时 days 不变但 lastSeen 刷新）；`lastSeen == today()` → 闸门兜底不升级。`counts[id] = 1`；`knownAnswers + 1`。返回 `Triple(1, scheduled, daysAfter)`：`scheduled = 本次作答决定了间隔层`（首写 / 升级 / 封顶同值刷新都算 true；闸门挡住为 false）
+     - `markForgot(id)`：间隔层 `{1, today(), lapses+1}` 不变；`counts[id] = 1`（**忘了同样当日移除**——原来是清零为 0）；`forgotAnswers + 1`
+     - **f30 观测（R11-4）**：`markKnown` / `markForgot` 内、写库**之前**取 `termStates[id]?.days`；`== 30` → 独立 prefs key `f30_total` +1，且「忘了」再 `f30_fail` +1（`prefs.edit().putInt(...)`，不进主 state JSON）。新增只读 getter `f30Total()` / `f30Fail()`
+     - `buildQueue()`：`else` 分支 `(due + news).take(DAILY_POOL_QUOTA)` 改 `interleave(due, news, DAILY_POOL_QUOTA)`；新增私有 `interleave`（实现照 design §3 抄：格号 % 3 == 1 优先 news，due 空则 news 顶上）。清债分支不动
+     - `appendQueue` KDoc 更新：只剩「新词教读后追加一张考核卡」一个用途
+     - KDoc 同步：类头（v5 R11 段）、`DayState`（counts = 当日已作答标记，非连击）、`markKnown` / `markForgot` / `isRemovedById` / `buildQueue`
+   - **B. AppRoot.kt**
+     - `answer()`：**删除** `if (p.mode != CardMode.FREE) appendReviewCard(t)` 整段（作答后不再追加考核卡）
+     - `answer()` 播报：删 `count` 三分支（「再认对 2 次 / 再认对 1 次」），改按 `scheduled`——`true` → 视觉「👍 这个词学会啦！{明天 / X 天后}再来复习」/ 播报「这个词学会啦！{明天 / X天}后再来复习。」（`daysAfter == 1` 念「明天」）；`false` → 「👍 这个词今天学过啦」/「这个词今天学过啦。」；忘了 → 视觉「没关系，明天再学 💪」/ 播报「没关系，明天再来学它。」
+     - `appendReviewCard` KDoc：只由新词教读触发；文件顶部注释同步
+     - **其余全部不动**：待处理口径 / `syncDonePage` / `blockingIndex` / 自动前进 effect / 池型频道逻辑——R5–R10 契约零改动
+   - **C. prototype/index.html**
+     - 作答后的考核卡追加逻辑（若有）删除；`buildQueue` 新词交错（原型无持久层，当日会话内模拟 due/news 两池）；作答反馈文案同步（「这个词学会啦…」/「明天再来学它」）；完成卡条件出现 / 前向拦截 / 自动前进契约不动；`node --check` 过语法
+10. **验证**
+   - `cd android-app && ./gradlew assembleDebug`（Windows: `gradlew.bat assembleDebug`）——本机无 JDK，实际靠 push 后 CI
    - 手动场景走查（下）
 
 ## 手动场景走查清单
@@ -132,6 +148,15 @@
 | 30 | 温故流里看完一个刚升到 30 天的词 | 该词 `days` 仍为 30、`lapses` 不变（不会被随手 √ 提前升级、也不会被随手 × 打回 1 天） |
 | 31 | 每日任务频道全流程回归 | R1–R8 的既有走查项 1–17 **全部仍成立**；`isPending`/`frontierIndex`/`syncDonePage`/`blockingIndex` 的队列型行为一字未变 |
 | 32 | 旧持久化（含分区 `queues` 条目）加载 | 不崩；分区条目被忽略并在下次落库时消失；每日任务队列照常复用（当日冻结） |
+| 33 | 【R11】未学词首答「认识」 | 立即出现 `TermState{1, 今天, 0}`；feed 不再追加该词任何考核卡；播报「这个词学会啦！明天再来复习。」 |
+| 34 | 【R11】已学词首答「认识」 | 间隔升一级（1→3→7→15→30）且 lapses 减半；播报「X 天后再来复习」；当日该词不再出现 |
+| 35 | 【R11】首答「忘了」 | `{days=1, lapses+1}`；当日不再出现该词卡；次日重建队列该词排 due 前部 |
+| 36 | 【R11】新词卡停稳教读 | 追加**恰好一张**考核卡（不多不少）；答完这张卡后该词当日结束 |
+| 37 | 【R11】交错编排 | due 与 news 皆非空时前 3 张内至少 1 个新词（下标 1、4、7…为新词）；news=0 时全到期词；due=0 时全新词 |
+| 38 | 【R11】清债日 | 15 词 × 1 张 = 15 张考核卡，无新词、无教读卡；不再出现 45 张 |
+| 39 | 【R11】旧数据迁移 | counts=2 的旧状态 + 队列里同词两张未作答考核卡：两张都可作答，第二张不双升级（闸门）；已作答词不被重复考核 |
+| 40 | 【R11】f30 观测 | 答前 days=30 的词作答后 `f30_total` +1（忘了再 `f30_fail` +1）；其他 days 不计数；计数不影响任何调度行为 |
+| 41 | 【R11】R5–R10 零回归 | 走查项 1–32 中与 R11 无冲突的全部仍成立（防泄题 / peek / 完成卡条件 / 拦截 / 自动前进 / 池型零写入） |
 
 ## 回滚点
 

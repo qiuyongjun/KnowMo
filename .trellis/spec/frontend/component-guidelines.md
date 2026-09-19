@@ -56,7 +56,7 @@ fun blockingIndex(idx: Int): Int {
 
 - **新词卡（NEW）与浏览卡（FREE）都不自动前进**：它们没有「作答完成」这个事件（浏览卡用户还没看完就翻页是打扰），`SwipeHint` 保留，由用户自己上滑（手动上滑也永远是「不想等」时的加速通道）。
 - **不抢用户方向**：翻页前重读当前页，若已不是刚才作答的那张（用户自己滑走了）或 `isScrollInProgress`，放弃本次自动前进。
-- **落点 = `cur + 1`**：作答后未移除的考核卡追加在**队尾**，不改变下标关系；若当前卡是最后一张待处理卡，`syncDonePage()` 已在作答时同步插入完成卡，落点恰好是完成卡。
+- **落点 = `cur + 1`**：v5 R11 后作答**不再追加**任何考核卡（首答定调度，见下节），`cur + 1` 恒指向下一张队列卡；若当前卡是最后一张待处理卡，`syncDonePage()` 已在作答时同步插入完成卡，落点恰好是完成卡。
 
 > **Warning**：翻页**必须等本次作答播报念完**。`TTSSpeaker.speak` 是 `QUEUE_FLUSH`，抢跑会被落点卡的播报把「词 + 提示 + 反馈」整句掐断。
 >
@@ -82,7 +82,7 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 
 ### 列表只追加不重排（前向拦截的副产品）
 
-**契约**：`pages` 只在**尾部追加**——教读后追加考核卡、`pending == 0` 时追加完成卡、临近队尾时追加**池型页**。**永不移动、永不重排**（前向拦截靠「退人」而不是「移卡」）。
+**契约**：`pages` 只在**尾部追加**——新词教读后追加**恰好一张**考核卡（v5 R11：这是考核卡唯一的产生时机）、`pending == 0` 时追加完成卡、临近队尾时追加**池型页**。**永不移动、永不重排**（前向拦截靠「退人」而不是「移卡」）。
 
 由此：
 
@@ -100,7 +100,7 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 | 数据结构 | `DailyQueue`（`queue`/`modes`/`answered`/`position`） | 无——运行时池（`repo.poolIds(channel)` + `freePool`），不落库 |
 | 完成卡 | `pending == 0` 时出现 | **没有**（`syncDonePage` 直接 return） |
 | 前向拦截 | 拦（静默退回） | **不拦**（`blockingIndex` 返回 -1） |
-| 池范围 | `due + news` 配额 10 / 清债 15 | 温故流 = 推荐范围**已学词**（等概率）；分区 = 该区**全部词含未学词**（加权随机） |
+| 池范围 | `interleave(due, news)` 配额 10 / 清债 15（due ≥ 20） | 温故流 = 推荐范围**已学词**（等概率）；分区 = 该区**全部词含未学词**（加权随机） |
 | 卡形态 | 新学（NEW）/ 复习（REVIEW，**唯一考试态**） | **浏览卡**（`CardMode.FREE`：词 + 逐字拼音 + 用途全展开、无 √/×、无「想看答案」） |
 | 追加 | **仅完成卡之后**（`doneIdx >= 0 && idx >= doneIdx - 1`） | **无限流**（`idx >= pages.lastIndex - 1`，池空重洗） |
 | 断点 | frontier | **不恢复位置**（每次从第一张开始） |
@@ -115,6 +115,40 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 - **持久化**：`buildQueue` / `ensureQueue` / `appendQueue` / `markAnswered` / `saveQueuePosition` **不带 `channel` 参数**（内部固定 `CHANNEL_DAILY`）——让「队列 = 每日任务」成为签名层面的事实。`load()` 只读入 `CHANNEL_DAILY` 的队列条目（旧版本写下的分区队列在下次 `persist()` 自然消失，无需迁移代码）。
 
 > **Warning**：`appendReviewCard` 的插入点是**任务区末尾**——`indexOfFirst { it is Page.Done }` 取不到时用 `pages.size`。写成 `coerceAtLeast(0)` 会在 Done 缺席（v5 常态）时把新卡插到**队首**，新卡就落到了用户身后。
+
+### 调度核心：首答定调度（v5 R11；推翻 v4「连击满 3」口径）
+
+**契约**：复习/考核卡**当日首次作答**即写间隔层并把该词**当日移除**；作答后**不再追加**任何考核卡。依据：`tasks/09-17-scheduling-v5/research/learning-optimization-proposals.md` P0-1/P0-3/P0-4（模拟方案 B：日均卡数 39.6 → 13.1、能学词 119 → 177）。
+
+- **间隔层写入语义**（`StudyRepository.markKnown` / `markForgot`）：
+  - 首答「认识」：无 `TermState` → 首写 `{1, today, 0}`；`lastSeen != today` → `nextInterval` + `lapses / 2`（封顶 30 时 days 同值但 lastSeen 刷新，`scheduled` 仍为 true）；`lastSeen == today` → **闸门兜底不升级**。返回 `Triple(1, scheduled, daysAfter)`，播报按 `scheduled` 分支（`daysAfter == 1` 念「明天」）。
+  - 首答「忘了」：`{1, today, lapses+1}`——**当日同样移除**（不追加、当天不复现），次日 lapses 降序排 due 前部优先回池。
+- **`DayState.counts` = 当日已作答标记**（√/× 都写 1；旧数据 1/2/3 兼容为已作答）。`isRemovedById = dayCount >= 1`。`DAILY_COMBO_TARGET` 已删除——不要重建「连击目标」概念。
+- **`appendQueue` 只剩一个用途**：新词卡停稳教读（`markSeen` 返回 true）后追加**恰好一张**考核卡——「学会」必须经过一次提取测试（新词入口唯一化 D4 不回归）。`answer()` 里**禁止**再调它。
+- **新词交错（R11-2）**：`buildQueue` 的 pool 合并用 `interleave(due, news, DAILY_POOL_QUOTA)`——格号 `% 3 == 1` 优先放新词（due 空则 news 顶上），保证 news 非空时**前 3 张内必有新词**。不得回退为 `(due + news).take(...)`（新词垫底 + R7 拦截 = 做不完的用户新词通道关闭）。
+- **清债日自然守恒（R11-3）**：每词 1 张考核卡后，清债日 = 15 词 × 1 张 = 15 张；`DEBT_THRESHOLD` / `DEBT_QUOTA` 常量不动。
+- **f30 观测（R11-4）**：`markKnown` / `markForgot` 内、写库**之前**取 `termStates[id]?.days`，`== 30` → 独立 prefs key `f30_total`（忘了再 `f30_fail`）。**不进主 state JSON**（观测与学习状态解耦）、不改任何调度行为。
+- **闸门（每日最多升一级）保留的理由**：正常流程同日无第二张考核卡，但旧数据迁移日的队列里可能残留同词多张未作答考核卡——第二张作答时 `lastSeen == today` 挡住，防双升级。**不要顺手删闸门**。
+- **无撤销（用户 2026-09-19 明确拒绝 P0-2）**：不作答撤销 / 纠错窗口——不引入任何撤销 UI 与快照回滚。
+
+#### Wrong vs Correct
+
+#### Wrong
+```kotlin
+// 旧连击口径：作答后按计数决定是否回队尾（R11 已删除——忘了/认识都当日移除）
+if (p.mode != CardMode.FREE) appendReviewCard(t)
+// 新词垫底回归
+val pool = (due + news).take(DAILY_POOL_QUOTA)
+```
+
+#### Correct
+```kotlin
+// answer()：首答即定调度，不再追加；播报按 scheduled 分支
+val (_, scheduled, daysAfter) = repo.markKnown(t.id)
+// buildQueue：交错编排
+val pool = if (due.size >= DEBT_THRESHOLD) due.take(DEBT_QUOTA)
+           else interleave(due, news, DAILY_POOL_QUOTA)
+```
 
 ### 播报去重键绑「页身份」
 
@@ -155,3 +189,7 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 | 分区 / 温故流上滑到底就没了 | 池型追加条件抄成了队列型的 `doneIdx >= 0` | 队列型 `doneIdx >= 0 && idx >= doneIdx - 1`；池型 `idx >= pages.lastIndex - 1`（无限流） |
 | 旧版本的分区队列一直躺在持久化里 | `load()` 仍读入全部频道 | `load()` 只读 `CHANNEL_DAILY`（旧条目在下次 `persist()` 自然消失） |
 | 池型频道的卡排到一半顺序变了 | 追加时重排了 `pages` | 池型页**只在尾部追加**；顺序随机靠「重新进入频道时换一批池」表达，不是靠重排 |
+| 同一词旧数据迁移日被双升级 | 闸门（`lastSeen == today` 不升级）被当死代码删掉 | 闸门是迁移日同词多张考核卡的防双升级兜底，**保留** |
+| 忘了的词当天又冒出考核卡 | `answer()` 里仍调 `appendReviewCard` / `appendQueue` | R11 首答定调度：作答即当日移除，`appendQueue` 只服务新词教读 |
+| 做不完的用户永远学不到新词 | pool 合并写回 `(due + news).take(...)` | 用 `interleave`（格号 % 3 == 1 优先新词）；前 3 张内必有新词 |
+| f30 计数随学习状态一起被清 | 观测写进了主 state JSON | f30 用**独立 prefs key**（`f30_total` / `f30_fail`），且在写库**之前**取答前 days |

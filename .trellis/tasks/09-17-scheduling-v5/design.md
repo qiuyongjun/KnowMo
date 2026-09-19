@@ -2,6 +2,7 @@
 
 > 延续 09-17-elderly-literacy-app/design.md §9（v4 连击 + 间隔双层模型）的迭代记录文体。
 > v5 只动调度参数与排序、毕业判定、复习卡交互契约；双层状态机结构（连击层/间隔层/每日队列/自由刷）不变。
+> ⚠️ **R11 修订（2026-09-19）**：升级判据从「当日满 3 连击」改为「首答定调度」，连击层（`DayState.counts`）降级为**当日已作答标记**——三层结构仍在，语义见 §5.8。
 
 ## 0. 问题定位（为什么改）
 
@@ -13,6 +14,8 @@
 | P1-2 | 完成卡与队列完成度不一致 | ① 完成卡与队尾绑定（`pages` = 队列卡 + Done），滑到底 ≡ 完成；② 上一轮补救口径只数「未作答复习卡」，漏掉「整天都是新词卡被快速甩过」——新词卡未停稳就不触发教读，该口径恒为 0；③ 第二轮补救「滑过即回收队尾」保证了前向可达，但机制**不可见**且**不终止**（回收无次数上限、未答完时 FREE 页不追加）| 一张卡没答也能听到「今日任务完成」；完成卡变成固定在队尾的装饰，而不是成绩；第二轮之后的问题形态变成**无限循环**——同一批卡反复出现，没有完成卡、进不去温故、也没有任何解释 |
 | P1-3 | 分区被当成「第二个每日任务」 | 每个频道各有一套当日队列 + **一张完成卡**，文案一律「今日任务完成！」（一天最多能「完成」13 次）；场景频道沿用 `due + news` 全量入队。R7 改判后「不允许越过未处理的卡」在分区里**没有任何收尾页来终止它** | 进分区即约 120 张强制卡（15–20 分钟）；若分区按到期筛选，则刚毕业的分区（全部词 days ≥ 15 且未到期）pool 为空 → `pageCount == 0` **白屏**、可持续十几天 |
 | P1-4 | 自主学习（温故流 + 分区）与每日任务共用「考试态」与「队列」模型 | 温故与分区沿用复习卡的考试交互（√/× 自评 + 防泄题），且作答**写间隔层**；分区还用 `DailyQueue`（`modes`/`answered`/`position`）表达一条**固定顺序**的队列 | ① 「自主学习」成了第二个考试流：老人想随便看看却被要求自评，随手一点就改写间隔层（√ 可提前升级 / × 打回 days=1，见 `learning-mechanism-review.md` C 项）；② 固定顺序 → 用户设想的「不固定次序」无法表达；③ 分区 pool 含 `news` = 绕开每日配额教新词，且次日全部到期抢配额（埋债）；④ R9 的「滑完停住 + 轻提示」与「自主学习没有限制」自相矛盾 |
+| P0-5（R11） | 「满 3 连击才升级」+ `DayState` 隔天作废 = **死锁** | 做不完当日队列 → 每词 counts 永远 <3 → `TermState` 永不写 → 队列每天一模一样 | 做不完的用户（配额 10、老人每天几分钟——常态）**永远学不会任何词**（§5.8；`learning-optimization-proposals.md` P0-1） |
+| P0-6（R11） | 新词垫底 | `(due + news).take(10)` 到期词全在前 + R7 前向拦截 | `due ≥ 5` 而用户只做前 5 张时新词永远轮不到 → 做不完的用户新词通道关闭（§5.8 R11-2） |
 
 ## 1. 决策
 
@@ -43,13 +46,14 @@
 data class TermState(val days: Int, val lastSeen: String, val lapses: Int = 0)
 ```
 
-事件表（增量，其余同 v4 §9.2）：
+事件表（**R11 修订：首答定调度**——当日首次作答即写间隔层，同日不再有第二次作答机会；连击层降级为「当日已作答标记」）：
 
 | 事件 | 间隔层 |
 |---|---|
-| 「忘了」（任何地方） | days=1、lastSeen=今天、**lapses+1** |
-| 满 3 连击升级（lastSeen≠今天） | days=nextInterval、lastSeen=今天、**lapses/2** |
-| 满 3 连击但闸门挡住 / 无状态首次完成 | lapses 不变（首次完成写 {1, 今天, 0}） |
+| 首答「忘了」 | days=1、lastSeen=今天、**lapses+1**（当日移除，次日 lapses 排序优先回池） |
+| 首答「认识」且无状态 | 首写 {1, 今天, 0} |
+| 首答「认识」且有状态（lastSeen≠今天） | days=nextInterval、lastSeen=今天、**lapses/2**（每日最多升一级闸门保留） |
+| 同日第二张考核卡作答「认识」（仅旧数据迁移日可达） | lastSeen==今天 → 闸门挡住，不升级（防双升级的兜底） |
 
 ## 3. 排序与配额（buildQueue）+ 池型抽取（poolIds）
 
@@ -66,9 +70,25 @@ val learned = scope.filter { termStates[it] != null }.sortedWith(
 )
 val due  = learned.filter { isDue(termStates[it]!!) }
 val news = scope.filter { termStates[it] == null }.shuffled()
-val pool = if (due.size >= DEBT_THRESHOLD) due.take(DEBT_QUOTA)   // 清债模式：全复习、不补新词
-           else (due + news).take(DAILY_POOL_QUOTA)               // 到期复核 + 新词补足
+val pool = if (due.size >= DEBT_THRESHOLD) due.take(DEBT_QUOTA)   // 清债模式：全复习、不补新词（R11-3：每词 1 张 → 15 张，不再有 45 张债日）
+           else interleave(due, news, DAILY_POOL_QUOTA)           // R11-2 交错：新词不垫底
 ```
+
+```kotlin
+/** R11-2 交错编排：格号 % 3 == 1 的位置优先放新词，其余位置优先到期词；任一池空则另一池顶上，直到配额。
+ *  保证 news 非空时队列前 3 张内必有新词（做不完的用户也见得到新词）；两池皆空返回空（合法状态，见 buildQueue KDoc）。 */
+private fun interleave(due: List<String>, news: List<String>, quota: Int): List<String> {
+    val out = ArrayList<String>(quota)
+    var d = 0; var n = 0
+    while (out.size < quota && (d < due.size || n < news.size)) {
+        val takeNews = (out.size % 3 == 1 && n < news.size) || d >= due.size
+        if (takeNews) out.add(news[n++]) else out.add(due[d++])
+    }
+    return out
+}
+```
+
+> 交错的行为核对：due 与 news 皆非空 → 新词落在下标 1、4、7…；news=0 → 全 due（与旧 `(due+news).take` 行为一致）；due=0 → 连续 news；清债模式不走本函数（due.take(15)）。
 
 > ⚠️ **R10 删掉了 `else -> learned + news` 分支**（R9 的分区全量入队）。分区已不再生成队列（池型，§5.7），保留这个分支就是留一段永远不会被走到、却看起来仍在服务分区的死代码。
 
@@ -167,7 +187,7 @@ private fun poolWeight(id: String): Double {
 
 ### 5.4 本次改判的代价（接受）
 
-- **强制逐张处理**：单日队列约 30 张卡（10 词配额 × 每词最多 3 次连击），必须全部处理完才看得到完成卡，约两三分钟。这是设计上的单日会话量、不是惩罚；但代价是「只想随便看看」的用户在完成前也进不了温故自由刷（FREE 页只在 `Done` 存在后追加）。
+- **强制逐张处理**：单日队列约 30 张卡（10 词配额 × 每词最多 3 次连击），必须全部处理完才看得到完成卡，约两三分钟【R11 修订：每词当日 1 张考核卡（新词另 1 张教读卡）→ 单日 10–15 张，约一两分钟】。这是设计上的单日会话量、不是惩罚；但代价是「只想随便看看」的用户在完成前也进不了温故自由刷（FREE 页只在 `Done` 存在后追加）。
 - **「认识」虚高的压力上升**：越界被拦后，用户为脱身可能直接点 √。这是本决策的主要代价，也是 Out of Scope 里「三选一拼音客观校验」留着的原因。缓解：peek 仍必须作答（👀 不是免答通道）；不进一步软化「忘了」的代价（那会让连击层失去意义）。
 - **「跳过」能力归零**：本版没有任何跳过 / 延后动作。若实测发现用户确实需要，须以**显式动作 + 明确代价**（延到次日）补回，不能退回「滑动即跳过」。
 - **观察信号**：若走查中发现用户反复向前划同一张卡（反复被静默退回、看起来像在跟界面较劲），说明他们没意识到「必须先作答」——此时应补一句极短提示或视觉引导，而不是改回自由划。
@@ -270,8 +290,59 @@ private fun poolWeight(id: String): Double {
 
 `prototype/index.html` 没有 SRS 持久层 → **加权不可复现**，分区只能做**等概率随机**（本次唯一允许的原型偏差，必须在原型注释里写明）。其余契约（浏览卡形态 / 无限流追加 / 无队尾轻提示 / 不恢复位置 / 无完成卡 / 不拦截）都要在原型里成立。原型此前**整个缺温故流**——本轮把池型追加机制做出来后，推荐频道完成卡之后的温故流用同一套机制补上（同一个函数 + 一个触发条件）。
 
+### 5.8 调度核心修订：首答定调度（R11，2026-09-19 定案）
+
+**0. 一句话**：连击目标 3 → 1——当日**首次**作答即写间隔层并把该词移出当日；作答后**不再追加**任何考核卡；新词**交错**编排；清债日随「每词一卡」自然守恒；附 f30 观测点。依据：`research/learning-optimization-proposals.md` P0-1/P0-3/P0-4 + `learning-mechanism-review.md` §5 方案 B（日均 39.6 → 13.1 张、能学词 119 → 177）。**用户已明确拒绝 P0-2（作答撤销窗口）——不做。**
+
+**1. 要修的死锁（P0-5）**：满 3 连击才升级 + `DayState` 隔天作废 ⇒ 做不完 → counts 永远 <3 → `TermState` 永不写 → 队列每天一模一样。首答定调度后：做多少、成多少，进度跨天不丢（这正是墨墨「当天第一次反馈决定长期调度」的产品规则）。
+
+**2. StudyRepository 语义重写**
+
+```kotlin
+/** R11：当日首答「认识」即写间隔层（首写 {1,今天,0}；lastSeen≠今天 → nextInterval + lapses/2；
+ *  lastSeen==今天 → 闸门兜底不升级——正常流程同日无第二张考核卡，只有旧数据迁移日可达）。
+ *  counts[id] = 1（当日已作答标记）；返回 (1, scheduled, daysAfter)：
+ *  scheduled = 本次作答决定了间隔层（首写 / 升级 / 封顶同值刷新都算 true；闸门挡住为 false）。 */
+fun markKnown(id: String): Triple<Int, Boolean, Int>
+
+/** R11：当日首答「忘了」→ {1, 今天, lapses+1}；counts[id] = 1——忘了同样当日移除，
+ *  次日 lapses 降序排 due 前部优先回池。 */
+fun markForgot(id: String)
+```
+
+- `isRemovedById(id)` = `counts[id] != null`（旧数据 1/2/3 兼容为已作答）；**删除 `DAILY_COMBO_TARGET` 常量**——删完必须 grep 全部引用（`MainActivity.kt` 等处一并清理，本机不能编译，漏一处就是编译错误）。
+- `appendQueue` **保留**且只剩一个用途：新词卡停稳教读（`markSeen` 返回 true）后追加**恰好一张**考核卡——「学会」仍必须经过一次提取测试（新词入口唯一化不动，D4 不回归）。
+- 「忘了」当日不复现（不追加）；错误纠正由作答播报整句（词 + 提示 + 反馈）承担——R5 的防泄题只限制**作答前**，作答后本来就会念全句。
+- 「忘了」打回 days=1 **维持现状**（P1-1 不改：归零对认知衰退风险人群更安全，等 f30 数据再议）。
+
+**3. 交错编排（R11-2）**：`interleave` 见 §3。清债模式不动（due ≥ 20 → due.take(15)，无新词）。
+
+**4. AppRoot 侧**
+
+- `answer()`：**删除** `if (p.mode != CardMode.FREE) appendReviewCard(t)`——作答后不再追加。`appendReviewCard` 从此只由新词教读（停稳 effect 的 `markSeen` 分支）触发，KDoc 同步。
+- 作答播报（`answer()` 内按 `count` 的三分支删除，改按 `scheduled`）：
+  - `scheduled == true` → 视觉「👍 这个词学会啦！{明天 / X 天后}再来复习」；播报「这个词学会啦！{明天 / X天}后再来复习。」（`daysAfter == 1` 念「明天」，避免「1 天后」的生硬）
+  - `scheduled == false`（闸门兜底，仅迁移日可达）→ 视觉「👍 这个词今天学过啦」；播报「这个词今天学过啦。」
+  - 忘了 → 视觉「没关系，明天再学 💪」；播报「没关系，明天再来学它。」
+- R5–R10 全部交互契约**零改动**：待处理口径（taught / revealed）、完成卡条件出现（pending == 0）、前向拦截、自动前进（作答后落点仍是 cur+1；最后一卡答完自动落在完成卡——队尾不再有追加卡，`syncDonePage` 插完成卡的位置关系不变）。
+
+**5. 迁移与兼容**
+
+- 旧 `counts` ∈ {1,2,3} → 一律「当日已作答」（`isRemovedById` 恒真）——迁移日语义甚至更连贯：counts=2 未毕业的词当天不再被反复考核。
+- 旧队列里同词的**多张未作答考核卡**（旧规则追加的）：逐张可作答；第二张起 `lastSeen == 今天` 闸门挡住 → 不双升级。这正是闸门保留的理由，**不要顺手删闸门**。
+- f30 计数用**独立 prefs key**（`f30_total` / `f30_fail`），不进主 state JSON——观测数据与学习状态解耦，清观测不清学习进度。
+
+**6. f30 观测（R11-4，只读不改行为）**：`markKnown` / `markForgot` 内、写库**之前**取 `termStates[id]?.days`；`== 30` → `f30_total + 1`，且若是「忘了」→ `f30_fail + 1`。首答口径（R11 后每日每词至多一次）；迁移日同词第二张考核卡可能重复计数——可接受的观测噪声，不必去重。
+
+**7. 不变式（不得顺手改掉）**：每日最多升一级闸门；`markSeen` 教读不写 `TermState`；新词入口唯一化（池型频道零写入）；清债阈值 / 配额常量；毕业判定 15；`lapses` 排序与升级半衰；间隔阶梯 1→3→7→15→30。
+
+**8. 代价（用户 2026-09-19 已知悉）**：误点 √ 无撤销（P0-2 被拒——首答 1 天代价小，长间隔代价大但受闸门限制）；「忘了」当天不复现（跨天间隔提取，Maddox & Balota 2015：对老人有效）；失去三重确认仪式感（由「学会啦」播报补）。
+
+**9. 原型同步**：`prototype/index.html`——作答后的考核卡追加逻辑（若有）删除；新词交错进 `buildQueue`（原型无持久层，按当日会话内模拟 due/news）；作答反馈文案同步；完成卡条件出现 / 前向拦截 / 自动前进契约不动。
+
 ## 6. 回滚
 
+- **R11（首答定调度）**落在 StudyRepository.kt（`markKnown` / `markForgot` / `isRemovedById` / 删 `DAILY_COMBO_TARGET` / `buildQueue` 的 `interleave` / f30 计数）、AppRoot.kt（`answer()` 删追加 + 播报文案）+ 原型 HTML（作答追加删除 + 交错 + 文案）。revert 该提交即回到「满 3 连击」口径；持久化无 schema 变更（counts 值语义放宽，旧版本读到 1 无害）。
 - R9（分区 = 自主练习）落在 StudyRepository.kt（`buildQueue` 的 `else` 分支 + `CHANNEL_DAILY` 常量）、AppRoot.kt（`syncDonePage` / `blockingIndex` 的频道收窄、断点两处、`footerHint` 传参）、TermCard.kt（新增可空 `footerHint` 参数）+ 原型 HTML（`refreshDoneCard` / `blockSkippedCards` 的频道判定 + 队尾轻提示）。`footerHint` 有缺省值，UI 侧改动向后兼容；调度侧 `learned + news` 只是把分区 pool 从 `due + news` 扩大，可单独 revert。
 - 全部改动集中在 StudyRepository.kt / TermCard.kt / AppRoot.kt / DoneCard.kt 四个文件 + 原型 HTML；按改动分层可分别 revert。
 - R7 本轮落在 AppRoot.kt / DoneCard.kt / 原型 HTML，并在 StudyRepository.kt 增设当日战果计数（`DayState.knownAnswers/forgotAnswers`，缺省读 0）——调度层（排序/配额/间隔/毕业）与防泄题逻辑不受影响，可单独 revert。
@@ -285,3 +356,4 @@ private fun poolWeight(id: String): Double {
 - 手动场景走查（见 implement.md 清单）：升级播报 30 天、lapse 优先排序、清债配额、防泄题、peek 不写状态、旧 JSON 兼容、完成卡条件出现、向前越界被静默退回且列表不重排、回看与自由刷不受限、作答后等播报念完自动前进（含落在完成卡）、用户滑动时不抢方向、战果跨重启不归零。
 - 分区（R9）：非 `rec` 频道无完成卡与完成播报；自由划不被退回；全学完且未到期的分区不白屏；滑完停住并出现轻提示 + 同句播报；分区断点回到上次那一页；分区「忘了」仍写 days=1 / lapses+1。
 - 自主学习（R10）：温故流与分区都是浏览卡（全展开、无 √/×、点按念词）；分区池含未学词且浏览后仍无 `TermState`；分区顺序两次不同、池尾继续追加（无限流）、重进从第一张开始；温故流里看完一个词其 days / lapses 不变；完成卡战果只来自复习卡作答；每日任务频道 R1–R8 全套不回归。
+- 调度核心（R11）：首答「认识」立即写间隔层（三种分支）；首答「忘了」写 {1, 今天, lapses+1} 且当日移除、次日排 due 前部；作答后 feed 不再出现该词任何卡；新词教读恰好追加一张考核卡；交错编排（前 3 张内有新词）；清债日 15 张；旧 counts/旧多卡队列兼容（闸门防双升级）；f30 计数落独立 key 且不改调度行为；R5–R10 交互契约零回归。
