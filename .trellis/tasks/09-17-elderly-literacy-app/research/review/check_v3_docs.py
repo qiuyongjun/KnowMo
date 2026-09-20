@@ -4,7 +4,11 @@
 import os
 import re
 
-ROOT = r"D:\QYJ\MyProject\KnowMo"
+# 根目录自推导（向上找 android-app），Mando→KnowMo 改名前后均可用。
+# 注：SRC 的 com/qyj/shibang 子路径为 v3 时点冻结产物，不随改名更新。
+ROOT = os.path.dirname(os.path.abspath(__file__))
+while not os.path.isdir(os.path.join(ROOT, "android-app")):
+    ROOT = os.path.dirname(ROOT)
 TASK = os.path.join(ROOT, ".trellis", "tasks", "09-17-elderly-literacy-app")
 SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang")
 

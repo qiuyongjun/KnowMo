@@ -10,8 +10,11 @@ Kotlin 逐符号导入核查（启发式，只读）。
 import os
 import re
 
-ROOT = r"D:\QYJ\MyProject\KnowMo"
-SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang")
+# 根目录自推导（向上找 android-app），Mando→KnowMo 改名前后均可用
+ROOT = os.path.dirname(os.path.abspath(__file__))
+while not os.path.isdir(os.path.join(ROOT, "android-app")):
+    ROOT = os.path.dirname(ROOT)
+SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "knowmo", "app")
 
 BUILTIN = set("""Int Long Short Byte Float Double Boolean Char String Unit Nothing Any
 List MutableList Set MutableSet Map MutableMap Collection Iterable Sequence Triple Pair Array

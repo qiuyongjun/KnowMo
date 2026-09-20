@@ -16,8 +16,11 @@ import re
 import itertools
 import sys
 
-ROOT = r"D:\QYJ\MyProject\KnowMo"
-SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang")
+# 根目录自推导（向上找 android-app），Mando→KnowMo 改名前后均可用
+ROOT = os.path.dirname(os.path.abspath(__file__))
+while not os.path.isdir(os.path.join(ROOT, "android-app")):
+    ROOT = os.path.dirname(ROOT)
+SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "knowmo", "app")
 WB = os.path.join(SRC, "data", "WordBank.kt")
 SD = os.path.join(SRC, "data", "StudyData.kt")
 

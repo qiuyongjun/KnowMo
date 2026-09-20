@@ -20,7 +20,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pypinyin import Style, pinyin as pp
 
-BASE = r"D:\QYJ\MyProject\KnowMo"
+# 根目录自推导（向上找 android-app），Mando→KnowMo 改名前后均可用。
+# 注：下方 VB/SD 的 com\qyj\shibang 子路径为 v3 时点冻结产物（审计对象是改名前的旧树），不随改名更新。
+_BASE = os.path.dirname(os.path.abspath(__file__))
+while not os.path.isdir(os.path.join(_BASE, "android-app")):
+    _BASE = os.path.dirname(_BASE)
+BASE = _BASE
 VB = os.path.join(BASE, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang", "data", "WordBank.kt")
 SD = os.path.join(BASE, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang", "data", "StudyData.kt")
 OLD = os.path.join(BASE, ".trellis", "tasks", "09-17-elderly-literacy-app", "research", "review", "old_StudyData.kt")

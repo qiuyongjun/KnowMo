@@ -22,7 +22,11 @@ import re
 import statistics
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = r"D:\QYJ\MyProject\KnowMo\android-app\app\src\main\java\com\knowmo\app\data\WordBank.kt"
+# 根目录自推导（向上找 android-app），Mando→KnowMo 改名前后均可用
+ROOT = HERE
+while not os.path.isdir(os.path.join(ROOT, "android-app")):
+    ROOT = os.path.dirname(ROOT)
+SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "knowmo", "app", "data", "WordBank.kt")
 OUT = os.path.join(HERE, "mechanism-sim-report.txt")
 
 raw = io.open(SRC, encoding="utf-8").read()
