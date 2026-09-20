@@ -1,0 +1,4 @@
+count=74  min=1  max=74
+绌哄彿: 鏃?
+椤哄簭鍗虫枃浠堕『搴? False
+鏂囦欢椤哄簭鍓?5 / 鍚?5: ['appliance-1', 'appliance-2', 'appliance-3', 'appliance-4', 'appliance-5'] ... ['appliance-59', 'appliance-60', 'appliance-61', 'appliance-62', 'appliance-63']

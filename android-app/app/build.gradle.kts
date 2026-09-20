@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.qyj.shibang"
+    namespace = "com.knowmo.app"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.qyj.shibang"
+        applicationId = "com.knowmo.app"
         minSdk = 26
         targetSdk = 34
         versionCode = 1

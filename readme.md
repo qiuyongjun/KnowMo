@@ -1,4 +1,4 @@
-# 慢慢懂 Mando
+# 认识么 KnowMo
 
 > **Learn life, one word at a time.** —— 学生活，从认一个字开始。
 
@@ -7,9 +7,8 @@
 | 目录 | 内容 |
 |---|---|
 | `android-app/` | 安卓工程（Kotlin + Jetpack Compose，构建说明见其 README） |
-| `prototype/` | 已评审的高保真网页原型（交互契约与安卓版一致） |
 | `.trellis/` | Trellis 任务管理与规划文档 |
 
-- 应用名：手机桌面显示「慢慢懂」
-- 包名：`com.qyj.shibang`
+- 应用名：手机桌面显示「认识么」
+- 包名：`com.knowmo.app`
 - 当前版本：v0.2.0（首发真机验证阶段）

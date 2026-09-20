@@ -1,6 +1,6 @@
 # 状态管理
 
-> 本项目（Mando / 适老识字 app，Kotlin + Jetpack Compose）的状态约定。
+> 本项目（认识么 KnowMo / 适老识字 app，Kotlin + Jetpack Compose）的状态约定。
 > 语言：中文，与 `prd.md` / `design.md` / 代码注释保持一致（模板原文要求英文，如需统一切换请一次性改全部 spec）。
 
 ---
@@ -9,13 +9,13 @@
 
 | 层 | 载体 | 生命周期 | 例子 |
 |---|---|---|---|
-| 持久层 | `StudyRepository`（SharedPreferences + 单 key JSON） | 跨会话 | `TermState`（days / lastSeen / lapses）、`DayState`（连击层 + 当日战果计数）、`DailyQueue` |
+| 持久层 | `StudyRepository`（SharedPreferences + 单 key JSON） | 跨会话 | `TermState`（days / lastSeen / lapses / ease）、`DayState`（连击层 + 当日战果计数）、`DailyQueue` |
 | 会话态 | `AppRoot` 内 `remember { mutableStateMapOf(...) }` | 进程存活期，重启归零 | `revealed`、`peeked`、`results`、`taught` |
 | 页面态 | `mutableStateOf<List<Page>>` | 频道切换时重建 | `pages`、`freePool` |
 
 **判定规则**：跨重启必须一致的落持久层；能靠 `seq` / `qIndex` 重建的放会话态。**表达「今天做到哪儿了」的数字必须落持久层**——完成是跨会话可达的事件（推荐频道 10 张配额约 30 张卡），会话计数会让战果在重启后显示 0。
 
-> **Warning**：`revealed` 的键是 `seq`（本次**出现**序号），不是词 id。v4 起同一词当天会出现多张卡（学 1 次 + 连击考核若干次），按词记录会把后续追加的考核卡一并展开，重启后连击卡死。`DailyQueue.answered` 同样按**卡实例**逐卡记录，理由相同。
+> **Warning**：`revealed` 的键是 `seq`（本次**出现**序号），不是词 id。v4 起同一词当天会出现多张卡（学 1 次 + 连击考核若干次），按词记录会把后续追加的考核卡一并展开，重启后连击卡死。`DailyQueue.answered` 同样按**卡实例**逐卡记录，理由相同。v6 R12 恢复 v4 连击后「连击考核若干次」从 R11 的「至多 1 次」回到「至多 3 次」，此条约束更显关键。
 
 ## 派生状态
 

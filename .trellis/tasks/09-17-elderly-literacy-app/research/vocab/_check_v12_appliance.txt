@@ -1,0 +1,46 @@
+== 1. appliance id 连续性 ==
+count=63  min=1  max=63
+连续性 1..63 无跳号: True
+id 重复: []
+scene 字段非 appliance 的条目: []
+id 前缀 != scene: []
+
+== 3. 跨分区重词逐条对比（tip 是否真的不同） ==
+* 确认
+    bank-18        scene=bank       pinyin=què rèn              tip=按这个键，表示没错
+    appliance-23   scene=appliance  pinyin=què rèn              tip=按这个键，表示就这么办
+    tip 全同? False
+* 菜单
+    food-6         scene=food       pinyin=cài dān              tip=写着所有菜和价格的本子
+    appliance-21   scene=appliance  pinyin=cài dān              tip=屏幕上排的一列选项
+    tip 全同? False
+* 说明书
+    medicine-2     scene=medicine   pinyin=shuō míng shū        tip=药盒里那张纸，吃前看一眼
+    appliance-24   scene=appliance  pinyin=shuō míng shū        tip=电器配的小册子，不会用时翻一翻
+    tip 全同? False
+* 身份证
+    bank-16        scene=bank       pinyin=shēn fèn zhèng       tip=办业务要出示的证件
+    gov-2          scene=gov        pinyin=shēn fèn zhèng       tip=最重要的证件，出门要带
+    tip 全同? False
+* 预约
+    gov-15         scene=gov        pinyin=yù yuē               tip=提前约好时间再来
+    appliance-13   scene=appliance  pinyin=yù yuē               tip=提前设好时间，到点自己干
+    tip 全同? False
+
+== 4/5/6. SCENES 结构 ==
+SCENES 项数=15（含 rec） -> 场景分区=14
+顺序: rec | daily | market | transit | hospital | bank | gov | food | phone | medicine | express | property | appliance | emergency | weather
+appliance 下标=12（property=11 emergency=13）
+顺序断言（property < appliance < emergency）: True
+id 重复: {}
+name 重复: {}
+icon 重复: {}
+color 重复: {}
+appliance icon=🔌 codepoints=['U+1F50C']
+appliance color=0xFFF0F4C3
+
+== 7. appliance pypinyin 逐字对照（应为 0 处） ==
+差异 0 处: []
+
+== 8. appliance 无声调音节（=轻声称谓）逐条 ==
+无声调 0 处: []

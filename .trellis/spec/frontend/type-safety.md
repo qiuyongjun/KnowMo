@@ -1,6 +1,6 @@
 # Type Safety
 
-> Mando 的类型安全约定。语言：中文，与其它 spec 一致。
+> 认识么（KnowMo）的类型安全约定。语言：中文，与其它 spec 一致。
 
 ---
 

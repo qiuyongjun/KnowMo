@@ -83,3 +83,126 @@
 
 - git 提交粒度 = 迭代；出问题回退上一提交。
 
+
+## v6 步骤清单（2026-09-20：隐藏设置入口 + 收藏分区，见 prd.md v6 / design.md §11）
+
+1. [x] `data/AppSettings.kt`（新建）：SharedPreferences `app_settings` + 单 JSON（order/hidden/quota）；`visibleScenes()` / `setSceneVisible()` / `moveScene()` / `quota()` / `setQuota()`；默认 = 全可见、原顺序、10
+2. [x] `StudyRepository.kt`：`CHANNEL_FAV`；favorites 有序持久化（state JSON 顶层 `favorites`，旧数据缺省空）；`favorites()/isFavorite()/toggleFavorite()`；`scopeIds("fav")`/`poolIds("fav")`（weightedShuffle）；构造函数注入 `quotaProvider: () -> Int`，`buildQueue` 改读之（DAILY_POOL_QUOTA 保留为缺省值）
+3. [x] `StudyData.kt`：`sceneName("fav")` → "收藏"（fav 不进 SCENES）
+4. [x] `Common.kt` `ChannelBar`：签名改 `scenes` + `onOpenSettings`；渲染 推荐→收藏→可见分区；推荐 tab 连点 5 次（间隔 ≤2s 重置）回调 `onOpenSettings`
+5. [x] `TermCard.kt`：右侧竖排五角星（isFavorite/onToggleFavorite，自消费点击，≥64dp，全卡型可见）
+6. [x] `ui/SettingsScreen.kt`（新建）：全屏设置页（配额单选 3/5/10/15/20 + 分区显隐开关 + ↑↓ 排序 + 完成按钮；适老化约束）
+7. [x] `AppRoot.kt`：fav 频道走池型分支（零改动验证）；空收藏插入引导页（Page.Guide + 播报）；星按钮接线（toggleFavorite + 重组）；showSettings/ChannelBar/SettingsScreen 接线（打开播报「已打开设置」；当前频道被隐藏回退 rec）；MainActivity 组装 quotaProvider
+8. [x] 静态自检：Grep 无 DAILY_POOL_QUOTA 直接引用残留（buildQueue 除外）；favorites/settings 读写对称；graduatedScenes 不含 fav；星按钮不冒泡到卡片重听；括号/导入核对（详见 v6 汇报：DAILY_POOL_QUOTA 仅剩 companion 定义 + quotaProvider 缺省 lambda 两处，均为有意保留）
+9. [x] 抽卡算法统一（2026-09-20 QYJ 追加拍板，prd v6 第 4 条 / design §11.3）：`poolIds` rec 分支从 `shuffled()` 改 `weightedShuffle`（保留已学词过滤，D4 新词入口唯一化），三分支抽卡算法统一；AppRoot/StudyRepository 注释同步
+10. [ ] QYJ 实机验证 v6 验收标准（prd.md）——**评审门**
+
+## v7 步骤清单（2026-09-20：直接考试 + 总结确认 + 布局修正 + 单字直读，见 prd.md v7 / design.md §12）
+
+1. [x] `StudyRepository.kt`：删 markSeen/wasSeenToday/appendQueue/DayState.seen（旧 JSON seen 键忽略）；DailyQueue + `confirmed`（缺省 false，读写对称）+ `markConfirmed()`。**偏离记录**：markKnown 由 v6 R12 连击（满 3 才写间隔层）改回首答定调度（作答即写，prd v7 第 1 条明文口径）——每词每日恰好一张考试卡后连击满 3 永远不可达，不改则间隔层永不写入、调度死亡；SM-2/ease/restoreTo/闸门/f30 全部保留
+2. [x] `AppRoot.kt`：browseMode 会话态 + rec 装载 confirmed 分支；删 taught/appendReviewCard/markSeen 调用/charFor/CharSheet/blockingIndex 及拦截分支；isPending 收窄；userScrollEnabled 锁滑；onConfirmDone（markConfirmed + 清 pages + 温故流 + 播报）；browseMode 短路 syncDonePage；NEW 考试卡播报文案（NEW_EXAM_SPEECH）；onSpeakWord 接线（读词不带提示）；顶部 KDoc 契约同步；翻页落库 effect 按 browseMode 分流（browseMode 不写队列位置、走池型无限追加）
+3. [x] `TermCard.kt`：isExam = mode != FREE；onCharClick → onSpeakWord()；FlowRow 换行 + 字号档（64/54/44/36）+ 词区/拼音区 end 56dp 预留星位
+4. [x] `DoneCard.kt`：onConfirm 参数 + 大号确认按钮（92dp ≥ 88dp，居中大字）；去「继续上滑」文案与 SwipeHint（锁滑后误导）
+5. [x] 删除 `ui/Sheets.kt`（仅含 CharSheet）
+6. [x] 静态自检：Grep markSeen/wasSeenToday/appendQueue/CharSheet/charFor/blockingIndex/taught 零残留（含注释，README.md 除外——禁改清单内）；when 穷尽（Page 三分支）；导入核对（删 TermChar、加 FlowRow/ExperimentalLayoutApi）；括号配平（脚本核验全部 .kt = 0）；JSON 读写对称核验（confirmed put/opt 各 1、seen 只在注释出现）；不碰包名 com.knowmo.app 与 prototype/
+7. [ ] QYJ 实机验证 v7 验收标准（prd.md）——**评审门**（与 v6 步骤 10 一并验证）
+
+## v8 步骤清单（2026-09-20：连击回归 + 最小间隔插入 + 全显拼音 + 封顶分级，见 prd.md v8 / design.md §13）
+
+1. [x] `StudyRepository.kt`：DayState.counts 恢复连击计数（markKnown `min(3, +1)` / markForgot `0`）+ `comboCount(id)`；markKnown 返回 Triple(count, upgraded, daysAfter)、markForgot 返回 count；新增 `repeatCard(id, afterIndex)`（MIN_GAP=2，insertAt=min(afterIndex+1+MIN_GAP, size)，queue/modes/answered 三数组同步插入 + persist，返回 insertAt）；f30 去重（`id in currentDay().counts` 跳过 recordF30）；`nextInterval(prevDays, ease, lapses)` 签名改造 + `INTERVAL_CAP_NORMAL=30` / `INTERVAL_CAP_MATURE=60`（ease≥2.5 且 lapses==0 → 60）+ `DAILY_COMBO_TARGET=3`；KDoc 全部按 v8 口径校准。**执行记录**：首轮子代理网络断线（copilot.tencent.com 502×3），主体由子代理完成、companion 常量与注释收尾由主会话补齐
+2. [x] `AppRoot.kt`：answer() 连击分流（count<3 → insertRepeatCard：repeatCard + pages 同下标插 TermPage(REVIEW)；播报按剩余次数分级：1→再认对 2 次 / 2→再认对 1 次 / 3→学会啦+升级天数；忘了→再学一遍且当日必重现）；cardSpeech 统一 termSpeech（删 EXAM_TAP_HINT_SPEECH / NEW_EXAM_SPEECH / examUnanswered 分流）；删 peeked/onPeek；revealed 收窄为已作答；顶部 KDoc 契约同步 v8
+3. [x] `TermCard.kt`：删考试隐藏态与 peek 按钮（所有卡恒全展开，拼音/提示无条件渲染）；√/× 仅 mode != FREE 渲染；badge 新学/复习保留；DoneCard.kt 过期注释同步
+4. [x] 静态自检：Grep EXAM_TAP_HINT_SPEECH / NEW_EXAM_SPEECH / peeked / onPeek / showAnswer 零残留（仅 KDoc 历史记录有意保留）；repeatCard/nextInterval/markKnown/markForgot 调用点签名全部匹配；括号/圆括号配平脚本核验 12 个 .kt 全平衡（research/brace_check_v8.py）；counts JSON 读写对称（persist/load 未动，结构不变）；插入点不变量走查（pages 任务卡区与 queue 一一对应，Done 卡共存 pending>0 不可达）
+5. [ ] QYJ 实机验证 v8 验收标准（prd.md）——**评审门**（与 v6/v7 评审门一并验证）
+
+## 面馆词库并入「吃饭」分区（2026-09-20，QYJ 新需求；**不占 v 编号**）
+
+> ⚠️ 本节**不叫 v9**：v9 已被 QYJ 的迭代占用（prd.md:230「任务卡静默自评 + 完成卡上滑转浏览 +
+> 推荐范围收窄 + 常用词默认分区」，其实现见 `WordBank.DAILY_COMMON` / `StudyRepository.CHANNEL_COMMON`）。
+> 本节记录的是与那条迭代并行的**纯词库内容探索**，改动只有词条与计数，无调度逻辑。
+
+> 需求原话：妈妈在成都面馆工作（主营炸酱面/米线/抄手），要一个面馆场景词库作为生活分区。
+> **同日改判**：先按独立分区 `noodle` 接入（34 条），随后 QYJ 指示「把面馆的内容移动到吃饭」——
+> 独立分区撤销，词条并入 `food`。属**追加词条**、不新增分区，prd.md 未列。
+> 词条内容、收录口径、两次落位沿革与判定依据见 `research/vocab/scene_noodle.md`。
+
+1. [x] 词条创作与机器校验（`research/vocab/`）：34 条面馆词组 —— 招牌面名 9 / 抄手加料 3 / 分量 3 / 辣度 4 / 成都行话 4（免青·加青·干拌·宽汤）/ 客人用语 1 / 店内流程 4 / 后厨食安 4 / 打烊与告示 2。校验项：字数↔音节配对、id 唯一性、scene 字段一致、组内重词、pypinyin 对照、3500 常用字覆盖（超纲仅 `烊`，与既有 `驿` 同档）。脚本 `validate_scene.py` 可复跑（对原稿）。
+2. [x] 两处人工判定并留档：**「担担面」`dān`→`dàn`**（因旧时挑担 dàn 叫卖得名，《现代汉语词典》/汉典；pypinyin 判对、初稿判错）；**「牛肉面」→「鸡杂面」**（前者与既有 `food-1` 完全重词，改用更具成都本地性的浇头名，同时净增一个词面孔）。有意保留 2 处不改 pypinyin 的语流变调：`干拌 gān bàn`（与库内「干净」同源）、`不要辣 bù yào là`（与库内「不要乱动」沿用同一注音惯例）。
+3. [x] ~~第一版接入：新增独立分区 `noodle`（`SCENES` + `NOODLE` 34 条 + `STUDY_TERMS`），全库 402 条 / 13 分区~~ —— **已按步骤 6 撤销**，留档备查；此版从未 commit、从未构建。
+4. [x] trellis-check 独立复核第一版（Agent 形式）：**P0 无、P1 无**。确认 402 条 `scene` 全在 `SCENES` 内（`ICON.getValue` 无启动崩溃）、逐字配对 402/402、既有 368 条零改动零删除、id 全库唯一、`AppSettings` 补尾兼容确无数据迁移、ChannelBar 零 UI 改动、🥢=U+1F962 与在用 🛒 同属 Unicode 9.0（API 26 可渲染）。
+5. [x] 连带修正第一版被改动**变旧**的 3 处注释：`AppRoot.kt:88`、`StudyRepository.kt:88`「12 个场景分区」→13；`StudyRepository.kt:529`「n ≤ 368」→402。
+6. [x] **第二版（现行）：并入 `food` 分区** —— 删 `Scene("noodle", …)`、删 `NOODLE` 列表、`STUDY_TERMS` 还原；33 条以 `food-33` … `food-65` 追加在 `FOOD` 末尾（原 `food-1`…`food-32` 未动），插入处留一行来源注释；KDoc 改「12 场景 401 词条」；README 计数 402→401、场景数 13→12、频道清单去「面馆」；步骤 5 的 3 处注释回退（场景数回 12、`n ≤ 401`）。
+   - **「微辣」剔除**：`food-2` 已是「微辣」，同分区内两条一样的词 = 学习单元重复（硬缺陷），故并入 33 条而非 34。辣度留 `中辣`/`特辣`/`不要辣` 三条。
+   - id 重编号为 `food-33`…`food-65` 安全：`noodle-*` 从未 commit、从未构建，不存在已落盘的学习状态（`TermState` 按 id 挂靠）。
+7. [x] 不变量复核（`check_wordbank_invariants.py`，通用脚本，取代第一版的一次性脚本 `check_noodle_integration.py`）：总词条 **401**、`SCENES` 13 项（rec + 12）、`food` 65 条、逐字配对 401/401、id 全库唯一、**孤儿 scene 0**、分区内重词 0、id 前缀 == scene 0 处不符、跨分区重词 1 组（`身份证` bank-16 / gov-2，既有）、pypinyin 差异 11 处（全库既有口径，非本次引入）。**结构性不变量全过**。
+8. [ ] **QYJ 待裁定（2 项）**：
+   - ① `README.md` 在 v8 步骤 4 的禁改清单内，两次接入均为**文档同步**而动 —— 依据项目文档观「行为变了必须同步文档，否则视为待修缺口」，但确属越出 v8 派单范围，需 QYJ 认可或回退。
+   - ② README 其余 v7/v8 漂移**不在本次范围**，未动：仍列 v7 已删的 `ui/Sheets.kt`、缺 `AppSettings.kt`/`SettingsScreen.kt`、「无设置页、无生词本」与 v6–v8 实装矛盾。是否另起一轮同步。
+9. [ ] 实机验证：本机无 JDK/SDK，**未编译**。需随 v6/v7/v8 评审门一并走查 —— 「吃饭」频道词条数变 93 后抽卡/队列表现正常、面馆类词条的朗读与逐字拼音正确。
+
+### 面馆补充词（2026-09-20 追加，**已定稿并接入 v11**）
+
+QYJ 两轮输入：
+- 第一轮「面馆相关的词还不够，比如牛肉面、大碗、小碗、少盐、少辣椒、不要香菜、不要葱、不要鸡精、味精等」，
+  并明确要求**先审查再添加** → 出 v1（43 条平铺）。
+- 第二轮给出**筛选口径**：「这些那些通常是口诉的，那些通常接触到是文字？感觉忌口和口味和调味品名词比较重复，学会调味品就差不多了」
+  → 出 v2，按渠道重新分桶。
+
+**v2 确立的口径（本任务的核心判据，后续补词沿用）**：
+> **这个词会不会以文字形式出现在她眼前、需要她认出来。**
+> **文字桶（T）**：印在包装/罐子上、挂在墙上、打在单子上 → 收录价值高，这正是识字要解决的问题。
+> **口语桶（S）**：只在人嘴里来回传，她不看这些字也能干活 → 收录价值低，不收。
+
+**v2 名单：51 条候选 = 文字桶 38（建议收）+ 口语桶 13（判定不收）**
+- T1 后厨调料干货 12：盐 / 糖 / 醋 / 味精 / 鸡精 / 花椒 / 胡椒 / 酱油 / 香油 / 料酒 / 淀粉 / 豆瓣酱（**「学会调味品就差不多了」的落点**）
+- T2 食材与浇头 7：香菜 / 葱花 / 泡菜 / 酸菜 / 煎蛋 / 冰粉 / 凉糕
+- T3 规格与价目 6：小碗 / 半份 / 加面 / 清汤 / 红汤 / 原汤
+- T4 告示与证照 6：招牌 / 价目表 / 营业中 / 自助调料 / 明厨亮灶 / 卫生许可证
+- T5 后厨与桌前物件 7：围裙 / 抹布 / 洗洁精 / 保鲜膜 / 一次性筷子 / 牙签 / 纸巾
+- S1 忌口与口味 11 + S2 分量说法 2 → **整组不收**（v1 的 A 组 11 条整句由此降级；B 组的 `小碗/半份/加面` 因在价目表上是字而上移 T3，`少面/加汤` 降级）
+
+- 三档规模曾供选：最小 20 / 推荐 38（T 全收）/ 全套 43（+外卖备注 5）。
+- 材料：`research/vocab/scene_noodle_extra.md`（审查稿 + 裁定记录）、`scene_noodle_extra.fragment.kt`（接入来源记录，逐字节比对通过）、
+  `_scene_noodle_extra_check.md`（机器校验）、`build_scene_noodle_extra.py`（单一数据源，改一处三份产出同步）。
+- 校验：51/51 逐字配对；与当时词库精确重词 **0**；3500 常见字**零超纲**；无声调拼音 1 处（`筷子` 的子＝轻声，正确）；pypinyin 差异 7 处全部判定为**有意保留**（6 处「不」写本调 `bù` ＋ 1 处「一」写 `yī`，均与库内既有词条同惯例）。
+- **QYJ 举例中 2 个库里已有，不重复收录**：`牛肉面` = `food-1`、`大碗` = `food-26`（同分区重词＝硬缺陷）。
+
+**QYJ 裁定（2026-09-20，三条）**：
+- ① **按推荐方案收** —— 文字桶 38 条全收。
+- ② 店里有外卖，但**不单收备注整句** —— 备注都是围绕食物/调料的说法，**名词已在库中，重复无益**（收了「香菜」就不收「不要香菜」）。
+- ③ **不拆独立分区** —— 「不管吃面、还是在馆子上班，学习这些词都是没问题的」，仍并入 `food`。
+
+**执行结果（v11）**：38 条作为 `food-66` … `food-103` 并入 `FOOD` 末尾 → `food` 55 → **93 条**，全库 379 → **417 条**。
+同步 4 处计数：WordBank KDoc（升 v11、417）、`README.md` L35/L36、`StudyRepository.kt` L543（`n ≤ 417`）。
+`food` 空号 `[3,7,9,17,25,31,32,50,55,59]` **未回填**（id 永不复用，回填会让新词继承旧学习状态）。
+trellis-check 复核：**P0 = 0**；38 条与来源片段逐字节 `identical True`；417/417 配对；孤儿 scene 0；分区内重词 0。
+
+**P1 已修（QYJ 点头，2026-09-20）**：
+- `food-26`「大碗」说明原为器皿义（「装面装汤的家伙」），与新增 `food-85`「小碗」的份量义（「分量小的那种碗」）**同一根轴两侧释义打架**。已改为「**分量大的那种碗，饭量大的点这个**」——与 `小碗` 对仗、与 `一两/二两/三两/半份` 成组。**只改 `tip` 字段**，text / pinyin / id 一字未动（不影响 `TermState`）。
+- （`盐`/`糖`/`醋` 单字词条随「推荐」方案一并认可，已接入。）
+
+### 遗留观察项（不阻断，供下轮决策）
+
+- **`food` 分区 93 条**（12 个场景分区里最大，其余 17–32 条），同一频道内既有下馆子吃饭的词、也有面馆行话与后厨食安。**QYJ 已明确裁定不拆**（2026-09-20 第 ② 条），故不再作为待办，仅记录规模事实。
+- **原稿的语义分组线索**：`FOOD` 尾部保留了两行来源注释（`v11` 块按调料罐/菜单/价目表/告示/物件分 5 组）。池型频道加权随机抽卡、展示顺序本就随机，不影响使用。
+- ~~`food-16 不辣` 与 `food-50 不要辣` 的教学语义重叠~~ → **已随 v10 口水话清理消失**：`food-50 不要辣` 已被 QYJ 删除（口说类）。现库内仅存 `food-16 不辣`。
+
+## v12 步骤清单（2026-09-20：家电分区词库 + 新增分区默认隐藏口径）
+
+> 需求：QYJ「添加一个家电分区、主要包含各种电器上可能出现的文字，帮助老人学习各种电器的使用」；
+> 追加拍板「家电分区默认隐藏是对的，不管新装还是升级，都需要设置开启分区才行」。
+> 设计见 design.md §15；词库契约见 `.trellis/spec/frontend/wordbank-guidelines.md`。
+
+1. ✅ 词库：`WordBank.kt` 新增 `APPLIANCE` 63 条（`appliance-1..63`，12 组）+ `STUDY_TERMS` 并入；`StudyData.kt` SCENES 插 `Scene("appliance","家电","🔌",0xFFF0F4C3)`（property 与 emergency 之间）。全库 417 → 480。
+2. ✅ 计数同步 4 处：`WordBank.kt` KDoc（升 v12）/ `README.md` 两行 / `StudyRepository.kt` L89、L543 / `.trellis/spec/frontend/component-guidelines.md` 池型契约。
+3. ✅ 词库校验：`research/vocab/check_wordbank_invariants.py` → `terms=480` / `fails=0` / `orphan=[]` / `intra_dup=[]`。
+4. ✅ 留档：`research/vocab/build_scene_appliance_doc.py` → `scene_appliance.md`（**由 `WordBank.kt` 派生**，不是手工原稿，故不构成回退风险）。
+5. ✅ **设置口径（本轮唯一行为改动）**：`AppSettings.load()` L104/L124 —— 存储 `order` 里不存在的分区默认隐藏（design.md §15.1）。无 schema 变化、无迁移。
+6. ✅ 静态校验：`research/vocab/check_appsettings_load.py` → `_appsettings_load_check.md`。两段：① **静态断言 6 条**（代码里真有那条判定 + 判定必须排在 `hidden.clear()` 之后；防「文档写了代码没写」和「上移即静默失效」）② **语义模拟 8 个场景**（新装机 / 升级自 v6–v8 / 升级自 v9–v11 / 用户已开启 appliance / 全开 / order 缺失 / 未知 id / order 类型错），每个场景同时算新旧口径并对比差异。结果 `static_fails=0 case_fails=0`；S2/S3/S7 有差异证明**改动确实生效**，S4/S5 无差异证明**用户选择不被覆盖**。
+7. ✅ **校验脚本自身的加固 + 变异测试**（质检 agent 实测出来的洞）：脚本首版把差异列算成 `new - old`，而断言写的是 `old != new` —— 该条件**照样为真**，于是每行差异都显示「无」、报告却全绿。已把断言改绑到**差异列本身非空**，并加 `_mutate_test_diffdir.py` 做变异测试（把方向改回反向 → 期望失败）：实测 `case_fails=3`（恰好 S2/S3/S7），未变异版本仍绿。**教训：断言必须绑定「呈现出来的那个量」，否则拦不住它自称要拦的回归。**
+8. ✅ 质检整改（trellis-check，P0=0）：修本清单自身漏掉的 2 处旧口径 —— `design.md` §14.2「新分区自动出现在设置页**与频道栏**」加作废标注；`prd.md` v12 验收 #2 补限定（此前已开启过分区的机器升级后**这些分区保持可见**，与 §15.2「用户显式选择优先」对齐）。另在 `AppSettings.persist()` 加前提注释（`order` 必须是完整全集，§15.1 的推理依赖它）。
+9. ⬜ **实机走查（本机无 JDK/SDK，未编译）**：
+   - 频道栏默认只有推荐 + 收藏（新装 / 升级两条路径都验）；
+   - 设置页能看到「家电」分区且可开启，开启后重启仍可见；
+   - `appliance-32 请勿用水冲洗` 是**全库第一条 6 字词条**，首次触发 TermCard 的「≥6 字」布局分支（36sp + `FlowRow` 换行 + 右缘 56dp 星位预留）。
+10. ⬜ **待 QYJ 裁定（不阻断）**：`android-app/README.md` 既有漂移仍未处理（L43 仍列 v7 已删的 `Sheets.kt`、缺 `AppSettings.kt`/`SettingsScreen.kt`；L51「点单字开字卡弹层」v7 已删；频道清单未含「家电/常用词/收藏」；L56「无设置页、无生词本」与 v6–v12 实装矛盾）。另注意：`git ls-files` 显示 `app/src/main/java/com/knowmo/**` **整个源码树未被 git 跟踪**（`com/qyj/shibang/*` 显示为 `D`）—— 提交前需先 `git add` 新路径。

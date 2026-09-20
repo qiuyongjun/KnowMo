@@ -1,4 +1,4 @@
-# 慢慢懂 Mando（安卓版）
+# 认识么 KnowMo（安卓版）
 
 > Learn life, one word at a time. —— 学生活，从认一个字开始。
 
@@ -29,11 +29,11 @@ cd android-app && gradle wrapper --gradle-version 8.7
 ## 目录结构
 
 ```
-app/src/main/java/com/qyj/shibang/
+app/src/main/java/com/knowmo/app/
 ├── MainActivity.kt            # 入口：装配 TTS 与仓库
 ├── data/
-│   ├── StudyData.kt           # 数据模型 + 场景频道定义（推荐聚合 + 12 个场景）
-│   ├── WordBank.kt            # 词库：12 个场景共 368 条生活词组（含逐字拼音）
+│   ├── StudyData.kt           # 数据模型 + 场景频道定义（推荐聚合 + 13 个场景 + 常用词）
+│   ├── WordBank.kt            # 词库：14 个分区共 509 条生活词组（13 个场景 493 条 + 常用词 16 条，含逐字拼音）
 │   └── StudyRepository.kt     # 记忆状态（TermState + lapses）/ 每日队列持久化 + 调度（v5 R11 首答定调度：当日首答即写间隔层、作答后不追加；间隔阶梯 1→3→7→15→30；毕业判定固定 15；due ≥ 20 进清债模式；新词交错编排；f30 观测计数）
 ├── tts/TTSSpeaker.kt          # Android TTS 封装（中文、语速 0.85、就绪前排队）
 └── ui/
@@ -45,7 +45,7 @@ app/src/main/java/com/qyj/shibang/
     └── theme/Theme.kt         # 适老化设计 token（高对比配色）
 ```
 
-## 交互契约（与已评审网页原型一致）
+## 交互契约
 
 1. **上下滑学习**：每屏一张学习卡，snap 吸附；卡片进入视口自动朗读（每卡一次）。
 2. **生活词组**：如"地铁站"整体学习，配逐字拼音与生活用途说明；点单字开字卡弹层（组词联想）。

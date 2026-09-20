@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pypinyin import Style, pinyin as pp
 
-BASE = r"D:\QYJ\MyProject\Mando"
+BASE = r"D:\QYJ\MyProject\KnowMo"
 VB = os.path.join(BASE, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang", "data", "WordBank.kt")
 SD = os.path.join(BASE, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang", "data", "StudyData.kt")
 OLD = os.path.join(BASE, ".trellis", "tasks", "09-17-elderly-literacy-app", "research", "review", "old_StudyData.kt")

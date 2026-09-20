@@ -4,7 +4,7 @@
 import os
 import re
 
-ROOT = r"D:\QYJ\MyProject\Mando"
+ROOT = r"D:\QYJ\MyProject\KnowMo"
 TASK = os.path.join(ROOT, ".trellis", "tasks", "09-17-elderly-literacy-app")
 SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang")
 

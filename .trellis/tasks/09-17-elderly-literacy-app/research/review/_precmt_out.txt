@@ -1,0 +1,58 @@
+== A. modified tracked files ==
+  M .trellis/spec/frontend/component-guidelines.md
+  M .trellis/spec/frontend/index.md
+  M .trellis/spec/frontend/state-management.md
+  M .trellis/spec/frontend/type-safety.md
+  M .trellis/tasks/09-17-elderly-literacy-app/design.md
+  M .trellis/tasks/09-17-elderly-literacy-app/implement.md
+  M .trellis/tasks/09-17-elderly-literacy-app/prd.md
+  M .trellis/tasks/09-17-elderly-literacy-app/research/review/audit_wordbank.py
+  M .trellis/tasks/09-17-elderly-literacy-app/research/review/check_v3_docs.py
+  M .trellis/tasks/09-17-elderly-literacy-app/research/review/check_v3_imports.py
+  M .trellis/tasks/09-17-elderly-literacy-app/research/review/check_v3_static.py
+  M .trellis/tasks/09-17-elderly-literacy-app/research/review/check_v3_symbols.py
+  M .trellis/tasks/09-17-scheduling-v5/research/mechanism-sim.py
+  M android-app/README.md
+  M android-app/app/build.gradle.kts
+  M android-app/app/src/main/res/values/strings.xml
+  M android-app/settings.gradle.kts
+  M readme.md
+
+== B. counting sync points ==
+WordBank KDoc first line: package com.knowmo.app.data
+StudyRepository L543: *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n ≤ 509）且边界更少。 */
+README L36: │   ├── WordBank.kt            # 词库：14 个分区共 509 条生活词组（13 个场景 493 条 + 常用词 16 条，含逐字拼音）
+component-guidelines L113: - **加权随机（分区）**：`w = 1 + 2×lapses + min(距上次学习天数, 60)/30`，未学词固定 `SCENE_NEW_WEIGHT = 2.0`；用 Efraimidis–Spirakis 指数键（`key = -ln(u)/w`，升序）实现无放回加权抽样，`u = 1.0 - random` 防 `ln(0) → +Inf`（O(n log n)，n ≤ 509，比轮盘逐个抽更少边界）。**只读**：权重计算不写任何状态。
+
+== C. stale references in live code+docs ==
+[old package] 0 hits
+[old theme] 0 hits
+[old proj name in android/readme] 0 hits
+[Sheets.kt ref] 1 hits
+    android-app\README.md:43: ├── Sheets.kt              # 字卡弹层（ModalBottomSheet）
+[12 个场景] 0 hits
+[stale 368] 0 hits
+[stale 417] 0 hits
+[stale 480] 0 hits
+[stale 431] 0 hits
+[stale 401] 0 hits
+
+== D. brace balance / import usage (new tree) ==
+kt files: 12
+  android-app\app\src\main\java\com\knowmo\app\MainActivity.kt     OK
+  android-app\app\src\main\java\com\knowmo\app\data\AppSettings.kt OK
+  android-app\app\src\main\java\com\knowmo\app\data\StudyData.kt   OK
+  android-app\app\src\main\java\com\knowmo\app\data\StudyRepository.kt OK
+  android-app\app\src\main\java\com\knowmo\app\data\WordBank.kt    OK
+  android-app\app\src\main\java\com\knowmo\app\tts\TTSSpeaker.kt   OK
+  android-app\app\src\main\java\com\knowmo\app\ui\AppRoot.kt       unused import: getValue; unused import: setValue
+  android-app\app\src\main\java\com\knowmo\app\ui\Common.kt        unused import: getValue; unused import: setValue
+  android-app\app\src\main\java\com\knowmo\app\ui\DoneCard.kt      OK
+  android-app\app\src\main\java\com\knowmo\app\ui\SettingsScreen.kt OK
+  android-app\app\src\main\java\com\knowmo\app\ui\TermCard.kt      OK
+  android-app\app\src\main\java\com\knowmo\app\ui\theme\Theme.kt   OK
+
+== E. gradle/appid ==
+android-app/app/build.gradle.kts:8: namespace = "com.knowmo.app"
+android-app/app/build.gradle.kts:12: applicationId = "com.knowmo.app"
+android-app/settings.gradle.kts:16: rootProject.name = "KnowMo"

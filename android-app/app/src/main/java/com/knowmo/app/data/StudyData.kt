@@ -1,0 +1,54 @@
+package com.knowmo.app.data
+
+import androidx.compose.ui.graphics.Color
+
+/** 单字 + 拼音 */
+data class TermChar(val c: String, val p: String)
+
+/**
+ * 学习单元 = 生活词组（不是单字）。
+ * kind/days 不在此存储：新学/复习/温故由 StudyRepository 调度器按
+ * TermState（间隔天数 + 上次学习日期 + 遗忘史，v5 R11 首答定调度：当日首答「认识」即写本状态）在运行时计算。
+ * 词条内容见 WordBank.kt。
+ */
+data class Term(
+    val id: String,
+    val scene: String,
+    val icon: String,
+    val text: String,
+    val chars: List<TermChar>,
+    val tip: String,
+)
+
+data class Scene(val id: String, val name: String, val icon: String, val color: Color)
+
+val SCENES = listOf(
+    Scene("rec", "推荐", "⭐", Color(0xFFEDE7F6)),
+    // v9（prd 第 4 条）：常用词默认分区——日常生活高频字词、非固定场景。在 SCENES 里
+    // （设置页可显隐、参与分区毕业），但 AppSettings 缺省隐藏；其词由 StudyRepository
+    // 特例（CHANNEL_COMMON）恒入推荐范围——默认只有推荐+收藏两个频道时推荐才有内容。
+    Scene("daily", "常用词", "🔤", Color(0xFFE0F7FA)),
+    Scene("market", "买菜", "🛒", Color(0xFFE8F5E9)),
+    Scene("transit", "公交地铁", "🚌", Color(0xFFE3F2FD)),
+    Scene("hospital", "医院", "🏥", Color(0xFFFFEBEE)),
+    Scene("bank", "银行", "🏦", Color(0xFFFFF8E1)),
+    Scene("gov", "办事", "🏛️", Color(0xFFF3E5F5)),
+    Scene("food", "吃饭", "🍜", Color(0xFFFFF3E0)),
+    Scene("phone", "手机微信", "📱", Color(0xFFE8EAF6)),
+    Scene("medicine", "药品说明", "💊", Color(0xFFE0F2F1)),
+    Scene("express", "快递驿站", "📦", Color(0xFFEFEBE9)),
+    Scene("property", "物业水电", "🏠", Color(0xFFECEFF1)),
+    Scene("appliance", "家电", "🔌", Color(0xFFF0F4C3)),
+    Scene("emergency", "紧急求助", "📞", Color(0xFFFBE9E7)),
+    Scene("weather", "天气日历", "📅", Color(0xFFE1F5FE)),
+)
+
+fun sceneColor(id: String): Color = SCENES.firstOrNull { it.id == id }?.color ?: Color(0xFFF5F7FA)
+
+/**
+ * v6：收藏频道（`fav`）**不进 SCENES**——否则会被当成可调度场景参与分区毕业判定（design.md §11.1），
+ * 频道播报名在此显式映射。
+ */
+fun sceneName(id: String): String =
+    if (id == StudyRepository.CHANNEL_FAV) "收藏"
+    else SCENES.firstOrNull { it.id == id }?.name ?: ""

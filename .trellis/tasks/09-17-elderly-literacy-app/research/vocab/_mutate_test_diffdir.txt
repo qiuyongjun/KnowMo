@@ -1,0 +1,8 @@
+变异：d = [i for i in vis_new if i not in vis_old]  →  d = [i for i in vis_old if i not in vis_new]
+变异体实跑输出：static_fails=0 case_fails=3 manageable=14 | -> D:\QYJ\MyProject\Mando\.trellis\tasks\09-17-elderly-literacy-app\research\vocab\_appsettings_load_check.md
+✓ 变异体 case_fails=3（>0）—— 断言**拦住了**差异列反向的回归
+
+未变异版本：static_fails=0 case_fails=0 manageable=14 | -> D:\QYJ\MyProject\Mando\.trellis\tasks\09-17-elderly-literacy-app\research\vocab\_appsettings_load_check.md
+✓ 未变异版本仍全绿（加固没有误伤真身）
+
+**结论：变异测试通过 —— 该断言确实生效**

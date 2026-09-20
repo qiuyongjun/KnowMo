@@ -1,0 +1,8 @@
+鍙樺紓锛歞 = [i for i in vis_new if i not in vis_old]  鈫? d = [i for i in vis_old if i not in vis_new]
+鍙樺紓浣撳疄璺戣緭鍑猴細static_fails=0 case_fails=3 manageable=14 | -> D:\QYJ\MyProject\Mando\.trellis\tasks\09-17-elderly-literacy-app\research\vocab\_appsettings_load_check.md
+鉁?鍙樺紓浣?case_fails=3锛?0锛夆€斺€?鏂█**鎷︿綇浜?*宸紓鍒楀弽鍚戠殑鍥炲綊
+
+鏈彉寮傜増鏈細static_fails=0 case_fails=0 manageable=14 | -> D:\QYJ\MyProject\Mando\.trellis\tasks\09-17-elderly-literacy-app\research\vocab\_appsettings_load_check.md
+鉁?鏈彉寮傜増鏈粛鍏ㄧ豢锛堝姞鍥烘病鏈夎浼ょ湡韬級
+
+**缁撹锛氬彉寮傛祴璇曢€氳繃 鈥斺€?璇ユ柇瑷€纭疄鐢熸晥**

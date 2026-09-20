@@ -1,0 +1,3 @@
+static_fails=0 case_fails=0 manageable=14
+-> D:\QYJ\MyProject\Mando\.trellis\tasks\09-17-elderly-literacy-app\research\vocab\_appsettings_load_check.md
+exit=0

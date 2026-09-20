@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ShibangHelper"
+rootProject.name = "KnowMo"
 include(":app")

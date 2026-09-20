@@ -5,7 +5,7 @@ import os
 import re
 from collections import defaultdict
 
-ROOT = r"D:\QYJ\MyProject\Mando"
+ROOT = r"D:\QYJ\MyProject\KnowMo"
 SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang")
 
 files = {}
@@ -41,7 +41,7 @@ for fp, txt in files.items():
         if len(kws) > 1:
             dup.append((os.path.relpath(fp, SRC), name, kws))
 
-print("== 项目内 import 解析（com.qyj.shibang.*） ==")
+print("== 项目内 import 解析（com.knowmo.app.*） ==")
 bad = 0
 for fp, txt in sorted(files.items()):
     for m in re.findall(r"^import\s+(com\.qyj\.shibang\.[\w.]+)(?:\s+as\s+(\w+))?", txt, re.M):

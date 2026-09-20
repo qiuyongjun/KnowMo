@@ -341,3 +341,189 @@ isSceneGraduated(scene) = 该场景所有词 termStates[id]?.days == GRADUATED_D
 - **滑动 vs 点击翻页**：选择滑动（已被短视频市场教育的习惯，单指大面积操作）；snap + 大卡片降低误操作代价。风险：部分高龄用户首次需引导——完成卡/空态有语音引导文案。
 - **词组学习 vs 单字学习**：词组贴近真实识别场景（看牌子认整体），但泛化能力弱于单字。字卡弹层（点单字看组词例句）作为补充路径保留。
 - **语音依赖**：浏览器无 zh voice 时降级为视觉反馈；Android TTS 内置中文，工程阶段风险消除。
+
+## 11. v6 设计追加（2026-09-20：隐藏设置入口 + 收藏分区）
+
+> 需求与验收见 prd.md「v6 交互修订」。改动仅限 `android-app/`。
+
+### 11.1 数据层
+
+- **新文件 `data/AppSettings.kt`**：独立于 StudyRepository 的设置仓库。
+  - 自有 SharedPreferences（`app_settings`）+ 单个 JSON key：`{"order": [sceneId...], "hidden": [sceneId...], "quota": 10}`。
+  - 默认值：`order` = `SCENES` 固有顺序（排除 rec）、`hidden` = 空、`quota` = 10。
+  - 对外暴露：`visibleScenes(): List<Scene>`（按 order 过滤 hidden，返回 Scene 列表）、`setSceneVisible(id, visible)`、`moveScene(id, delta)`（-1 上移 / +1 下移，边界裁剪）、`quota(): Int`、`setQuota(n)`。
+  - rec 与 fav 不进 order/hidden 集合；order 中出现未知 id 忽略（兼容口径）。
+- **`StudyRepository.kt` 增量**：
+  - `CHANNEL_FAV = "fav"` 常量（与 `CHANNEL_DAILY` 并列）。
+  - 收藏持久化：主 `state` JSON 顶层新增 `"favorites": [termId...]`（**有序数组**，LinkedHashSet 保存）；旧 JSON 无此键 → 缺省空集，无需迁移。
+  - API：`favorites(): List<String>`、`isFavorite(id): Boolean`、`toggleFavorite(id)`（返回收藏后的新状态；写后 persist）。
+  - `scopeIds("fav")` = 收藏词 id 列表（有序，不洗牌——洗牌交给池型抽取）；`poolIds("fav")` = `weightedShuffle(收藏 ids)`（与场景分区同一加权逻辑）。
+  - `graduatedScenes()` / `isSceneGraduated` 天然不含 fav（fav 不在 `SCENES`），保持不动。
+  - 配额注入：`StudyRepository` 构造函数新增 `quotaProvider: () -> Int`（MainActivity 组装：`{ appSettings.quota() }`）；`buildQueue` 的 `DAILY_POOL_QUOTA` 改读 `quotaProvider()`。常量 10 保留为缺省值。**当日队列冻结语义不变**：配额只在重建队列时被读。
+- **`StudyData.kt`**：`sceneName("fav")` 需返回「收藏」——fav 不进 `SCENES`（否则会被当成可调度场景），在 `sceneName` 加显式映射（`CHANNEL_FAV -> "收藏"` 或字面量）。
+
+### 11.2 UI 层
+
+- **`Common.kt` `ChannelBar`**：签名改为接收 `scenes: List<Scene>`（设置过滤排序后的可见场景分区）、`onOpenSettings: () -> Unit`。
+  - 渲染顺序：推荐（`CHANNEL_DAILY`）→ 收藏（`CHANNEL_FAV`，图标 ⭐ 名「收藏」）→ 可见场景分区。前两个固定渲染。
+  - **连点检测**：推荐 tab 内部 `remember` 计数 + 上次点击时间；点击间隔 > 2s 重置；计满 5 次回调 `onOpenSettings` 并清零。每次点击照常 `onSelect(rec)`。
+  - 收藏 tab 无 🎓 逻辑（不参与毕业）。
+- **`TermCard.kt`**：新增参数 `isFavorite: Boolean`、`onToggleFavorite: () -> Unit`。
+  - 卡片主体外层包 `Box`：右缘垂直居中放星按钮（抖音式右侧动作栏）；`Modifier.clickable` 自消费 + 不冒泡到卡片 `onSpeakTerm`。
+  - 视觉：藏 = ★ 金色（#F9A825 系），未藏 = ☆ 灰；字号 ≥ 40sp、触控 ≥ 64dp。
+  - 所有卡型（NEW/REVIEW/FREE）都渲染星按钮；复习卡考试态也不隐藏（收藏与考试互不干扰）。
+- **新文件 `ui/SettingsScreen.kt`**：全屏 overlay（`AppRoot` 内 `var showSettings` 控制条件渲染，覆盖整个 Column）。
+  - 白底大字列表：①「每日学习词数量」单选行组（3/5/10/15/20，大按钮，选中高亮，附「明天生效」小字）；②每个场景分区一行：名称 + 显示开关（大按钮「显示/隐藏」）+ 「↑」「↓」上下移按钮；③底部「完成」大按钮关闭。
+  - 触控 ≥ 64dp、字号 ≥ 22sp，配色沿用主题常量。
+- **`AppRoot.kt`**：
+  - `channel` 装载分支不变——fav ≠ `CHANNEL_DAILY` 自然落入**池型分支**（`appendPoolPages`），无需新增类型。
+  - `poolIds("fav")` 空池（无收藏）→ `appendPoolPages` 拿不到卡：此时 `pages` 为空会白屏，需插入**引导页**：`Page.Guide`（新 sealed 分支，大字引导文案，停稳播报同文案）。仅 fav 空池可达；场景分区池必非空不受影响。
+  - 星按钮回调 → `repo.toggleFavorite(p.t.id)` → 本地状态刷新（用 `mutableStateMapOf`/state 持有收藏集合快照供 TermCard 重组；频道内取消收藏**不重排**已出卡，只影响后续 `poolIds` 重洗）。
+  - 隐藏入口：`showSettings` state + `ChannelBar(onOpenSettings = { showSettings = true })`；打开时 `tts.speak("已打开设置")`。
+  - 设置即时生效：`AppSettings` 变化后重建传给 ChannelBar 的 `scenes` 列表；若 `channel` 被隐藏（不在可见分区且 ≠ rec/fav）→ `channel = CHANNEL_DAILY`。
+  - SettingsScreen 保存配额只写 `appSettings.setQuota`，**不**触碰当日队列。
+
+### 11.3 抽卡算法统一（2026-09-20 追加拍板）
+
+- `poolIds` 三分支（rec 温故流 / 分区 / 收藏）**抽卡算法统一为 `weightedShuffle`**；温故流不再 `shuffled()` 等概率洗牌。
+- **池的构成差异保留**：rec = 仅已学词（`filter { termStates[it] != null }`，D4 新词入口唯一化）；分区/收藏 = 全部词。统一的是算法，不是池的范围。
+- 每日任务队列调度（due 优先 + interleave）不变——队列型不参与抽卡统一。
+- `poolWeight` / `weightedShuffle` / `SCENE_NEW_WEIGHT` 均无签名变化，仅消费面扩大到 rec 分支。
+
+### 11.4 兼容与风险
+
+- 旧数据：state JSON 无 `favorites`/settings 键 → 缺省空集/默认值，无需迁移。
+- 收藏分区零写入契约不被破坏：收藏状态存 favorites（独立于 TermState/DayState），浏览卡仍无作答入口。
+- 连点 5 次切频道副作用：第 1 次点击切到推荐，后 4 次重复选中推荐 = 无操作；可接受。
+- 本机无 JDK/SDK：静态自检（导入、读写对称、括号配平）+ QYJ 实机验证同 v5 流程。
+
+## 12. v7 设计（2026-09-20：直接考试 + 总结确认 + 布局修正 + 单字直读）
+
+> 需求与验收见 prd.md「v7 交互修订」。改动仅限 `android-app/`（包名 `com.knowmo.app`，QYJ 已重构，勿动）。
+
+### 12.1 数据层（StudyRepository.kt）
+
+- **删除**：`markSeen` / `wasSeenToday` / `appendQueue`；`DayState.seen` 字段（persist 不再写 "seen" 键；load 遇旧 JSON 的 "seen" 键直接忽略——读写不对称仅此一处，向前兼容）。
+- **DailyQueue 增 `confirmed: Boolean`**：JSON `"confirmed"` 键，缺省 false（旧数据兼容）；新队列构建恒 false。
+- **新增 `markConfirmed()`**：`queues[CHANNEL_DAILY] = q.copy(confirmed = true)` + persist（幂等，已 true 直接返回）。
+- `buildQueue` / `ensureQueue` / `markAnswered` / `saveQueuePosition` / 间隔层状态机 / f30 全部不动。
+
+### 12.2 UI 层
+
+- **AppRoot.kt**：
+  - 新会话态 `browseMode: Boolean`（rec 频道专用：false = 考试阶段锁滑；true = 总结确认后的自由浏览）。
+  - **装载分支**（LaunchedEffect(channel)，rec）：`q.confirmed == true` → `browseMode = true`、`pages = emptyList()` + `appendPoolPages(POOL_BATCH)`、`restoreTo = 0`；否则考试模式（现有断点/frontier 装载，去掉 taught/markSeen 逻辑）。
+  - **删除**：`taught` map、`appendReviewCard`、停稳播报里的 markSeen 分支、`charFor` 状态与 CharSheet 调用、`blockingIndex` 及拦截分支（v5 R7 §5.2 整段——锁滑结构性取代，死代码不留）。
+  - `isPending` 收窄：`TermPage && mode != FREE && revealed[seq] != true`（不再有教读待处理）。
+  - **锁滑**：`VerticalPager(userScrollEnabled = channel != CHANNEL_DAILY || browseMode)`——考试阶段 false，浏览/分区/收藏恒 true。程序 `animateScrollToPage` 不受影响。
+  - **onConfirmDone**（DoneCard 确认回调）：`repo.markConfirmed()` → `browseMode = true` → `pages = emptyList()` + `appendPoolPages(POOL_BATCH)` → `restoreTo = 0`、`spokenKeys.clear()`、`pendingAnnounce = "任务完成，随便看看吧。"`。⚠️ browseMode 后 `syncDonePage` 必须短路（浏览页永不挂完成卡）。
+  - **cardSpeech 分流**：考试态未作答——NEW 首见词播「学新词啦！认识它吗？想一想，再按下面的按钮」（不再说「还记得」）；REVIEW 维持原防泄题话术。
+  - **单字点击**：`onSpeakWord = { tts.speak(p.t.text) }`（只读词，不读提示——与点卡片重听「词+提示」区分）。
+  - 顶部大 KDoc 契约注释同步 v7（删拦截/教读条目，新增锁滑/确认条目）。
+- **TermCard.kt**：
+  - `isExam = mode != CardMode.FREE`（首见词也是考试卡；badge 仍区分 新学/复习）。
+  - `onCharClick: (TermChar) -> Unit` 改名 **`onSpeakWord: () -> Unit`**，单字点击调用。
+  - **布局修正（多字词）**：词组 Row → `FlowRow`（ExperimentalLayoutApi）允许换行；字号档 ≤3:64sp / 4:54sp / 5:44sp / ≥6:36sp；拼音行同 FlowRow；**词区与拼音区 `padding(end ≈ 56.dp)` 为右缘星按钮预留空间**（防遮挡）；星按钮位置/触控不变。
+- **DoneCard.kt**：新参 `onConfirm: () -> Unit`，底部加大号「确认」按钮（高 ≥ 88dp、居中、大字），点击回调。
+- **删除 `ui/Sheets.kt`**（仅含 CharSheet，无其他消费方）。
+
+### 12.3 兼容与风险
+
+- 旧 JSON：`seen` 键忽略、`confirmed` 缺省 false——无需迁移。
+- 锁滑后 TTS 不可用场景：作答后仍按 AUTO_ADVANCE_MIN_MS 兜底前进（既有机制）。
+- 考试中途切频道再回：confirmed=false 走断点恢复（未答卡保持考试态）；confirmed=true 直接浏览模式。
+- 首见即考对高龄用户偏苛刻是 QYJ 明确决策（按自己情况选认识/忘了），不做折中。
+
+## 13. v8 设计（2026-09-20：连击回归 + 最小间隔插入 + 全显拼音 + 封顶分级）
+
+> 需求与验收见 prd.md「v8 交互修订」。改动仅限 `android-app/`（包名 `com.knowmo.app` 勿动；`prototype/` 已冻结、README.md 禁改）。
+> 核心：**恢复 v4 连击语义**（当日 3 次认识才移出），但插入方式从队尾追加改为**中段最小间隔插入**；**废除防泄题契约**（v3 以来）——所有任务卡全显示拼音+提示；**封顶分级** 30/60。
+
+### 13.1 数据层（StudyRepository.kt）
+
+- **DayState.counts 恢复连击计数语义（0–3）**：markKnown `counts[id] = min(3, (counts[id] ?: 0) + 1)`；markForgot `counts[id] = 0`。JSON 结构不变——旧数据里 v7 写的 1/0（已作答标记）按计数自然沿用、隔天随 date 作废，无需迁移。新增 `comboCount(id): Int`。
+- **markKnown 返回类型 Pair → Triple(count, upgraded, daysAfter)**（AppRoot 需要 count 决定是否插卡）；markForgot 返回 count（作答后恒 0）。
+- **新增 `repeatCard(id: String, afterIndex: Int): Int`**：
+  - 前置条件：调用方已确认 `comboCount(id) < 3`（repo 不重复判，保持 API 薄）。
+  - `insertAt = min(afterIndex + 1 + MIN_GAP, queue.size)`；queue/modes/answered 三平行数组同步插入（mode=`MODE_REVIEW`、answered=false）+ persist；返回 insertAt。
+  - afterIndex 之后不足 MIN_GAP 张时钳到队尾（尽力而为，不拒绝插入——同词当日重现比严格间距更重要）。
+  - **同词间隔不变量由构造保证**：所有插入点 = 源卡下标 + MIN_GAP + 1，按归纳法任意两张同词卡之间 ≥ MIN_GAP 张其他卡。`MIN_GAP = 2`（companion 常量，QYJ 口径「避免连续/紧邻」的最小满足，可调）。
+  - 插入点恒在当前卡之后 → position/frontier/已有卡下标不受影响；pages 对齐见 13.2。
+- **f30 去重**：markKnown/markForgot 内 `recordF30` 调用加守卫——`id in currentDay().counts`（今日已作答过）→ 跳过。恢复连击后同词一日可答 3 次，去重后 f30 口径与 v7「无重复观测噪声」等价（只记每词每日首次作答）。
+- **nextInterval 签名改 `(prevDays: Int, ease: Double, lapses: Int)`**：cap = `if (ease >= 2.5 && lapses == 0) INTERVAL_CAP_MATURE else INTERVAL_CAP_NORMAL`；常量 `INTERVAL_CAP_NORMAL = 30`、`INTERVAL_CAP_MATURE = 60`（45–60 区间 QYJ 授权内取 60：稳态减负最大化；f30 实测不达标可下调为改常量）。markKnown 调用处传 `cur.lapses`（无状态首写不经此函数，不受影响）。
+- buildQueue（当日首排）/ ensureQueue / markAnswered / saveQueuePosition / markConfirmed / confirmed / 锁滑数据支撑 / graduatedScenes 全部不动。
+- KDoc 全面校准：v7 的「每词恰好一张考试卡」「counts=已作答标记」「一日内至多 1 次作答（f30）」「作答不追加任何卡」等口径按 v8 改写，防文档漂移。
+
+### 13.2 UI 层
+
+- **AppRoot.kt**：
+  - `answer()` 连击分流：作答后取返回 count——`count < 3 && p.qIndex >= 0` → `val insertAt = repo.repeatCard(t.id, p.qIndex)` → `pages = pages.toMutableList().apply { add(insertAt, Page.TermPage(t, CardMode.REVIEW, nextSeq(), insertAt)) }`。**pages 下标 == queue 下标恒成立**（考试阶段任务卡区与 queue 一一对应、每次同步插入），所以 insertAt 直接用作 pages 插入下标；插入点在当前卡之后，自动前进落点 `cur + 1`、frontier、`saveQueuePosition` 全不受影响。`count == 3` → 不插卡（该词移出）。
+  - 播报文案按连击分级（恢复 v4 剩余次数口径）：count=1 →「记得牢！再认对 2 次就学会」、2 →「再认对 1 次就学会」、3 →「这个词学会啦！」+（upgraded 时）「N 天后再来复习」；忘了 →「没关系，再学一遍」（连击清零，后续重复卡自然重现）。
+  - **cardSpeech 简化**：所有 TermPage 一律 `termSpeech`（词+提示）——FREE、未作答、已作答同文案；删 `EXAM_TAP_HINT_SPEECH`、`NEW_EXAM_SPEECH`、onSpeakTerm/onSpeakWord 的 `examUnanswered` 防泄题分流（点卡 = 词+提示、点单字 = 读词，无条件）。
+  - **删 peeked / onPeek**（「想看答案」随隐藏态一起失去意义）；revealed 语义收窄为「已作答」（控制结果文案显示与按钮隐藏），不再控制拼音显隐。
+  - 顶部 KDoc 契约注释同步 v8（删防泄题条目，加连击/打散插入条目）。
+- **TermCard.kt**：删考试隐藏逻辑与 peek 按钮——**所有卡恒全展开**（词+拼音+提示）；√/× 作答按钮仅 `mode != FREE` 渲染（浏览卡不变）；badge 新学/复习保留。
+- 锁滑（考试阶段 userScrollEnabled=false）、总结确认（markConfirmed → browseMode → 温故流）、温故流/分区/收藏装载与零写入：全部不动。
+
+### 13.3 兼容与风险
+
+- 旧 JSON 无需迁移：counts 沿用（当日数据隔天作废）、repeatCard 只在运行时改队列并整条持久化、封顶改动对存量 days 无追溯（下次升级时才按新 cap 截断）。
+- 队列增长有界：每词 ≤ 3 张（初始 1 + 重复 ≤ 2），当日队列 ≤ 池词数 × 3；三平行数组同步插入，读写对称由 repeatCard 单点维护。
+- 断点恢复：队列持久化含重复卡，answered 逐卡还原——重启后连击进度（counts）与卡实例作答态都正确。
+- f30 去重后，同词当日连击不重复计数；days==60 的成熟词不再触发 f30（观测点仍为 30）——预期内的口径变化，调参时注意。
+- 本机无 JDK/SDK：静态自检（Grep 残留、读写对称、括号配平）+ QYJ GitHub Actions 构建验证（v4 步骤 7 同流程）。
+
+## 14. v9 设计（2026-09-20：任务卡静默自评 + 完成卡上滑转浏览 + 推荐范围收窄 + 常用词默认分区）
+
+> 需求与验收见 prd.md「v9 交互修订」。改动仅限 `android-app/`（包名 `com.knowmo.app` 勿动；`prototype/` 已冻结、README.md 禁改）。
+
+### 14.1 数据层
+
+- **StudyRepository 构造函数第 4 参** `recScenesProvider: () -> Set<String>`（缺省 = 全部 SCENES id）；MainActivity 注入 `{ settings.visibleScenes().map { it.id }.toSet() }`。与配额同语义：只在 buildQueue / poolIds 读取，当日队列冻结不变。
+- **scopeIds(CHANNEL_DAILY)** = `STUDY_TERMS.filter { it.scene == CHANNEL_COMMON || it.scene in recScenesProvider() }`——隐藏分区排除（prd 第 3 条）+ 常用词特例恒入（prd 第 4 条 QYJ 拍板：默认隐藏、只作推荐内容源，否则默认状态下推荐频道为空）。每日任务与温故流共用同一 scope，两个入口都收窄。
+- **新常量 `CHANNEL_COMMON = "daily"`**；confirmed 语义微调（到达完成卡即置 true，不再等点击）——复用 `markConfirmed()`，无 schema 变化。
+- **WordBank**：`DAILY_COMMON` 30 条（common-1..30，scene=daily；单字高频 10 + 双字常用 20），STUDY_TERMS 并入，总量 431（id 无重复）。
+- **StudyData**：SCENES 在 rec 之后插入 `Scene("daily", "常用词", "🔤", 0xFFE0F7FA)`——在 SCENES 里（设置页可显隐、参与分区毕业），但 AppSettings 缺省隐藏。
+- **AppSettings**：`hidden` 缺省 = 全部 manageableIds（v9 默认频道只剩推荐+收藏）。有存储 JSON 的用户以存储为准（load 覆盖）。⚠️ 该行原写「缺省只对新装机生效」，**v12 已作废**（见 §15：升级路径同样按隐藏处理）。
+
+### 14.2 UI 层
+
+- **AppRoot.kt**：
+  - `cardSpeech`：任务卡（非 FREE）返回**空串** → 停稳静默（prd 第 1 条「显示词卡不朗读」）；点卡片/单字听读回调不变（v8 无条件念）。停稳播报块改为「`full` 非空白才 speak + 记 spokenKeys」——**频道切换播报（announce）不受任务卡静默影响**。完成卡话术改「上滑进入推荐模式，随便看看吧」。
+  - `onConfirmDone` **删除** → `enterBrowse(doneIdx)`（suspend，currentPage collector 内调用）：`markConfirmed()` + `browseMode = true` + `pages.filter { Done || qIndex < 0 }`（任务卡移除、**完成卡保留在首位**）+ `scrollToPage(currentPage - doneIdx)`（下标左移校正）+ 丢弃未完成的自动前进。
+  - currentPage collector：`doneIdx >= 0 && idx >= doneIdx` → `enterBrowse(doneIdx)`（在 appendPoolPages 之后调用，浏览页已就位）。
+  - confirmed 装载分支：`pages = listOf(Page.Done)` + `appendPoolPages` + `restoreTo = 0`（当日重启落在完成卡，回滑看战果、上滑进浏览）。
+  - `userScrollEnabled = channel != rec || browseMode || (doneIdx >= 0 && currentPage >= doneIdx)`——正式解锁走 browseMode，末项兜底覆盖 collector 触发前的极短窗口。
+  - `insertRepeatCard` **修 v8 缺陷**：插入后对 `qIndex >= insertAt` 的任务卡 qIndex **同步 +1**（否则 markAnswered 按旧下标标记错卡）；插入点 == pages.size 时尾插兜底。
+  - DoneCard 调用去 `onConfirm`、增 `inBrowse = browseMode`。
+- **DoneCard.kt**：去确认按钮，改「上滑进入推荐模式」+ SwipeHint；`inBrowse = true` 时文案「随便看看吧」。
+- **TermCard.kt / Common.kt / SettingsScreen.kt**：无改动（v8 已全显、无 peek；新分区自动出现在设置页 —— ⚠️ **但不会自动出现在频道栏**，见 §15：「新分区自动出现在设置页与频道栏」的旧口径 **v12 已作废**）。
+
+### 14.3 兼容与风险
+
+- confirmed 旧数据缺省 false 兼容；无持久化 schema 变化。
+- 转浏览瞬间的页跳变：pages 过滤 + scrollToPage 同一 collect 内完成；settle effect 的 200ms 去抖与「迟到事件」守卫（currentPage != idx → return）吸收中间 coerced 事件。
+- enterBrowse 时浏览池必非空：作答即写间隔层 → 转浏览前已答词必有 TermState → 池 ⊇ 已答词（且常用词 30 条恒在 scope）。
+- 任务卡静默后，频道切换播报仍可达（announce 拼接在空白文案前）。
+- 本机无 JDK/SDK：静态自检（括号配平 / 残留符号扫描 / 词库拼音与场景校验，`.workbuddy/v9_check.py`）通过；实机构建验证走 GitHub Actions / Android Studio。
+
+## 15. v12 设置口径（2026-09-20：新增分区对新装与升级一律默认隐藏）
+
+> 需求与验收见 prd.md「v12 设置口径」。**唯一改动文件**：`android-app/.../data/AppSettings.kt`。
+> v12 的「家电」分区词库内容轮（63 条）见 implement.md「v12 步骤清单」。
+
+### 15.1 数据层（AppSettings.kt）
+
+- **契约**：`hidden` 的缺省语义从「只在无存储 JSON（新装机）时生效」改为「**对存储 JSON 里不存在的分区同样生效**」。两条路径等价，故「默认隐藏」不再有「仅新装机」的限定。
+- **判定依据 = 存储的 `order` 数组**。`persist()` 写入的是**完整** order（`manageableIds()` 全集），所以：
+  - `id ∈ 存储 order` → 写入该 JSON 时分区已存在 → 按存储的 `hidden` 数组决定显隐（**用户显式选择优先**）；
+  - `id ∉ 存储 order` → 写入该 JSON 时分区尚不存在 → 显隐选择无从继承 → **取隐藏**。
+- **仅在 `order` 数组确实存在时判定**：`order` 键缺失说明这不是本版本写的 JSON（本版本 `persist()` 必写 order），此时不做推断、保持原行为，避免把用户的显隐选择覆盖掉。
+- 无持久化 schema 变化：`order` 仍只存 id 列表，`hidden` 仍只存隐藏 id；**不需要迁移**。
+
+### 15.2 兼容与风险
+
+- **顺带修掉一个同源旧缺陷**：v9 引入 `daily` 时，v6–v8 时代写入过设置的机器升级后会看到 `daily` 自己冒进频道栏（同一机制）。本口径把 `daily` 一并收进「默认隐藏」，与 v9 原意一致。
+- 副作用（可接受）：若某台机器在 v9–v11 期间**显式开启过** `daily`，其 `order` 里含 `daily` → 仍按用户选择保持可见，不被新口径打回隐藏。**用户显式选择永远优先**，这是本口径的唯一让步。
+- 新增分区因此永远「安静」：升级不会改变频道栏构成 —— 频道栏的每一次变化都来自用户操作。
+- 本机无 JDK/SDK：以 Python 移植 `load()` 语义做场景模拟（`research/vocab/check_appsettings_load.py`）作为唯一自动化防线；实机验证走 GitHub Actions / Android Studio。

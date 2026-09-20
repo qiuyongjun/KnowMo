@@ -22,7 +22,7 @@ import re
 import statistics
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = r"D:\Project\Mando\android-app\app\src\main\java\com\qyj\shibang\data\WordBank.kt"
+SRC = r"D:\QYJ\MyProject\KnowMo\android-app\app\src\main\java\com\knowmo\app\data\WordBank.kt"
 OUT = os.path.join(HERE, "mechanism-sim-report.txt")
 
 raw = io.open(SRC, encoding="utf-8").read()

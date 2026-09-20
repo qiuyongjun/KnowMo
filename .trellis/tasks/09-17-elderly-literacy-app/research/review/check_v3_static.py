@@ -16,7 +16,7 @@ import re
 import itertools
 import sys
 
-ROOT = r"D:\QYJ\MyProject\Mando"
+ROOT = r"D:\QYJ\MyProject\KnowMo"
 SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang")
 WB = os.path.join(SRC, "data", "WordBank.kt")
 SD = os.path.join(SRC, "data", "StudyData.kt")

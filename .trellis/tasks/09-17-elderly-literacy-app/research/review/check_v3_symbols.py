@@ -10,7 +10,7 @@ Kotlin 逐符号导入核查（启发式，只读）。
 import os
 import re
 
-ROOT = r"D:\QYJ\MyProject\Mando"
+ROOT = r"D:\QYJ\MyProject\KnowMo"
 SRC = os.path.join(ROOT, "android-app", "app", "src", "main", "java", "com", "qyj", "shibang")
 
 BUILTIN = set("""Int Long Short Byte Float Double Boolean Char String Unit Nothing Any
