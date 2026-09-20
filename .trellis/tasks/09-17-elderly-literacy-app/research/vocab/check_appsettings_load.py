@@ -26,7 +26,7 @@ APP = os.path.join(SRC, "AppSettings.kt")
 SD = os.path.join(SRC, "StudyData.kt")
 OUT = os.path.join(HERE, "_appsettings_load_check.md")
 
-REC, FAV = "rec", "fav"
+REC, FAV, DAILY = "rec", "fav", "daily"
 
 # ---------------------------------------------------------------- A. 静态断言
 src = open(APP, encoding="utf-8").read()
@@ -45,6 +45,12 @@ STATIC = [
     # 结果会被 clear 抹掉、修复静默失效 —— 而上面那 5 条形状断言与 B 段（独立模型）全都照样绿。
     ("判定位于 hidden.clear() 之后（上移即静默失效）",
      r"hidden\.clear\(\)[\s\S]{0,1200}?if\s*\(\s*storedOrder\s*!=\s*null\s*\)\s*hidden\.addAll\("),
+    # 2026-09-20 口径细化（daily 不可显隐）：manageableIds 必须排除 CHANNEL_COMMON，
+    # 否则 daily 会重新出现在设置页/频道栏—— B 段「旧存储 daily 被丢弃」的断言随之失守。
+    ("manageableIds 排除 CHANNEL_COMMON（daily 不进显隐管理）",
+     r"private\s+fun\s+manageableIds\(\)[\s\S]{0,500}?CHANNEL_COMMON"),
+    ("setSceneVisible 防御守卫含 CHANNEL_COMMON",
+     r"fun\s+setSceneVisible[\s\S]{0,300}?CHANNEL_COMMON"),
 ]
 static_fails = [name for name, pat in STATIC if not re.search(pat, src)]
 
@@ -53,9 +59,12 @@ sd = open(SD, encoding="utf-8").read()
 scene_ids = re.findall(r'Scene\(\s*"([^"]*)"', sd)
 if not scene_ids:
     raise SystemExit("StudyData.kt 里没解析到 SCENES —— 先修本脚本")
-manageable = [i for i in scene_ids if i not in (REC, FAV)]
+# daily（常用词）不进显隐管理（2026-09-20 口径细化）：manageableIds 排除 rec/fav/daily 三者
+manageable = [i for i in scene_ids if i not in (REC, FAV, DAILY)]
 if REC in manageable:
     raise SystemExit("manageableIds 不该含 rec")
+if DAILY in manageable:
+    raise SystemExit("manageableIds 不该含 daily（不可显隐的内容源特例）")
 if FAV in scene_ids:
     raise SystemExit("fav 不该出现在 SCENES 里（会被当成可调度场景）")
 
@@ -94,9 +103,12 @@ def load(settings, new_rule):
 
 
 ALL = list(manageable)
-# 各时代的真实存储快照（用 manageable 里实际存在的 id 构造，避免硬编码错 id）
-PRE_V9 = [i for i in ALL if i not in ("daily", "appliance")]      # v6–v8 写入：尚无 daily
-V9_V11 = [i for i in ALL if i != "appliance"]                     # v9–v11 写入：有 daily 无 appliance
+# 各时代的真实存储快照（用 manageable 里实际存在的 id 构造，避免硬编码错 id）。
+# 历史（口径细化前）：daily 曾进 manageableIds，v9–v13 的存储 order/hidden 里都可能有 "daily"。
+PRE_V9 = [i for i in ALL if i != "appliance"]                        # v6–v8 写入：尚无 appliance
+V9_V13 = [i for i in ALL if i != "appliance"]                        # v9–v13 写入：尚无 appliance
+# 口径细化前某台机器真实会写出的 order（含 daily——当时它在 manageable 里）
+OLD_WITH_DAILY = ["daily"] + [i for i in ALL if i != "appliance"]
 
 CASES = [
     ("S1 新装机：无 settings 键",
@@ -108,10 +120,10 @@ CASES = [
      [],
      "daily 与 appliance 都该隐藏 —— daily 这条是新口径顺带修的旧缺陷"),
 
-    ("S3 升级自 v9–v11（有 daily、无 appliance；用户开了 market）",
-     {"order": V9_V11, "hidden": [i for i in V9_V11 if i != "market"], "quota": 10, "quotaNew": 5},
+    ("S3 升级自 v9–v13（用户开了 market；hidden 含已不管理的 daily）",
+     {"order": OLD_WITH_DAILY, "hidden": [i for i in OLD_WITH_DAILY if i != "market"], "quota": 10, "quotaNew": 5},
      ["market"],
-     "用户的 market 选择要保住，appliance 不得自己冒出来"),
+     "用户的 market 选择要保住；存储里的 daily 被 manageableIds 过滤自然丢弃（不可显隐口径），频道栏不出现常用词"),
 
     ("S4 已装机且用户显式开启了 appliance",
      {"order": ALL, "hidden": [i for i in ALL if i != "appliance"], "quota": 10, "quotaNew": 5},
@@ -138,6 +150,12 @@ CASES = [
      list(ALL),
      "Kotlin optJSONArray 对非数组返回 null → 同 S6 走防御分支；此时 hidden 保持存储值（空）"
      "⇒ 全部分区可见。**这是改动前就有的既有行为，本轮未改**；且 persist() 必写数组，实际不可达"),
+
+    ("S9 老用户曾显式开启 daily（order 与 hidden 都含它，当时可见）",
+     {"order": OLD_WITH_DAILY, "hidden": [i for i in OLD_WITH_DAILY if i not in ("daily", "market")], "quota": 10, "quotaNew": 5},
+     ["market"],
+     "2026-09-20 口径细化的关键升级路径：daily 不再被视作可管理 id——旧存储里它可见与否都无所谓，"
+     "known/hidden 双重过滤自然丢弃，无需迁移。频道栏不再出现常用词，其词仍在推荐范围（CHANNEL_COMMON 特例）"),
 ]
 
 rows, fails = [], []
@@ -169,13 +187,13 @@ for title, settings, expect, why in CASES:
     if bad:
         fails.append("%s：hidden 含非可管理 id %s" % (title, bad))
 
-# 「本改动确实生效」的硬断言：S2/S3/S7 必须出现**非空**差异。
+# 「本改动确实生效」的硬断言：S2/S3/S7/S9 必须出现**非空**差异。
 #
 # 这里断言的是 diff 本身非空，不是「old != new」—— 这个区别是实测出来的：
 # 首版断言写的是 old != new，而差异列被误写成 new - old 时，old != new 仍为真、
 # 差异列却每行都是空，报告全绿、读者完全看不出改动到底有没有生效。
 # 即：断言必须与**呈现出来的那个量**绑定，否则拦不住它自称要拦的回归。
-EFFECT_CASES = ("S2", "S3", "S7")
+EFFECT_CASES = ("S2", "S3", "S7", "S9")
 for r in rows:
     if r["title"].startswith(EFFECT_CASES) and not r["diff"]:
         fails.append("%s：新旧差异为空 —— 改动未生效，或差异列计算方向反了" % r["title"])
@@ -183,19 +201,21 @@ for r in rows:
 # ---------------------------------------------------------------- 报告
 L = []
 w = L.append
-w("# AppSettings `load()` 口径校验（v12）\n\n")
+w("# AppSettings `load()` 口径校验（v12 + 2026-09-20 daily 不可显隐细化）\n\n")
 w("> 自动生成，脚本 `check_appsettings_load.py`（可复跑）。源：`AppSettings.kt` + `StudyData.kt`\n")
 w("> 本机无 JDK / Android SDK，**未编译**；本文件与实机走查共同构成验证链。\n\n")
 w("## A. 静态断言（代码里真有这条规则）\n\n")
 w("| # | 断言 | 结果 |\n|---|---|---|\n")
 for i, (name, _) in enumerate(STATIC, 1):
     w("| %d | %s | %s |\n" % (i, name, "❌ 未命中" if name in static_fails else "✅"))
-w("\n可管理分区 %d 个（SCENES %d 项，去掉 `rec`；`fav` 不在 SCENES）：`%s`\n\n"
+w("\n可管理分区 %d 个（SCENES %d 项，去掉 `rec` 与 `daily`；`fav` 不在 SCENES）：`%s`\n\n"
   % (len(manageable), len(scene_ids), "`, `".join(manageable)))
+w("`daily`（常用词）不在可管理集合 —— 不可开关、设置页无此行、频道栏永不出现，其词恒入推荐（CHANNEL_COMMON 特例）。\n\n")
 
 w("## B. 语义模拟（新旧口径对照）\n\n")
 w("「旧口径」= 改动前：`hidden` 只按存储数组重填，新分区因此**可见**。\n")
-w("「新口径」= 本轮：不在存储 `order` 里的分区额外归入 `hidden`。\n\n")
+w("「新口径」= 本轮：不在存储 `order` 里的分区额外归入 `hidden`；且 `daily` 被移出可管理集合，"
+  "旧存储里的 `daily` 在 known/hidden 双重过滤时自然丢弃。\n\n")
 w("| 场景 | 期望可见 | 旧口径可见 | 新口径可见 | 差异 | 判定 |\n|---|---|---|---|---|---|\n")
 for r in rows:
     d = r["diff"]
@@ -217,9 +237,10 @@ if static_fails or fails:
         w("- %s\n" % f)
 else:
     w("**A 段 %d 条静态断言全过；B 段 %d 个场景全部符合期望**。\n\n" % (len(STATIC), len(CASES)))
-    w("- S2/S3/S7 的「差异」列非空 ⇒ 本改动**确实起了作用**（旧口径会把新分区放进频道栏）；\n")
+    w("- S2/S3/S7/S9 的「差异」列非空 ⇒ 本改动**确实起了作用**（旧口径会把新分区放进频道栏；S9 是 daily 丢弃路径）；\n")
     w("- S4/S5 新旧一致 ⇒ 用户显式选择不被覆盖；\n")
-    w("- S6/S8 新旧一致 ⇒ `order` 缺失时的防御分支没被越界推断。\n\n")
+    w("- S6/S8 新旧一致 ⇒ `order` 缺失时的防御分支没被越界推断；\n")
+    w("- S9：老用户曾显式开启过 `daily` → 升级后频道栏不再出现常用词频道（其词仍在推荐范围内），无需迁移代码。\n\n")
     w("### 关于 `if (storedOrder != null)` 这个守卫\n\n")
     w("它是**纯防御**，生产路径不可达 —— `persist()` 必定写 `order` 且为数组，\n")
     w("而全仓只有 `persist()` 一处写 `settings` 键（`StudyRepository` 写的是另一个 prefs 文件\n")

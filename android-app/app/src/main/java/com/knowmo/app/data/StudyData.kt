@@ -25,8 +25,9 @@ data class Scene(val id: String, val name: String, val icon: String, val color: 
 val SCENES = listOf(
     Scene("rec", "推荐", "⭐", Color(0xFFEDE7F6)),
     // v9（prd 第 4 条）：常用词默认分区——日常生活高频字词、非固定场景。在 SCENES 里
-    // （设置页可显隐、参与分区毕业），但 AppSettings 缺省隐藏；其词由 StudyRepository
-    // 特例（CHANNEL_COMMON）恒入推荐范围——默认只有推荐+收藏两个频道时推荐才有内容。
+    // （参与分区毕业），但不进 AppSettings 显隐管理（不可开关、频道栏永不出现），
+    // 其词由 StudyRepository 特例（CHANNEL_COMMON）恒入推荐范围——默认只有
+    // 推荐+收藏两个频道时推荐才有内容。
     Scene("daily", "常用词", "🔤", Color(0xFFE0F7FA)),
     Scene("market", "买菜", "🛒", Color(0xFFE8F5E9)),
     Scene("transit", "公交地铁", "🚌", Color(0xFFE3F2FD)),

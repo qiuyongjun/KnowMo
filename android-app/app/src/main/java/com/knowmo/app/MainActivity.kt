@@ -19,7 +19,7 @@ class MainActivity : ComponentActivity() {
     // v6 配额注入：buildQueue 只在**重建当日队列**时读 quotaProvider()/newQuotaProvider()——当日队列冻结不变、次日生效
     // （v6 R14：新词配额独立注入，新词速率恒定、不被到期复习挤占）
     // v9 推荐范围注入：buildQueue/poolIds 只抽**可见分区**的词（隐藏分区排除，prd v9 第 3 条）；
-    // 常用词分区由 StudyRepository 内部特例（CHANNEL_COMMON）恒入推荐范围（内容源，prd v9 第 4 条）
+    // 常用词分区由 StudyRepository 内部特例（CHANNEL_COMMON）恒入推荐范围（不可显隐的内容源，prd v9 第 4 条）
     private val repo by lazy {
         StudyRepository(
             this,

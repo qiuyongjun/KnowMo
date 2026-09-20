@@ -7,12 +7,14 @@ import org.json.JSONObject
 /**
  * v6 设置仓库（design.md §11.1）：独立于 StudyRepository 的 SharedPreferences（`app_settings`）+ 单 JSON：
  * `{"order": [sceneId...], "hidden": [sceneId...], "quota": 10, "quotaNew": 5}`。
- * - order = 场景分区显示顺序（**rec / fav 不进**；存储中出现未知 id 忽略；存储后新增的分区按 SCENES 固有顺序补尾）；
+ * - order = 场景分区显示顺序（**rec / fav / daily 不进**；存储中出现未知 id 忽略；存储后新增的分区按 SCENES 固有顺序补尾）；
  * - hidden = 隐藏分区 id 集合（**缺省 = 全部分区**——频道栏默认只剩推荐 + 收藏两个固定频道，
- *   prd v9 第 4 条；常用词分区（daily）也默认隐藏，其词由 StudyRepository 特例（CHANNEL_COMMON）
- *   恒入推荐范围）。**v12 口径（QYJ 2026-09-20，design.md §15）：新装与升级行为一致** ——
+ *   prd v9 第 4 条）。**v12 口径（QYJ 2026-09-20，design.md §15）：新装与升级行为一致** ——
  *   存储 JSON 的 `order` 里没有的分区（= 存储后新增的分区）一律按隐藏处理，故任何分区都要进设置页
  *   手动开启才会出现在频道栏；「缺省只对新装机生效」的旧口径作废。
+ * - 常用词分区（daily）**不进显隐管理**：不可开关、设置页无此行、频道栏永不出现（v9 第 4 条
+ *   口径细化，QYJ 2026-09-20 拍板——原「默认隐藏（设置里可打开）」作废）；它是推荐的基础
+ *   内容源，其词由 StudyRepository 特例（CHANNEL_COMMON）恒入推荐范围。
  * - quota = 每日学习词数量（3/5/10/15/20，缺省 10）。**只被 StudyRepository.buildQueue 在重建队列时读**——
  *   当日队列冻结不变、次日生效（design.md §11.1 的注入语义由 MainActivity 组装 quotaProvider 完成）；
  * - quotaNew = 每天学几个新词（1/3/5/10，缺省 5，v6 R14 新词配额独立：新词速率恒定、不被到期复习
@@ -28,7 +30,8 @@ class AppSettings(context: Context) {
 
     private var order: List<String> = defaultOrder()
     // 缺省**全部分区隐藏**——频道栏默认只有推荐 + 收藏两个固定频道（prd v9 第 4 条）。
-    // 常用词分区（daily）也默认隐藏，其词由 StudyRepository 特例恒入推荐范围。
+    // 常用词分区（daily）不进显隐管理（manageableIds 已排除）——设置页无此行、频道栏永不出现，
+    // 其词由 StudyRepository 特例恒入推荐范围。
     // v12（QYJ 2026-09-20）：**升级路径与缺省口径一致** —— 有存储 JSON 的用户，凡不在该 JSON 的 `order`
     // 里的分区（= 存储之后才新增的分区）同样按隐藏处理，见 load()。故「默认隐藏」对新装与升级同等成立，
     // 不再有「只对新装机生效」的限定。
@@ -40,9 +43,13 @@ class AppSettings(context: Context) {
         load()
     }
 
-    /** 可管理分区 = SCENES 去掉 rec（fav 不在 SCENES，天然不在；两处排除都写上以防将来有人把 fav 加进 SCENES） */
+    /**
+     * 可管理分区 = SCENES 去掉 rec 与 daily（fav 不在 SCENES，天然不在；两处排除都写上以防将来有人把 fav 加进 SCENES）。
+     * daily（常用词）是推荐的基础内容源特例——不参与显隐管理（设置页无此行、频道栏永不出现、不可开关），
+     * 其词由 StudyRepository.scopeIds 的 CHANNEL_COMMON 特例恒入推荐范围。
+     */
     private fun manageableIds(): List<String> = SCENES
-        .filter { it.id != StudyRepository.CHANNEL_DAILY && it.id != StudyRepository.CHANNEL_FAV }
+        .filter { it.id != StudyRepository.CHANNEL_DAILY && it.id != StudyRepository.CHANNEL_FAV && it.id != StudyRepository.CHANNEL_COMMON }
         .map { it.id }
 
     private fun defaultOrder(): List<String> = manageableIds()
@@ -65,9 +72,9 @@ class AppSettings(context: Context) {
         persist()
     }
 
-    /** 设置分区可见性；rec/fav 与未知 id 一律忽略（防御，正常入口来自设置页已排除） */
+    /** 设置分区可见性；rec/fav/daily 与未知 id 一律忽略（daily 不可显隐——推荐内容源特例；防御，正常入口来自设置页已排除） */
     fun setSceneVisible(id: String, visible: Boolean) {
-        if (id == StudyRepository.CHANNEL_DAILY || id == StudyRepository.CHANNEL_FAV) return
+        if (id == StudyRepository.CHANNEL_DAILY || id == StudyRepository.CHANNEL_FAV || id == StudyRepository.CHANNEL_COMMON) return
         if (id !in manageableIds()) return
         if (visible) hidden.remove(id) else hidden.add(id)
         persist()
@@ -106,7 +113,8 @@ class AppSettings(context: Context) {
             storedOrder?.let { a ->
                 for (i in 0 until a.length()) stored.add(a.optString(i))
             }
-            // 未知 id 忽略；存储后新增的分区按 SCENES 固有顺序补到末尾（兼容口径，design.md §11.1）
+            // 未知 id 忽略；存储后新增的分区按 SCENES 固有顺序补到末尾（兼容口径，design.md §11.1）。
+            // daily 不在 manageableIds → 旧版本存储里的 "daily" 在此（及下方 hidden 过滤）自然丢弃，无需迁移
             val known = stored.filter { it in manageableIds() }
             order = known + manageableIds().filter { it !in known }
             hidden.clear()
