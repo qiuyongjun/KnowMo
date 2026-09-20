@@ -10,7 +10,7 @@
      而两边单看都没毛病。
 
   B. **语义模拟**：把 `load()` 抄成 Python，用**从 `StudyData.kt` 解析出的真实 SCENES**
-     跑 8 种存储场景，并且对每个场景同时算「旧口径」与「新口径」的可见分区 —— 把差异打出来。
+     跑 9 种存储场景，并且对每个场景同时算「旧口径」与「新口径」的可见分区 —— 把差异打出来。
      只算新口径的话，万一这改动根本没起作用（比如判定条件写错成恒 false），
      报告一样全绿。有旧口径对照才叫证据。
 
@@ -106,7 +106,6 @@ ALL = list(manageable)
 # 各时代的真实存储快照（用 manageable 里实际存在的 id 构造，避免硬编码错 id）。
 # 历史（口径细化前）：daily 曾进 manageableIds，v9–v13 的存储 order/hidden 里都可能有 "daily"。
 PRE_V9 = [i for i in ALL if i != "appliance"]                        # v6–v8 写入：尚无 appliance
-V9_V13 = [i for i in ALL if i != "appliance"]                        # v9–v13 写入：尚无 appliance
 # 口径细化前某台机器真实会写出的 order（含 daily——当时它在 manageable 里）
 OLD_WITH_DAILY = ["daily"] + [i for i in ALL if i != "appliance"]
 
@@ -118,7 +117,7 @@ CASES = [
     ("S2 升级自 v6–v8（存储里既无 daily 也无 appliance）",
      {"order": PRE_V9, "hidden": list(PRE_V9), "quota": 10, "quotaNew": 5},
      [],
-     "daily 与 appliance 都该隐藏 —— daily 这条是新口径顺带修的旧缺陷"),
+     "appliance 该隐藏（存储后新增）；daily 已被移出可管理集合，任何情况下都不会出现"),
 
     ("S3 升级自 v9–v13（用户开了 market；hidden 含已不管理的 daily）",
      {"order": OLD_WITH_DAILY, "hidden": [i for i in OLD_WITH_DAILY if i != "market"], "quota": 10, "quotaNew": 5},
@@ -130,10 +129,10 @@ CASES = [
      ["appliance"],
      "用户显式选择优先，新口径不得把它打回隐藏"),
 
-    ("S5 用户把 14 个分区全开",
+    ("S5 用户把可管理分区全开",
      {"order": ALL, "hidden": [], "quota": 10, "quotaNew": 5},
      list(ALL),
-     "没人被误隐藏"),
+     "没人被误隐藏；daily 不在集合内，与全开无关"),
 
     ("S6 order 键缺失但 hidden 存在（畸形 JSON，防御分支）",
      {"hidden": ["market"]},

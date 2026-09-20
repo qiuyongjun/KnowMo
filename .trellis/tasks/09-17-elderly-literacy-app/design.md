@@ -497,7 +497,7 @@ isSceneGraduated(scene) = 该场景所有词 termStates[id]?.days == GRADUATED_D
   - `insertRepeatCard` **修 v8 缺陷**：插入后对 `qIndex >= insertAt` 的任务卡 qIndex **同步 +1**（否则 markAnswered 按旧下标标记错卡）；插入点 == pages.size 时尾插兜底。
   - DoneCard 调用去 `onConfirm`、增 `inBrowse = browseMode`。
 - **DoneCard.kt**：去确认按钮，改「上滑进入推荐模式」+ SwipeHint；`inBrowse = true` 时文案「随便看看吧」。
-- **TermCard.kt / Common.kt / SettingsScreen.kt**：无改动（v8 已全显、无 peek；新分区自动出现在设置页 —— ⚠️ **但不会自动出现在频道栏**，见 §15：「新分区自动出现在设置页与频道栏」的旧口径 **v12 已作废**）。
+- **TermCard.kt / Common.kt / SettingsScreen.kt**：无改动（v8 已全显、无 peek；新分区自动出现在设置页 —— ⚠️ **但不会自动出现在频道栏**，见 §15：「新分区自动出现在设置页与频道栏」的旧口径 **v12 已作废**。例外：常用词（daily）连设置页也不出现——不进显隐管理，见 §14.1 StudyData 行的口径细化）。
 
 ### 14.3 兼容与风险
 
