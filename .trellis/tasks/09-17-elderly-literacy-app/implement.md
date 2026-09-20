@@ -211,9 +211,9 @@ trellis-check 复核：**P0 = 0**；38 条与来源片段逐字节 `identical Tr
 
 前置：读 prd.md v14 节 + design.md §16 + `.trellis/spec/frontend/`（component-guidelines 的池型契约与计数口径）。
 
-1. [ ] `StudyRepository.kt`：streak 持久化——companion 加 key 常量；`touchStreak()`；`markKnown`/`markForgot` 接入；`studyStreak()` 只读。注意：不动 persist() 的主 JSON 结构。
-2. [ ] `StudyRepository.kt`：只读统计 API——`learnedCount` / `graduatedCount` / `sceneProgress`。
-3. [ ] `SettingsScreen.kt`：新增「📊 学习统计」节（标题下第一节）——汇总两行、分区进度列表（SCENES 全量 + 进度条）、f30 小字；参数经函数签名传入。
-4. [ ] `AppRoot.kt` / `MainActivity.kt`：装配统计参数（repo 快照）。
-5. [ ] 校验：本机无 JDK/SDK 编译不了——静态审查（重点：三平行数组未被触碰、persist 未改结构、新 API 只读）+ 交 QYJ 在 Android Studio 编译真机过 prd v14 验收清单；改词库相关断言前先跑 `research/vocab/check_wordbank_invariants.py`。
-6. [ ] 完成后：spec 更新（若设置页契约变化 → `wordbank-guidelines`/`component-guidelines` 相应条目）→ 提交。
+1. [x] `StudyRepository.kt`：streak 持久化——companion 加 key 常量；`touchStreak()`；`markKnown`/`markForgot` 接入；`studyStreak()` 只读。注意：不动 persist() 的主 JSON 结构。
+2. [x] `StudyRepository.kt`：只读统计 API——`learnedCount` / `graduatedCount` / `sceneProgress`。
+3. [x] `SettingsScreen.kt`：新增「📊 学习统计」节（标题下第一节）——汇总两行、分区进度列表（SCENES 全量 + 进度条）、f30 小字；参数经函数签名传入。
+4. [x] `AppRoot.kt` / `MainActivity.kt`：装配统计参数（repo 快照）。
+5. [~] 校验：静态审查已过（2026-09-20）；待 QYJ Android Studio 编译真机过验收（重点：三平行数组未被触碰、persist 未改结构、新 API 只读）+ 交 QYJ 在 Android Studio 编译真机过 prd v14 验收清单；改词库相关断言前先跑 `research/vocab/check_wordbank_invariants.py`。
+6. [x] 完成后：spec 更新（若设置页契约变化 → `wordbank-guidelines`/`component-guidelines` 相应条目）→ 提交。
