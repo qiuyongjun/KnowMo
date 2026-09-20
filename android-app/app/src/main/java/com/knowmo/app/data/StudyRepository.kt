@@ -69,6 +69,35 @@ data class DailyQueue(
 )
 
 /**
+ * v14 分区学习进度（设置页「学习统计」节的一行，只读快照）：
+ * scene 携带分区定义（icon/name 直接渲染）；learned/total = 该区已学数/总词条数。
+ * total 由 `STUDY_TERMS.filter` 动态算出——**不硬编码条数**（词库仍在扩，计数断言先跑
+ * `research/vocab/check_wordbank_invariants.py`，工作备忘条款）。
+ */
+data class SceneProgress(val scene: Scene, val learned: Int, val total: Int)
+
+/**
+ * v14 学习统计快照（设置页「学习统计」节的全部数据，只读）：
+ * 由 `StudyRepository.studyStats()` 一次性构建；设置页打开期间是**静态快照**——
+ * 作答只发生在 feed、设置页打开期间无作答，不需要响应式订阅（design.md §16.2）。
+ * learned / graduated / 各分区进度的口径都**限制在当前词库（STUDY_TERMS）内**：
+ * termStates 可能残留已从词库删除的词 id（学习状态按 id 挂靠、id 永不复用），
+ * 不剔除会让「已学 X / N」出现 X > N 的鬼账。
+ */
+data class StudyStats(
+    val totalWords: Int,
+    val learned: Int,
+    val graduated: Int,
+    val favorites: Int,
+    val todayKnown: Int,
+    val todayForgot: Int,
+    val streak: Int,
+    val f30Total: Int,
+    val f30Fail: Int,
+    val scenes: List<SceneProgress>,
+)
+
+/**
  * 学习状态仓库：间隔层（TermState）+ 连击层（DayState）+ 每日队列（DailyQueue）。
  * SharedPreferences + JSON 持久化（36 词量级不上 Room）；全部收在 "state" 一个 JSON 里：
  * terms = {"days", "lastSeen", "lapses", "ease", "restoreTo"}；
@@ -126,8 +155,8 @@ data class DailyQueue(
  * v9（09-20，prd v9 / design.md §14）：**推荐范围收窄 + 常用词特例**——构造函数注入 `recScenesProvider`
  * （MainActivity 传 settings.visibleScenes()），推荐频道（每日任务 + 温故流）只抽**可见分区**的词，
  * 隐藏分区的词两个入口都抽不到（prd v9 第 3 条）；常用词分区（CHANNEL_COMMON = "daily"，v10 清理后 16 条
- * 日常高频字词）**默认隐藏但恒入推荐范围**（内容源特例，prd v9 第 4 条 QYJ 拍板——默认只有
- * 推荐 + 收藏两个频道时推荐才有内容）。UI 侧 v9：任务卡停稳静默（点按听读、自评）、
+ * 日常高频字词）**不进 AppSettings 显隐管理（不可开关、频道栏不出现）但恒入推荐范围**（内容源特例，
+ * prd v9 第 4 条 QYJ 拍板——默认只有推荐 + 收藏两个频道时推荐才有内容）。UI 侧 v9：任务卡停稳静默（点按听读、自评）、
  * 完成卡上滑转浏览（取代 v7 点确认，AppRoot.enterBrowse）——见 AppRoot / DoneCard。
  */
 class StudyRepository(
@@ -213,6 +242,7 @@ class StudyRepository(
      */
     fun markKnown(id: String): Triple<Int, Boolean, Int> {
         val d = currentDay()
+        touchStreak()   // v14：作答日旁路记账（连续学习天数），不影响下方任何调度写入
         // f30 观测：必须取**写库之前**的 days；v8 去重——id 今日已作答过（连击第 2、3 次）不再计数
         if (id !in d.counts) recordF30(termStates[id]?.days, forgot = false)
         val cur = termStates[id]
@@ -262,6 +292,7 @@ class StudyRepository(
      */
     fun markForgot(id: String): Int {
         val d = currentDay()
+        touchStreak()   // v14：忘了也算当天学过（streak 以「当日有作答」为准，认识/忘了不区分）
         // f30 观测：必须取**写库之前**的 days；v8 去重——id 今日已作答过不再计数
         if (id !in d.counts) recordF30(termStates[id]?.days, forgot = true)
         val cur = termStates[id]
@@ -380,12 +411,74 @@ class StudyRepository(
         return added
     }
 
+    /* ---------- 学习统计（v14，design.md §16：只读快照 + streak 旁路记账） ---------- */
+
+    /**
+     * 连续学习天数的**显示口径**：最后学习日是今天或昨天 → 返回存量计数
+     * （昨天学过、今天还没学时 streak 仍然「活着」，今天的第一次作答会 +1）；
+     * 断 ≥ 2 天 → 0（prd v14 验收：隔天不作答断掉重计）。
+     * 旧安装无 key → 0，不回填历史（prd v14：显示 0 不崩溃）。
+     */
+    fun studyStreak(): Int {
+        val last = prefs.getString(KEY_STREAK_LAST_DATE, null) ?: return 0
+        val count = prefs.getInt(KEY_STREAK, 0)
+        if (count <= 0) return 0
+        val t = today()
+        return if (last == t || last == dayBefore(t)) count else 0
+    }
+
+    /** today 的前一天（yyyy-MM-dd）；解析失败返回 null（streak 视为断掉，fail-closed 到 0/重计） */
+    private fun dayBefore(today: String): String? = runCatching {
+        val d = fmt.parse(today) ?: return null
+        fmt.format(Date(d.time - DAY_MS))
+    }.getOrNull()
+
+    /**
+     * streak 旁路记账（v14，唯一新增的写路径）：`markKnown` / `markForgot` 开头各调一次。
+     * 今天已记过 → 不动；昨天记过 → +1；断 ≥ 2 天（含首次）→ 重计 1。
+     * **刻意独立于 persist()**：不进主 state JSON、不触碰 termStates/day/queues
+     * （与 f30 观测同模式——统计旁路与学习状态解耦，design.md §16.1），
+     * v8 调度语义零改动；streak key 残留在升级/回滚场景均无害。
+     */
+    private fun touchStreak() {
+        val t = today()
+        if (prefs.getString(KEY_STREAK_LAST_DATE, null) == t) return
+        val last = prefs.getString(KEY_STREAK_LAST_DATE, null)
+        val next = if (last != null && last == dayBefore(t)) prefs.getInt(KEY_STREAK, 0) + 1 else 1
+        prefs.edit().putInt(KEY_STREAK, next).putString(KEY_STREAK_LAST_DATE, t).apply()
+    }
+
+    /**
+     * 学习统计只读快照（v14）：设置页「学习统计」节的全部数据，一次性构建（StudyStats KDoc）。
+     * 全函数**零写入**；learned/graduated/分区进度都以 STUDY_TERMS 为口径（剔除词库已删的鬼 id）。
+     * 「rec」是聚合频道不参与分区进度；「daily」（常用词）照常列出一行。
+     */
+    fun studyStats(): StudyStats {
+        val scopedIds = STUDY_TERMS.map { it.id }.filter { termStates.containsKey(it) }
+        val scenes = SCENES.filter { it.id != CHANNEL_DAILY }.map { scene ->
+            val ids = STUDY_TERMS.filter { it.scene == scene.id }
+            SceneProgress(scene, ids.count { termStates.containsKey(it.id) }, ids.size)
+        }
+        return StudyStats(
+            totalWords = STUDY_TERMS.size,
+            learned = scopedIds.size,
+            graduated = scopedIds.count { (termStates[it]?.days ?: 0) >= GRADUATED_DAYS },
+            favorites = favoriteIds.size,
+            todayKnown = currentDay().knownAnswers,
+            todayForgot = currentDay().forgotAnswers,
+            streak = studyStreak(),
+            f30Total = f30Total(),
+            f30Fail = f30Fail(),
+            scenes = scenes,
+        )
+    }
+
     /* ---------- 每日队列调度器（design.md §9.3） ---------- */
 
     /**
      * 范围（每日任务队列 + 池型频道抽取共用）：
      * - 每日任务频道（`rec`）= **可见分区**的词（v9 `recScenesProvider`，隐藏分区排除——prd 第 3 条）
-     *   + 常用词分区（v9 `CHANNEL_COMMON` **恒入**——默认隐藏、只作推荐内容源，prd 第 4 条特例）；
+     *   + 常用词分区（v9 `CHANNEL_COMMON` **恒入**——不进显隐管理、只作推荐内容源，prd 第 4 条特例）；
      * - 收藏频道（`fav`，v6）= 收藏词 id（**有序**，不在这里洗牌——洗牌交给 poolIds 的 weightedShuffle）；
      * - 场景频道（池型）= 该场景词条。
      */
@@ -764,5 +857,9 @@ class StudyRepository(
 
         /** 一天的毫秒数（到期日 = lastSeen + days * DAY_MS，原型口径） */
         const val DAY_MS = 24L * 60 * 60 * 1000
+
+        /** v14 streak 持久化 key（独立 prefs，不进主 state JSON——与 f30 观测同模式，design.md §16.1） */
+        private const val KEY_STREAK = "streak_count"
+        private const val KEY_STREAK_LAST_DATE = "last_study_date"
     }
 }

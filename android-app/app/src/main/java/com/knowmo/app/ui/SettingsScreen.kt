@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.knowmo.app.data.AppSettings
 import com.knowmo.app.data.Scene
+import com.knowmo.app.data.SceneProgress
+import com.knowmo.app.data.StudyStats
 import com.knowmo.app.ui.theme.AppLine
 import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.AppText
@@ -51,6 +53,10 @@ import com.knowmo.app.ui.theme.OrangeDark
  * 适老化硬约束：字号 ≥ 22sp（说明性小字 18sp）、可点目标 ≥ 64dp 高、顺序调整用 ↑/↓ **大按钮**
  * （无拖拽手势）；配色沿用主题常量（高对比 ≥ 7:1）。
  * 四组设置：
+ * ⓪学习统计（v14，design.md §16，**只读一节**）：总览（已学/毕业/收藏）+ 今日战果 + 连续学习天数
+ *   + 各分区进度条 + f30 观测小字。受众拍板 = 家属/年轻人（QYJ：设置本来就不给老人用），
+ *   信息密度不受「少而大」约束，但沿用本页既有版式 token；纯展示零写入、无作答入口
+ *   （进出设置页不改学习状态，池型零写入契约不破坏）。
  * ①每日学习词数量（单选 3/5/10/15/20，缺省 10）——**当日队列冻结不变、次日生效**（本页只写
  *   `AppSettings.setQuota`，不触碰当日队列）；
  * ②每天学几个新词（单选 1/3/5/10，缺省 5，v6 R14 新词配额独立：新词速率恒定、不被复习挤占；
@@ -65,6 +71,7 @@ fun SettingsScreen(
     hiddenIds: Set<String>,
     quota: Int,
     quotaNew: Int,
+    stats: StudyStats,   // v14 学习统计只读快照（AppRoot 打开设置页时从 repo 一次性取）
     onSetVisible: (String, Boolean) -> Unit,
     onMove: (String, Int) -> Unit,
     onSetQuota: (Int) -> Unit,
@@ -83,6 +90,36 @@ fun SettingsScreen(
         Spacer(Modifier.height(18.dp))
         Text("⚙️ 设置", fontSize = 32.sp, fontWeight = FontWeight.Black, color = AppText)
         Spacer(Modifier.height(20.dp))
+
+        /* ---------- ⓪ 学习统计（v14，只读一节：总览 + 今日战果 + 分区进度 + f30） ---------- */
+        Text("📊 学习统计", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = AppText)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "已学 ${stats.learned} / ${stats.totalWords} 词（毕业 ${stats.graduated}）· 收藏 ${stats.favorites} 个",
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = AppText,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "今日认识 ${stats.todayKnown} 次 · 忘了 ${stats.todayForgot} 次 · 连续学习 ${stats.streak} 天",
+            fontSize = 22.sp,
+            color = AppText,
+        )
+        Spacer(Modifier.height(12.dp))
+        stats.scenes.forEachIndexed { i, p ->
+            SceneProgressRow(p)
+            if (i < stats.scenes.lastIndex) Spacer(Modifier.height(8.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            // f30 观测（调参用，QYJ 看的小字）：忘了率取整百分比，总作答为 0 时省略
+            "30天词观测：作答 ${stats.f30Total} · 忘了 ${stats.f30Fail}" +
+                if (stats.f30Total > 0) "（忘了率 ${stats.f30Fail * 100 / stats.f30Total}%）" else "",
+            fontSize = 18.sp,
+            color = AppText2,
+        )
+        Spacer(Modifier.height(24.dp))
 
         /* ---------- ① 每日学习词数量（总量） ---------- */
         Text("每日学习词数量", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = AppText)
@@ -142,6 +179,48 @@ fun SettingsScreen(
             Text("完成", fontSize = 26.sp, fontWeight = FontWeight.Black, color = Color.White)
         }
         Spacer(Modifier.height(18.dp))
+    }
+}
+
+/** v14 学习统计的分区进度行：icon+名称 与 已学/总数 同行，下方 10dp 细进度条
+ *  （BlueDark 填充 / AppLine 轨道；total 为 0 时按 0 进度渲染，防除零） */
+@Composable
+private fun SceneProgressRow(p: SceneProgress) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "${p.scene.icon} ${p.scene.name}",
+                fontSize = 21.sp,
+                fontWeight = FontWeight.Bold,
+                color = AppText,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "${p.learned}/${p.total}",
+                fontSize = 21.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (p.learned >= p.total) GreenKnown else AppText2,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(10.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(AppLine),
+        ) {
+            val fraction = if (p.total > 0) p.learned.toFloat() / p.total else 0f
+            if (fraction > 0f) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(fraction)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(BlueDark),
+                )
+            }
+        }
     }
 }
 

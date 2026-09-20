@@ -206,3 +206,14 @@ trellis-check 复核：**P0 = 0**；38 条与来源片段逐字节 `identical Tr
    - 设置页能看到「家电」分区且可开启，开启后重启仍可见；
    - `appliance-32 请勿用水冲洗` 是**全库第一条 6 字词条**，首次触发 TermCard 的「≥6 字」布局分支（36sp + `FlowRow` 换行 + 右缘 56dp 星位预留）。
 10. ⬜ **待 QYJ 裁定（不阻断）**：`android-app/README.md` 既有漂移仍未处理（L43 仍列 v7 已删的 `Sheets.kt`、缺 `AppSettings.kt`/`SettingsScreen.kt`；L51「点单字开字卡弹层」v7 已删；频道清单未含「家电/常用词/收藏」；L56「无设置页、无生词本」与 v6–v12 实装矛盾）。另注意：`git ls-files` 显示 `app/src/main/java/com/knowmo/**` **整个源码树未被 git 跟踪**（`com/qyj/shibang/*` 显示为 `D`）—— 提交前需先 `git add` 新路径。
+
+## v14 执行清单（2026-09-20：设置页学习统计）
+
+前置：读 prd.md v14 节 + design.md §16 + `.trellis/spec/frontend/`（component-guidelines 的池型契约与计数口径）。
+
+1. [ ] `StudyRepository.kt`：streak 持久化——companion 加 key 常量；`touchStreak()`；`markKnown`/`markForgot` 接入；`studyStreak()` 只读。注意：不动 persist() 的主 JSON 结构。
+2. [ ] `StudyRepository.kt`：只读统计 API——`learnedCount` / `graduatedCount` / `sceneProgress`。
+3. [ ] `SettingsScreen.kt`：新增「📊 学习统计」节（标题下第一节）——汇总两行、分区进度列表（SCENES 全量 + 进度条）、f30 小字；参数经函数签名传入。
+4. [ ] `AppRoot.kt` / `MainActivity.kt`：装配统计参数（repo 快照）。
+5. [ ] 校验：本机无 JDK/SDK 编译不了——静态审查（重点：三平行数组未被触碰、persist 未改结构、新 API 只读）+ 交 QYJ 在 Android Studio 编译真机过 prd v14 验收清单；改词库相关断言前先跑 `research/vocab/check_wordbank_invariants.py`。
+6. [ ] 完成后：spec 更新（若设置页契约变化 → `wordbank-guidelines`/`component-guidelines` 相应条目）→ 提交。

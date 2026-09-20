@@ -480,10 +480,10 @@ isSceneGraduated(scene) = 该场景所有词 termStates[id]?.days == GRADUATED_D
 ### 14.1 数据层
 
 - **StudyRepository 构造函数第 4 参** `recScenesProvider: () -> Set<String>`（缺省 = 全部 SCENES id）；MainActivity 注入 `{ settings.visibleScenes().map { it.id }.toSet() }`。与配额同语义：只在 buildQueue / poolIds 读取，当日队列冻结不变。
-- **scopeIds(CHANNEL_DAILY)** = `STUDY_TERMS.filter { it.scene == CHANNEL_COMMON || it.scene in recScenesProvider() }`——隐藏分区排除（prd 第 3 条）+ 常用词特例恒入（prd 第 4 条 QYJ 拍板：默认隐藏、只作推荐内容源，否则默认状态下推荐频道为空）。每日任务与温故流共用同一 scope，两个入口都收窄。
+- **scopeIds(CHANNEL_DAILY)** = `STUDY_TERMS.filter { it.scene == CHANNEL_COMMON || it.scene in recScenesProvider() }`——隐藏分区排除（prd 第 3 条）+ 常用词特例恒入（prd 第 4 条 QYJ 拍板：不进显隐管理、只作推荐内容源，否则默认状态下推荐频道为空）。每日任务与温故流共用同一 scope，两个入口都收窄。
 - **新常量 `CHANNEL_COMMON = "daily"`**；confirmed 语义微调（到达完成卡即置 true，不再等点击）——复用 `markConfirmed()`，无 schema 变化。
 - **WordBank**：`DAILY_COMMON` 30 条（common-1..30，scene=daily；单字高频 10 + 双字常用 20），STUDY_TERMS 并入，总量 431（id 无重复）。
-- **StudyData**：SCENES 在 rec 之后插入 `Scene("daily", "常用词", "🔤", 0xFFE0F7FA)`——在 SCENES 里（设置页可显隐、参与分区毕业），但 AppSettings 缺省隐藏。
+- **StudyData**：SCENES 在 rec 之后插入 `Scene("daily", "常用词", "🔤", 0xFFE0F7FA)`——在 SCENES 里（参与分区毕业），但**不进 AppSettings 显隐管理**（order/hidden 均不含 daily；不可开关、频道栏不出现），其词恒入推荐范围（2026-09-20 口径细化，QYJ 拍板——原「设置页可显隐」表述作废）。
 - **AppSettings**：`hidden` 缺省 = 全部 manageableIds（v9 默认频道只剩推荐+收藏）。有存储 JSON 的用户以存储为准（load 覆盖）。⚠️ 该行原写「缺省只对新装机生效」，**v12 已作废**（见 §15：升级路径同样按隐藏处理）。
 
 ### 14.2 UI 层
@@ -523,7 +523,39 @@ isSceneGraduated(scene) = 该场景所有词 termStates[id]?.days == GRADUATED_D
 
 ### 15.2 兼容与风险
 
-- **顺带修掉一个同源旧缺陷**：v9 引入 `daily` 时，v6–v8 时代写入过设置的机器升级后会看到 `daily` 自己冒进频道栏（同一机制）。本口径把 `daily` 一并收进「默认隐藏」，与 v9 原意一致。
-- 副作用（可接受）：若某台机器在 v9–v11 期间**显式开启过** `daily`，其 `order` 里含 `daily` → 仍按用户选择保持可见，不被新口径打回隐藏。**用户显式选择永远优先**，这是本口径的唯一让步。
+- **顺带修掉一个同源旧缺陷**：v9 引入 `daily` 时，v6–v8 时代写入过设置的机器升级后会看到 `daily` 自己冒进频道栏（同一机制）。本口径把 `daily` 一并收进「默认隐藏」，与 v9 原意一致。~~副作用（可接受）：若某台机器在 v9–v11 期间**显式开启过** `daily`，其 `order` 里含 `daily` → 仍按用户选择保持可见，不被新口径打回隐藏。**用户显式选择永远优先**，这是本口径的唯一让步。~~ → **已被 2026-09-20 口径细化作废**：daily 不再进显隐管理（`manageableIds()` 排除），旧存储 order/hidden 里的 `daily` 在 load 过滤时自然丢弃——曾显式开启过常用词的机器升级后频道栏不再出现该频道，其词仍在推荐范围内（CHANNEL_COMMON 特例），无需迁移。
 - 新增分区因此永远「安静」：升级不会改变频道栏构成 —— 频道栏的每一次变化都来自用户操作。
 - 本机无 JDK/SDK：以 Python 移植 `load()` 语义做场景模拟（`research/vocab/check_appsettings_load.py`）作为唯一自动化防线；实机验证走 GitHub Actions / Android Studio。
+
+## 16. v14 设计（2026-09-20：设置页学习统计）
+
+**受众拍板**：家属/年轻人（QYJ：设置都是给年轻人看的）。指标全套：总览 + 今日战果 + 分区进度 + 连续天数 + f30 观测。
+
+### 16.1 数据层（StudyRepository）
+
+- **streak 持久化**（唯一数据模型改动）：独立 SharedPreferences key（与 f30 观测同模式，不进主 state JSON——清观测/独立演化的口径一致）：
+  - `streak_count: Int`、`last_study_date: String(yyyy-MM-dd)`；
+  - `touchStreak()`：`today() == last_study_date` → 不动；`last_study_date == 昨天` → +1；否则 → 1。写后 apply。
+  - 调用点：`markKnown` / `markForgot` 开头（currentDay() 之后、persist() 附近）——**旁路写入**，不触碰 termStates/day/queues，v8 调度语义零改动。「昨天」判定用 `fmt.parse(today()) - DAY_MS` 格式化比对，与 isDue 同款 runCatching 防御。
+  - 只读 API `studyStreak(): Int`；旧数据缺省 0，不回填。
+- **只读统计 API**（全部零写入）：
+  - `learnedCount() = termStates.size`（全库口径，含隐藏分区词——家属视角的总账）；
+  - `graduatedCount()` = `termStates.values.count { it.days >= GRADUATED_DAYS }`；
+  - `sceneProgress(sceneId): Pair<Int, Int>` =（该区已学数, 该区总词条数），消费 `SCENES` + `STUDY_TERMS`，含 `daily`；
+  - 复用现有：`todayKnown()` / `todayForgot()` / `favorites().size` / `f30Total()` / `f30Fail()`。
+
+### 16.2 UI 层（SettingsScreen / AppRoot）
+
+- 设置页**标题下新增第一节「📊 学习统计」**（位于①每日词量之前）——设置页本就 verticalScroll，13+1 行分区进度可接受；不做二级页（README 硬指标「无多级菜单」）。
+- 版式（沿用设置页既有 token，正文 ≥22sp、说明小字 18sp）：
+  - 汇总两行：`已学 X / N 词（毕业 Y）· 收藏 Z`；`今日认识 A · 忘了 B · 连续学习 D 天`；
+  - 分区进度列表：每行 `${icon} ${name}` + 右侧 `x/y` + 细进度条（高 8dp、BlueBg/BlueDark）；
+  - f30 观测小字：`30天词观测：作答 X · 忘了 Y（Z%）`——Z=0 时省略括号。
+- 装配：`SettingsScreen` 增加统计参数（与 quota/hiddenIds 同模式），MainActivity/AppRoot 从 repo 一次性取快照传入。设置页打开期间无作答发生，静态快照够用，不需要 Flow/状态订阅。
+- streak 更新在 repo 作答路径内完成，UI 层零改动。
+
+### 16.3 兼容与风险
+
+- 旧安装升级：streak key 缺省 → 显示 0，无崩溃、无迁移代码。
+- 风险：v14 后任何统计断言先跑 `research/vocab/check_wordbank_invariants.py` 取词库真值（工作备忘条款）；分区进度总数用 `STUDY_TERMS.filter` 动态算，不硬编码 509。
+- 回滚点：revert SettingsScreen 统计节 + repo 统计 API 即可，streak key 残留无害。

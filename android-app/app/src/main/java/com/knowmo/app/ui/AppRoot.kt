@@ -73,7 +73,7 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    false 走断点恢复（仍锁滑）。
  * 6. **推荐范围收窄**（v9 第 3/4 条）：推荐频道（每日任务 + 温故流）只含**可见分区**的词
  *    （`recScenesProvider` 注入，MainActivity 传 settings.visibleScenes()）+ **常用词分区**
- *    （`CHANNEL_COMMON`，默认隐藏但恒入推荐——QYJ 拍板的内容源特例：默认只有推荐+收藏
+ *    （`CHANNEL_COMMON`，不可显隐、恒入推荐——QYJ 拍板的内容源特例：默认只有推荐+收藏
  *    两个频道时推荐才有内容）。隐藏分区的词两个入口都抽不到。
  * 7. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
  * 8. 分区完成（design.md §9.5，days >= 15）→ 频道栏加 🎓，即时可逆
@@ -121,6 +121,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     var hiddenIds by remember { mutableStateOf(settings.hiddenIds()) }
     var quota by remember { mutableStateOf(settings.quota()) }
     var quotaNew by remember { mutableStateOf(settings.quotaNew()) }   // v6 R14 每日新词配额镜像
+    // v14 学习统计快照（design.md §16.2）：打开设置页时从 repo 一次性重取（设置页打开期间
+    // 无作答发生，静态快照够用，不需要响应式订阅）
+    var stats by remember { mutableStateOf(repo.studyStats()) }
     val visibleScenes = orderedScenes.filter { it.id !in hiddenIds }   // 频道栏渲染序（rec/fav 固定渲染，不在此列）
     // v6 收藏：收藏集合快照（TermCard 星按钮显色用；toggleFavorite 后整体重读触发重组）
     var favorites by remember { mutableStateOf(repo.favorites().toSet()) }
@@ -142,9 +145,13 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         tts.speak("欢迎回来。上滑开始学习。")
     }
 
-    // v6：打开设置页播报「已打开设置」（prd v6 第 2 条；keyed showSettings，关闭不播）
+    // v6：打开设置页播报「已打开设置」（prd v6 第 2 条；keyed showSettings，关闭不播）。
+    // v14：打开时重取学习统计快照（覆盖上次打开之后的作答变化——今日战果/streak/分区进度）
     LaunchedEffect(showSettings) {
-        if (showSettings) tts.speak("已打开设置")
+        if (showSettings) {
+            stats = repo.studyStats()
+            tts.speak("已打开设置")
+        }
     }
 
     // v6：设置显隐改动**即时生效**——当前频道被隐藏（非 rec/fav 且不在可见分区）→ 回退推荐频道。
@@ -583,6 +590,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 hiddenIds = hiddenIds,
                 quota = quota,
                 quotaNew = quotaNew,   // v6 R14 每日新词配额（「写库 → 重读镜像」同下）
+                stats = stats,         // v14 学习统计只读快照（打开设置页时重取，见上方 effect）
                 // 显隐/顺序/配额都是「写 AppSettings → 重读镜像」两步：真源在持久层，镜像只管重组
                 onSetVisible = { id, visible ->
                     settings.setSceneVisible(id, visible)

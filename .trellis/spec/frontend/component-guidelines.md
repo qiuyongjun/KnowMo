@@ -170,7 +170,8 @@ val ni = nextInterval(cur.days, cur.ease)              // SM-2 简化版
 - 反馈按钮高度 92dp；图标 40–44sp；词字随词长 42–64sp；点击目标不小于 48dp。
 - TTS 语速 0.85x。播报在**滑动停稳后**延迟约 200ms 触发，滑动进行中一律 `tts.stop()`（快速连滑不闪播）。
 - 关键语义不用 emoji 表达：作答按钮用 √ / × 字形（随字号缩放、无彩色表情歧义）。
-- 不做设置页、生词本、进度条。
+- ~~不做设置页、生词本、进度条~~（**v6/v14 已推翻**）：v6 恢复隐藏设置入口与收藏；v14 设置页新增只读「学习统计」节（含分区进度条）。
+  - **v14 统计契约**：统计快照（`StudyStats`）由 `repo.studyStats()` 一次性构建、全**零写入**；`learned`/`graduated`/分区进度一律以 `STUDY_TERMS` 为口径（剔除词库已删的鬼 id，否则「已学 X/N」会 X > N）；分区总数动态算、**不硬编码**。`streak` 是唯一新增写路径：独立 prefs key（`streak_count`/`last_study_date`），`markKnown`/`markForgot` 开头旁路记账，**不进主 state JSON、不触碰调度状态**（与 f30 观测同模式）。显示口径：最后学习日是今天或昨天 → 存量计数，断 ≥ 2 天 → 0。
 
 ## Common Mistakes
 
