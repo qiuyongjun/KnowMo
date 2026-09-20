@@ -1,7 +1,7 @@
 package com.knowmo.app.data
 
 /**
- * 词库 v13：14 场景 509 词条（493 + 常用词 16）。
+ * 词库 v15：14 分区 549 词条（场景 530 + 常用词 19）。
  * term() 紧凑构造：拼音按空格逐字配对，字数不符启动即抛错（fail-fast，便于挑错）。
  * id 一经发布永不复用——学习状态（TermState）按 id 挂靠，改 id 会丢已学记录。
  * v9（prd 第 4 条）：新增「常用词」分区（scene = "daily"）——日常生活高频字词，
@@ -22,6 +22,9 @@ package com.knowmo.app.data
  * v13（三分区查漏补缺，2026-09-20）：transit +8（含导航/无人售票/扫码乘车）、
  * food +10（含筷子/早餐/火锅）、appliance +11（含烘干/模式/风速/电池），
  * 共 29 条。判据同前——只收老人生活环境里会以文字形式出现的词（QYJ 拍板 P1+P2 全收）。
+ * v15（round5 五分区梳理，2026-09-20）：daily/transit/food/phone/appliance 收推荐档共 45 条；
+ * 同轮 daily 删 5 条启蒙单字（人/大/小/好/钱，环境里不独立出现），daily 定位改为
+ * 「公共标识字 + 跨场景通用词」（QYJ 拍板；可选 12 条与字覆盖补词 14 条未收）。
  */
 
 private val ICON = SCENES.associate { it.id to it.icon }
@@ -39,22 +42,27 @@ private fun term(id: String, scene: String, text: String, pinyin: String, tip: S
 /* ==================== 常用词（v9：日常高频字词，非场景内容） ==================== */
 
 private val DAILY_COMMON = listOf(
-    term("daily-1", "daily", "人", "rén", "一撇一捺，就是人"),
-    term("daily-2", "daily", "大", "dà", "跟「小」相反"),
-    term("daily-3", "daily", "小", "xiǎo", "跟「大」相反"),
     term("daily-4", "daily", "上", "shàng", "位置的上面"),
     term("daily-5", "daily", "下", "xià", "位置的下面"),
     term("daily-6", "daily", "水", "shuǐ", "喝的、洗的都靠它"),
     term("daily-7", "daily", "火", "huǒ", "做饭取暖要用它，小心烫"),
     term("daily-8", "daily", "门", "mén", "进出走的门"),
-    term("daily-9", "daily", "钱", "qián", "买东西要用的"),
-    term("daily-10", "daily", "好", "hǎo", "不坏、不错的意思"),
     term("daily-20", "daily", "洗手", "xǐ shǒu", "用水把两只手洗干净"),
     term("daily-21", "daily", "衣服", "yī fu", "穿在身上的"),
     term("daily-22", "daily", "裤子", "kù zi", "穿在两条腿上的"),
     term("daily-23", "daily", "鞋子", "xié zi", "穿在脚上的"),
     term("daily-26", "daily", "电话", "diàn huà", "打给别人的通话工具"),
     term("daily-27", "daily", "手机", "shǒu jī", "随身带的小电话"),
+    // ---- 以下 8 条为 round5 五分区梳理（v15，2026-09-20 QYJ 拍板收推荐档）----
+    // 定位改变：daily 由「启蒙单字」改为「公共标识字 + 跨场景通用词」（人/大/小/好/钱 同轮删除）
+    term("daily-28", "daily", "推", "tuī", "门上的字，往外推才开"),
+    term("daily-29", "daily", "拉", "lā", "门上的字，往里拉才开"),
+    term("daily-30", "daily", "男", "nán", "男厕所门上的字"),
+    term("daily-31", "daily", "女", "nǚ", "女厕所门上的字"),
+    term("daily-32", "daily", "开", "kāi", "老式插座、电器面板上标的「开」那一档"),
+    term("daily-33", "daily", "关", "guān", "老式插座、电器面板上标的「关」那一档"),
+    term("daily-36", "daily", "免费", "miǎn fèi", "不要钱的，停车、量血压都见过"),
+    term("daily-37", "daily", "收费", "shōu fèi", "要交钱的，公厕、停车场门口挂着"),
 )
 
 /* ==================== 买菜 ==================== */
@@ -129,6 +137,15 @@ private val TRANSIT = listOf(
     term("transit-35", "transit", "无障碍电梯", "wú zhàng ài diàn tī", "推轮椅、拉行李都能坐的电梯，车站里有指示牌"),
     term("transit-36", "transit", "一卡通", "yī kǎ tōng", "公交地铁都能刷的卡，充值点挂着这块牌子"),
     term("transit-37", "transit", "补票", "bǔ piào", "没买到票或坐过站，车上要办的手续"),
+    // ---- 以下 8 条为 round5 五分区梳理（v15，2026-09-20 QYJ 拍板收推荐档）----
+    term("transit-38", "transit", "上行", "shàng xíng", "扶梯旁边写着，往上走的那边"),
+    term("transit-39", "transit", "下行", "xià xíng", "扶梯旁边写着，往下走的那边"),
+    term("transit-40", "transit", "扶梯", "fú tī", "会自己动的楼梯，商场地铁里都有"),
+    term("transit-41", "transit", "充值", "chōng zhí", "公交卡钱不够，来这里加钱"),
+    term("transit-42", "transit", "时刻表", "shí kè biǎo", "站牌上写着首班末班几点，照着它等车"),
+    term("transit-43", "transit", "爱心专座", "ài xīn zhuān zuò", "车厢里那排黄座位，专门让给老人"),
+    term("transit-44", "transit", "勿越黄线", "wù yuè huáng xiàn", "站台上黄线外的字，等车别踩过去"),
+    term("transit-47", "transit", "紧急出口", "jǐn jí chū kǒu", "出事时从这儿出去，绿牌子"),
 )
 
 /* ==================== 医院 ==================== */
@@ -349,6 +366,20 @@ private val FOOD = listOf(
     term("food-111", "food", "馄饨", "hún tun", "北方叫法，就是抄手，皮包馅带汤吃"),
     term("food-112", "food", "米粉", "mǐ fěn", "大米做的粉条，泡在汤里吃，跟米线是一路的"),
     term("food-113", "food", "饮料", "yǐn liào", "瓶装的甜水，冰柜上写着这两个字"),
+    // ---- 以下 10 条为 round5 五分区梳理（v15，2026-09-20 QYJ 拍板收推荐档）----
+    // 菜单/招牌分栏
+    term("food-114", "food", "凉菜", "liáng cài", "菜单上分栏，不热的那几样"),
+    term("food-115", "food", "热菜", "rè cài", "菜单上分栏，现炒现做的"),
+    term("food-116", "food", "主食", "zhǔ shí", "菜单上分栏，饭和面都归这里"),
+    term("food-117", "food", "小吃", "xiǎo chī", "店招牌上常见，粉面抄手这类"),
+    term("food-118", "food", "快餐", "kuài cān", "招牌上写着，坐下就吃不用等"),
+    term("food-119", "food", "家常菜", "jiā cháng cài", "招牌上写着，平常家里吃的那几样"),
+    // 菜名前两字
+    term("food-121", "food", "红烧", "hóng shāo", "菜名前两个字，酱油烧的，比如红烧肉"),
+    term("food-122", "food", "清蒸", "qīng zhēng", "菜名前两个字，蒸出来的，不辣"),
+    // 点餐与取餐
+    term("food-124", "food", "扫码点餐", "sǎo mǎ diǎn cān", "桌上贴的，用手机扫一下自己点"),
+    term("food-125", "food", "外卖", "wài mài", "门口贴着，让骑手取餐的地方"),
 )
 
 /* ==================== 手机微信 ==================== */
@@ -386,6 +417,16 @@ private val PHONE = listOf(
     term("phone-30", "phone", "关机", "guān jī", "长按电源键，手机休息"),
     term("phone-31", "phone", "重启", "chóng qǐ", "关了再开，卡了就试试"),
     term("phone-32", "phone", "骗子短信", "piàn zi duǎn xìn", "让你转账的，都是骗子"),
+    // ---- 以下 9 条为 round5 五分区梳理（v15，2026-09-20 QYJ 拍板收推荐档）----
+    term("phone-33", "phone", "扫一扫", "sǎo yī sǎo", "微信里那个方框，对着码扫"),
+    term("phone-34", "phone", "转账", "zhuǎn zhàng", "把钱转给别人，认准了再按"),
+    term("phone-35", "phone", "验证码", "yàn zhèng mǎ", "短信里那串数字，谁要都别给"),
+    term("phone-36", "phone", "微信支付", "wēi xìn zhī fù", "结账时选这个，从微信里扣钱"),
+    term("phone-37", "phone", "零钱", "líng qián", "微信里的钱袋子，收的红包在这"),
+    term("phone-38", "phone", "余额", "yú é", "还剩多少钱，数字在这儿写着"),
+    term("phone-39", "phone", "发送", "fā sòng", "打完字按它，消息才发得出去"),
+    term("phone-41", "phone", "设置", "shè zhì", "手机里调东西的地方，齿轮图标"),
+    term("phone-43", "phone", "垃圾短信", "lā jī duǎn xìn", "广告和骗子发来的，直接删"),
 )
 
 /* ==================== 药品说明 ==================== */
@@ -581,6 +622,20 @@ private val APPLIANCE = listOf(
     term("appliance-61", "appliance", "油烟机", "yóu yān jī", "灶台上方抽烟的机器"),
     term("appliance-62", "appliance", "燃气灶", "rán qì zào", "点火的灶，用完关阀门"),
     term("appliance-63", "appliance", "电磁炉", "diàn cí lú", "平板上烧锅的那种灶"),
+    // ---- 以下 10 条为 round5 五分区梳理（v15，2026-09-20 QYJ 拍板收推荐档）----
+    // 通用面板按键
+    term("appliance-75", "appliance", "待机", "dài jī", "机器歇着没干活，按一下就能用"),
+    term("appliance-76", "appliance", "开始", "kāi shǐ", "按这个键，机器就动起来"),
+    term("appliance-77", "appliance", "取消", "qǔ xiāo", "按错了就按它，重新来"),
+    term("appliance-78", "appliance", "清洁", "qīng jié", "洗衣机、油烟机上的档位，专门洗机器"),
+    term("appliance-85", "appliance", "温度", "wēn dù", "冷热看这个数，按加号调高"),
+    // 洗衣机 / 冰箱 / 空调专有
+    term("appliance-79", "appliance", "速冻", "sù dòng", "冰箱上那个键，让东西冻得快"),
+    term("appliance-80", "appliance", "标准洗", "biāo zhǔn xǐ", "洗衣机最常用的那档，平常衣服都用它"),
+    term("appliance-83", "appliance", "睡眠", "shuì mián", "空调上那个键，风小了、不吵人"),
+    // 铭牌与说明书
+    term("appliance-87", "appliance", "生产日期", "shēng chǎn rì qī", "铭牌上写着，哪天造的"),
+    term("appliance-88", "appliance", "客服电话", "kè fú diàn huà", "坏了好打这个号，说明书上印着"),
 )
 
 /* ==================== 紧急求助 ==================== */

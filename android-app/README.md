@@ -33,7 +33,7 @@ app/src/main/java/com/knowmo/app/
 ├── MainActivity.kt            # 入口：装配 TTS 与仓库
 ├── data/
 │   ├── StudyData.kt           # 数据模型 + 场景频道定义（推荐聚合 + 13 个场景 + 常用词）
-│   ├── WordBank.kt            # 词库：14 个分区共 509 条生活词组（13 个场景 493 条 + 常用词 16 条，含逐字拼音）
+│   ├── WordBank.kt            # 词库：14 个分区共 549 条生活词组（13 个场景 530 条 + 常用词 19 条，含逐字拼音）
 │   └── StudyRepository.kt     # 记忆状态（TermState + lapses）/ 每日队列持久化 + 调度（v5 R11 首答定调度：当日首答即写间隔层、作答后不追加；间隔阶梯 1→3→7→15→30；毕业判定固定 15；due ≥ 20 进清债模式；新词交错编排；f30 观测计数）
 ├── tts/TTSSpeaker.kt          # Android TTS 封装（中文、语速 0.85、就绪前排队）
 └── ui/

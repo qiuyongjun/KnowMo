@@ -154,7 +154,7 @@ data class StudyStats(
  * v7 的「作答即写间隔层」口径保留：连击期间多次作答即多次走状态机，每日升一级闸门重新发挥作用。
  * v9（09-20，prd v9 / design.md §14）：**推荐范围收窄 + 常用词特例**——构造函数注入 `recScenesProvider`
  * （MainActivity 传 settings.visibleScenes()），推荐频道（每日任务 + 温故流）只抽**可见分区**的词，
- * 隐藏分区的词两个入口都抽不到（prd v9 第 3 条）；常用词分区（CHANNEL_COMMON = "daily"，v10 清理后 16 条
+ * 隐藏分区的词两个入口都抽不到（prd v9 第 3 条）；常用词分区（CHANNEL_COMMON = "daily"，v15 清理后 19 条
  * 日常高频字词）**不进 AppSettings 显隐管理（不可开关、频道栏不出现）但恒入推荐范围**（内容源特例，
  * prd v9 第 4 条 QYJ 拍板——默认只有推荐 + 收藏两个频道时推荐才有内容）。UI 侧 v9：任务卡停稳静默（点按听读、自评）、
  * 完成卡上滑转浏览（取代 v7 点确认，AppRoot.enterBrowse）——见 AppRoot / DoneCard。
@@ -633,7 +633,7 @@ class StudyRepository(
     }
 
     /** 加权随机排列（Efraimidis–Spirakis 指数键）：key = -ln(u)/w，升序即无放回加权抽样。
-     *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n ≤ 509）且边界更少。 */
+     *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n ≤ 549）且边界更少。 */
     private fun weightedShuffle(ids: List<String>): List<String> {
         val rnd = Random.Default
         return ids.map { id ->
@@ -830,7 +830,12 @@ class StudyRepository(
         /** 每日任务频道池配额（R11-2 后由 interleave 消费：格号 % 3 == 1 优先新词，直到配额）；
          *  池型频道不设配额（R10：分区 = 该区全部词，只是抽取顺序加权随机）。
          *  v6：buildQueue 改读构造注入的 quotaProvider（设置页「每日学习词数量」），本常量保留为
-         *  quotaProvider 的**缺省值**（未注入时的兜底）。 */
+         *  quotaProvider 的**缺省值**（未注入时的兜底）。
+         *  ⚠️ 容量观测记录（2026-09-20，QYJ 拍板「先不动、留记录」）：稳态持有量 ≈ 复习槽位(NEW=5) ×
+         *  封顶间隔(30~60 天) = **150~300 条**，而词库 v15 已 549 条（超载 1.8~3.7 倍）。扩库不提配额
+         *  → 复习债累积 → 触发 DEBT_THRESHOLD=20 清债模式 → 新词长期学不进去。无债运转需把
+         *  DAILY_POOL_QUOTA 提到 **14~22**。暂不动，待实机 f30 观测出现复习债征兆（清债频繁触发、
+         *  新词多日不进队列）再议。依据：research/vocab/char_coverage_report.md 容量节。 */
         const val DAILY_POOL_QUOTA = 10
 
         /** v6 R14 每日新词配额缺省值（newQuotaProvider 兜底；设置页「每天学几个新词」注入）——

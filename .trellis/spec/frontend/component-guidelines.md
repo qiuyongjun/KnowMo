@@ -110,7 +110,7 @@ fun isPending(p: Page) = p is Page.TermPage && when (p.mode) {
 - ⚠️ **点按分流必须收窄为 `p.mode == CardMode.REVIEW && revealed[p.seq] != true`**：否则浏览卡点一下播提示语而不是念词。
 - **池型频道零写入**：浏览卡不调 `markSeen`、也没有作答入口 → `TermState` / `DayState` 零写入。分区里的未学词**只看不算学**（学会它的唯一路径是每日任务，新词入口唯一化）；分区 🎓 也只能靠每日任务推进。`answer()` / `markKnown` / `markForgot` / `appendQueue` / `markAnswered` / `saveQueuePosition` 在池型频道**一律不可达**。
 - **池必非空是硬要求**：分区池 = 该区全部词（含未学词，每区 ≥ 17 词）→ 不存在 `pageCount == 0` 白屏。R9 的「`ensureQueue` 空队列不复用」补丁已随分区队列一起删除——每日任务的空队列是**合法**状态（pool 空 → 队列只有完成卡 → 直接温故流），不要把它当异常「修」掉。
-- **加权随机（分区）**：`w = 1 + 2×lapses + min(距上次学习天数, 60)/30`，未学词固定 `SCENE_NEW_WEIGHT = 2.0`；用 Efraimidis–Spirakis 指数键（`key = -ln(u)/w`，升序）实现无放回加权抽样，`u = 1.0 - random` 防 `ln(0) → +Inf`（O(n log n)，n ≤ 509，比轮盘逐个抽更少边界）。**只读**：权重计算不写任何状态。
+- **加权随机（分区）**：`w = 1 + 2×lapses + min(距上次学习天数, 60)/30`，未学词固定 `SCENE_NEW_WEIGHT = 2.0`；用 Efraimidis–Spirakis 指数键（`key = -ln(u)/w`，升序）实现无放回加权抽样，`u = 1.0 - random` 防 `ln(0) → +Inf`（O(n log n)，n ≤ 549，比轮盘逐个抽更少边界）。**只读**：权重计算不写任何状态。
 - **温故流与分区共用同一条追加逻辑**（`appendPoolPages`），差别只在池的构成。R9 的队尾轻提示（`footerHint` / `SCENE_TAIL_HINT` / `SCENE_TAIL_SPEECH` / `isSceneTail`）**已整体删除**——无限流之后不存在「最后一张」，轻提示失去出现时机。
 - **持久化**：`buildQueue` / `ensureQueue` / `appendQueue` / `markAnswered` / `saveQueuePosition` **不带 `channel` 参数**（内部固定 `CHANNEL_DAILY`）——让「队列 = 每日任务」成为签名层面的事实。`load()` 只读入 `CHANNEL_DAILY` 的队列条目（旧版本写下的分区队列在下次 `persist()` 自然消失，无需迁移代码）。
 

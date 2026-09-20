@@ -1,0 +1,6 @@
+bank_terms=509 bank_chars=560
+items=69 item_chars=125 tips=71 tip_chars=253
+cov_A=21.8% cov_B=85.6% cov_C=60.1%
+term_hit=27/69 miss=42 gap_chars=18
+-> D:\QYJ\MyProject\Mando\.trellis\tasks\09-17-elderly-literacy-app\research\vocab\char_coverage_report.md
+exit=0
