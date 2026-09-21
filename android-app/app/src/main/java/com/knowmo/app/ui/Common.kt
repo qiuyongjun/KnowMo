@@ -223,11 +223,27 @@ private fun ChannelChip(
 enum class CardMode { NEW, REVIEW, FREE }
 
 /**
+ * 卡头标识胶囊的统一外形（v19，QYJ 2026-09-21）：**「新学/复习/看看」徽标与收藏按钮共用这一份数值**。
+ *
+ * 抽成 token 而不是各写一遍的理由：QYJ 要求收藏按钮「外形和新学标识一样」，而外形一致性
+ * 只靠注释承诺必然漂移（[GuideCard] 那句「与卡内收藏按钮同款」在 v18 就已经漂了）。
+ * 改这里 = 徽标与收藏按钮同时改。
+ */
+internal object HeaderPill {
+    /** 全圆角胶囊（50% 圆角被高度截断 ⇒ 端部呈半圆；高度 > 宽度时退化为正圆）。 */
+    val shape = RoundedCornerShape(50)
+    val fontSize = 17.sp
+    val padH = 14.dp
+    val padV = 5.dp
+}
+
+/**
  * 词条角标：三态。
  * 新学=蓝 / 复习=橙 / 浏览=绿（绿色=正面回炉，与「认识」配色同系，不与另两态冲突）。
  * v5 R10：浏览态文案「温故」→「看看」——同一徽标要同时服务推荐频道的温故流与场景分区，
  * 而分区池含**未学词**，叫「温故」不成立。
  * 徽标只放文字不放 emoji：emoji 在小字号下发虚，老年用户更难辨认。
+ * v19：外形数值改取 [HeaderPill]，与收藏按钮锁死同款。
  */
 @Composable
 fun TermBadge(mode: CardMode) {
@@ -236,14 +252,65 @@ fun TermBadge(mode: CardMode) {
         CardMode.REVIEW -> Triple(OrangeBg, OrangeDark, "复习")
         CardMode.FREE -> Triple(GreenBg, GreenKnown, "看看")
     }
-    Surface(color = bg, shape = RoundedCornerShape(50)) {
+    Surface(color = bg, shape = HeaderPill.shape) {
         Text(
             label,
-            fontSize = 17.sp,
+            fontSize = HeaderPill.fontSize,
             fontWeight = FontWeight.Bold,
             color = fg,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = HeaderPill.padH, vertical = HeaderPill.padV),
         )
+    }
+}
+
+/**
+ * 词卡收藏按钮（v19 改版，QYJ 2026-09-21：外形与同排 [TermBadge] **同款小胶囊**）。
+ *
+ * 旧版是 56dp 圆角矩形方块（v18）——与徽标并列时是两套视觉语言（方块 vs 文字胶囊）；
+ * 现在卡头读作「左徽标 + 右收藏」一对同款胶囊。
+ *
+ * ⚠️ 两条硬约束，改这个函数前先读：
+ * 1. **外形一律取 [HeaderPill]**，不要在此另写形状/字号/内边距；
+ * 2. **触摸目标保持 ≥48dp** —— 视觉胶囊只有约 30dp 高，对老年用户手指偏小，故在
+ *    `clickable` **之后**再叠一层透明 padding 把热区向外撑到约 48dp：按修饰符顺序，
+ *    `clickable` 写在 padding 之前 ⇒ 它覆盖的是「含 padding 的整块」。涟漪因此略大于
+ *    可见胶囊，这是刻意的——多出来的一圈本身就在提示「这里能点」。
+ *
+ * 配色沿用 v6 口径：米底、收藏 = 金星、未收藏 = 灰星。**文字恒为 AppText2**——
+ * StarGold 在米底 AppSurface 上只有约 1.75:1，做不了正文色（AppText2 同底 8.9:1）；
+ * 收藏态靠「星色 + 文案」双通道区分，不靠文字变色。
+ */
+@Composable
+fun FavoriteButton(isFavorite: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(HeaderPill.shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            Modifier
+                .clip(HeaderPill.shape)
+                .background(AppSurface)
+                .padding(horizontal = HeaderPill.padH, vertical = HeaderPill.padV),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.Star,
+                // 图标不占朗读位：可见文字「收藏 / 已收藏」已表达同一语义，重复朗读只是噪声
+                contentDescription = null,
+                tint = if (isFavorite) StarGold else AppText2,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                if (isFavorite) "已收藏" else "收藏",
+                fontSize = HeaderPill.fontSize,
+                fontWeight = FontWeight.Bold,
+                color = AppText2,
+            )
+        }
     }
 }
 
@@ -283,8 +350,9 @@ fun SwipeHint() {
 /**
  * v6 空收藏引导卡（**仅收藏频道空池可达**——场景分区池 = 全区词必非空，design.md §11.2）：
  * 大字引导文案，与播报同源（`FAV_GUIDE_SPEECH`，prd v6 第 3 条）。
- * 视觉与词条卡/完成卡同语言（白卡 + 投影）；星标用与卡内收藏按钮**同款**的
- * 米色圆底 + 金星——空状态图标即按钮的真实样子，降低「去哪点星星」的理解成本。
+ * 视觉与词条卡/完成卡同语言（白卡 + 投影）；星标保持「米色底 + 金星」——与卡内收藏按钮
+ * 同色系，空状态一眼认出「收藏」。（v19 起收藏按钮外形已改为与徽标同款的小胶囊，
+ * 此处仍是放大的圆形插画：空状态图标刻意做大，不与按钮逐像素对齐。）
  */
 @Composable
 fun GuideCard() {

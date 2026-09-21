@@ -3,7 +3,6 @@ package com.knowmo.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -20,7 +19,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -45,7 +43,6 @@ import com.knowmo.app.ui.theme.GreenKnown
 import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
 import com.knowmo.app.ui.theme.RedForgot
-import com.knowmo.app.ui.theme.StarGold
 
 /**
  * 学习卡（v8 连击 + 全显拼音，design.md §13.2）：形态由调度器运行时计算——
@@ -55,7 +52,8 @@ import com.knowmo.app.ui.theme.StarGold
  * `revealed` 语义 = **已作答**（控制 √/× 按钮隐藏与结果文案显示）；`isExam = mode != FREE`。
  *
  * 布局（适老化重设计）：
- * - 卡头一行：模式徽标居左 + 收藏星居右——**词块区不再为星按钮预留空间**（旧版
+ * - 卡头一行：模式徽标居左 + 收藏按钮居右（**v19 起两者同款小胶囊**，外形数值共用
+ *   Common.kt 的 `HeaderPill` token）——词块区不再为该按钮预留空间（旧版
  *   `padding(end = 56.dp)` 把整个词块推离屏幕中线，是「词不居中」的根因）；
  * - 词 = 唯一视觉主角，垂直 + 水平**真居中**；单字块底色用场景色（替代被删除的大图标块，
  *   保留每张卡的场景色彩身份）；
@@ -94,26 +92,13 @@ fun TermCard(
                 .clickable { onSpeakTerm() }
                 .padding(horizontal = 20.dp, vertical = 16.dp),
         ) {
-            // 卡头：徽标居左、收藏星居右（星按钮挪出词块区 → 词块可整幅居中）
+            // 卡头：徽标居左、收藏按钮居右（按钮挪出词块区 → 词块可整幅居中）
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TermBadge(mode)
                 Spacer(Modifier.weight(1f))
-                // 收藏按钮：圆角矩形（v18，QYJ 拍板弃圆形），圆角半径与用途提示块（16dp）同语言
-                Box(
-                    Modifier
-                        .size(56.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(AppSurface)
-                        .clickable { onToggleFavorite() },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.Filled.Star,
-                        contentDescription = if (isFavorite) "已收藏" else "收藏",
-                        tint = if (isFavorite) StarGold else AppText2,
-                        modifier = Modifier.size(30.dp),
-                    )
-                }
+                // v19：收藏按钮改为与左侧徽标**同款小胶囊**（形状/字号/内边距共用 Common.kt
+                // 的 HeaderPill token），触摸目标外扩与配色口径见 FavoriteButton 的 KDoc
+                FavoriteButton(isFavorite = isFavorite, onClick = onToggleFavorite)
             }
 
             // 词块（视觉主角）：占据卡头与底部提示之间的全部余量，双向居中
