@@ -15,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
@@ -27,6 +28,7 @@ import com.knowmo.app.data.sceneName
 import com.knowmo.app.tts.TTSSpeaker
 import com.knowmo.app.ui.theme.AppSurface
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** feed 页：词条卡（mode 由调度器运行时计算：新学/复习/浏览）或总结卡。
  *  seq = 本会话内的出现序号：v8 起每日队列**首排每词一张卡**，连击未满 3 的词由 `answerCard`
@@ -47,6 +49,20 @@ private const val POOL_BATCH = 2
 
 /** 停稳判定后的播报去抖（ms）：滑动进行中不播，停稳后再等这么久，快速连滑不闪播 */
 private const val SETTLE_SPEECH_DELAY_MS = 200L
+
+/**
+ * v20 频道会话快照（QYJ 2026-09-21 三条反馈的统一载体，见 AppRoot 内 channelSnapshots 注释）：
+ * 切走频道时保存该频道的页面流 / 抽取池 / 落点 / browseMode，切回时原样恢复。
+ * date 用于隔日作废：快照跨天一律丢弃，走完整装载（队列重建 / 重新洗牌）。
+ * 纯会话态（remember map），不持久化——App 重启后按原有 D6 逻辑重新洗牌。
+ */
+private class ChannelSnapshot(
+    val date: String,
+    val pages: List<Page>,
+    val pool: List<Term>,
+    val page: Int,
+    val browseMode: Boolean,
+)
 
 /** v5 R8 作答后自动前进的最短停留（ms）：答案与反馈至少在屏幕上停这么久再翻页，
  *  TTS 不可用时也不至于瞬间翻走（§5.5 两段式等待的第一段） */
@@ -90,8 +106,8 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    （`CardMode.FREE`：词 + 逐字拼音 + 用途全展开、无 √/×——是否认识只在每日任务中出现、
  *    点卡重听、点单字读该字、零写入）。
  *    分区因此：**无完成卡**（`syncDonePage` 对非每日任务频道直接 return）、**不做到期筛选**
- *    （池 = 该区全部词含未学词 → 池必非空 → 不白屏）、**不恢复位置**（D6：每次进区都是一轮新的随机；
- *    装载时 `restoreTo = 0` 必须**显式归零**——切频道时 `pagerState.currentPage` 可能还是上一个频道
+ *    （池 = 该区全部词含未学词 → 池必非空 → 不白屏）；位置恢复 v20 起按**快照**（见下），
+ *    首次进区仍显式归零（`restoreTo = 0`——切频道时 `pagerState.currentPage` 可能还是上一个频道
  *    的旧值）。池型频道**零写入**：浏览卡没有作答入口 → 不写 `TermState` / `DayState`
  *    （分区里未学词只看不算学，学会它的唯一路径是每日任务——D4 新词入口唯一化）。
  * 10. v6 隐藏设置入口（prd v6 第 1 条 / design.md §11.2）：推荐 tab 连点 5 次（间隔 ≤2s，检测在
@@ -102,7 +118,14 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  * 11. v6 收藏分区（prd v6 第 3 条）：`CHANNEL_FAV` 是池型频道，channel != CHANNEL_DAILY 自然落入
  *     池型分支（零改动复用 `appendPoolPages`）；空池插 `Page.Guide` 引导页。星按钮 → `repo.toggleFavorite`
  *     只写 favorites（不碰 TermState / DayState，收藏分区零写入不破坏），favorites 快照整体刷新触发
- *     重组；浏览中取消收藏**不重排**已出卡（pages 不动），后续池重洗自然不再抽到该词。
+ *     重组。取消收藏的口径 v20 起分频道：**fav 频道内即时移除**该词的已出卡（收藏页的本体就是
+ *     收藏集合，挂着已取消的卡是误导，见 `removeFavoriteCards`）；**其他频道不重排**已出卡
+ *     （pages 不动），后续池重洗/重装载自然不再抽到该词。
+ * 12. v20 频道会话快照（QYJ 2026-09-21 三条反馈）：切走频道时保存该频道的页面流/抽取池/落点/
+ *     browseMode，切回时原样恢复——① rec 浏览模式切回落点 = 离开时的浏览页（旧行为被拽回
+ *     完成卡；完成卡仍在首位，回滑可看战果）；② 池型频道切回不再重新洗牌（D6 收窄为
+ *     「App 重启 / 跨日后首轮进区随机洗牌」）；③ 收藏频道取消收藏即时移除该词的卡（见第 11 条）。
+ *     快照是纯会话态、跨日作废、不持久化。
  */
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
@@ -141,6 +164,16 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     val visibleScenes = orderedScenes.filter { it.id !in hiddenIds }   // 频道栏渲染序（rec/fav 固定渲染，不在此列）
     // v6 收藏：收藏集合快照（TermCard 星按钮显色用；toggleFavorite 后整体重读触发重组）
     var favorites by remember { mutableStateOf(repo.favorites().toSet()) }
+
+    // v20 频道会话快照（QYJ 2026-09-21 三条反馈的统一修复）：
+    // ① rec 浏览模式切走再切回，落点 = 离开时的浏览页（旧行为：无条件重建 pages 且落第 0 页
+    //    完成卡——用户浏览到深处切回来被拽回完成卡）；
+    // ② 分区/收藏/常用词等池型频道切回不再重新洗牌（D6「每次进区都是一轮新的随机」改为
+    //    「会话内每频道只洗一次，切回续看」；App 重启 / 跨日仍按 D6 重新随机）；
+    // ③ 收藏频道取消收藏的即时移除（removeFavoriteCards）操作的是当前 pages，
+    //    与本 map 无关——本 map 只在切走瞬间写入（onSelect），切回时消费一次（remove）。
+    val channelSnapshots = remember { mutableMapOf<String, ChannelSnapshot>() }
+    val uiScope = rememberCoroutineScope()
 
     // feed 页面：队列型 = 当日队列 + 总结卡（条件存在）+ 温故流追加页；池型（分区）= 池型浏览页（无限流）
     var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
@@ -311,47 +344,60 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         val isAppEntry = firstChannelLoad
         val announce = !firstChannelLoad
         firstChannelLoad = false
-        freePool = emptyList()
         spokenKeys.clear()
         lastSettledKey = null               // 去重键复位须同步：旧键留在 spokenKeys 会挡回头重听（v18）
         advanceAfterSpeechSeq = -1           // 频道已切换，丢弃上一频道未完成的自动前进
-        if (channel == StudyRepository.CHANNEL_DAILY) {
-            val q = repo.ensureQueue()
-            if (q.confirmed) {
-                // v9：今日已进过浏览模式 → 完成卡保留在首位（回滑可看战果），上滑进入浏览流
-                browseMode = true
-                pages = listOf(Page.Done)
-                appendPoolPages(POOL_BATCH)
-                restoreTo = 0
-                // 浏览模式可自由滑动，「上滑」指引成立
-                if (isAppEntry) tts.speak("欢迎回来。上滑继续浏览。")
-            } else {
-                browseMode = false
-                pages = q.queue.mapIndexedNotNull { i, id ->
-                    val t = termById(id) ?: return@mapIndexedNotNull null
-                    val mode = if (q.modes[i] == StudyRepository.MODE_NEW) CardMode.NEW else CardMode.REVIEW
-                    val seq = nextSeq()
-                    // 断点恢复：按该卡实例的 answered[i] 逐卡恢复展开态（design.md §9.1）
-                    if (q.answered[i]) revealed[seq] = true
-                    Page.TermPage(t, mode, seq, q.cardIds[i])
-                }
-                syncDonePage()                   // 总结卡条件出现：pending == 0 才有收尾页
-                // 断点：frontier = 第一张待处理卡（都做完了则是总结卡）——「在哪儿」=「做到哪儿了」
-                restoreTo = frontierIndex()
-                // 任务阶段锁滑 → 不指引「上滑」，只说继续（作答是唯一前进方式）
-                if (isAppEntry) tts.speak("欢迎回来。继续学习。")
-            }
+        // v20：本频道会话内来过 → 原样恢复（页面流 / 抽取池 / 落点 / browseMode），不重洗不重排。
+        // 只认**当天**的快照：date 不符 = 跨日，队列该重建、池该重洗，走下方完整装载。
+        val snap = channelSnapshots.remove(channel)
+        if (snap != null && snap.date == repo.today()) {
+            browseMode = snap.browseMode
+            pages = snap.pages
+            freePool = snap.pool
+            restoreTo = snap.page.coerceIn(0, maxOf(0, snap.pages.lastIndex))
         } else {
-            browseMode = false                   // 仅 rec 频道有语义，切走时复位
-            // v5 R10（§5.7-3）：池型频道 = 池 + 浏览卡，没有队列、也没有断点——**显式归零**，
-            // 用 `0` 而**不是** `null`：切频道时 `pagerState.currentPage` 可能还是上一个频道的旧值
-            // （比如 7），而新 `pages` 只有 2 张。D6：不恢复位置，每次进区都是一轮新的随机。
-            pages = emptyList()
-            appendPoolPages(POOL_BATCH)
-            // v6：收藏频道空池（没有任何收藏）→ appendPoolPages 拿不到卡，pages 为空 = 白屏。
-            // 插引导页（仅 fav 空池可达；场景分区池 = 全区词必非空，不受影响）。
-            if (pages.isEmpty()) pages = listOf(Page.Guide)
-            restoreTo = 0
+            freePool = emptyList()
+            if (channel == StudyRepository.CHANNEL_DAILY) {
+                val q = repo.ensureQueue()
+                if (q.confirmed) {
+                    // v9：今日已进过浏览模式 → 完成卡保留在首位（回滑可看战果），上滑进入浏览流
+                    browseMode = true
+                    pages = listOf(Page.Done)
+                    appendPoolPages(POOL_BATCH)
+                    restoreTo = 0
+                    // 浏览模式可自由滑动，「上滑」指引成立
+                    if (isAppEntry) tts.speak("欢迎回来。上滑继续浏览。")
+                } else {
+                    browseMode = false
+                    pages = q.queue.mapIndexedNotNull { i, id ->
+                        val t = termById(id) ?: return@mapIndexedNotNull null
+                        val mode = if (q.modes[i] == StudyRepository.MODE_NEW) CardMode.NEW else CardMode.REVIEW
+                        val seq = nextSeq()
+                        // 断点恢复：按该卡实例的 answered[i] 逐卡恢复展开态（design.md §9.1）
+                        if (q.answered[i]) revealed[seq] = true
+                        Page.TermPage(t, mode, seq, q.cardIds[i])
+                    }
+                    syncDonePage()                   // 总结卡条件出现：pending == 0 才有收尾页
+                    // 断点：frontier = 第一张待处理卡（都做完了则是总结卡）——「在哪儿」=「做到哪儿了」
+                    restoreTo = frontierIndex()
+                    // 任务阶段锁滑 → 不指引「上滑」，只说继续（作答是唯一前进方式）
+                    if (isAppEntry) tts.speak("欢迎回来。继续学习。")
+                }
+            } else {
+                browseMode = false                   // 仅 rec 频道有语义，切走时复位
+                // v5 R10（§5.7-3）：池型频道 = 池 + 浏览卡，没有队列、也没有断点——**显式归零**，
+                // 用 `0` 而**不是** `null`：切频道时 `pagerState.currentPage` 可能还是上一个频道的旧值
+                // （比如 7），而新 `pages` 只有 2 张。
+                // ⚠️ v20 起 D6 口径收窄：**会话内**每频道只洗一次（切回走上方快照恢复），
+                // 本分支只在首次进入该频道 / 快照跨日作废时执行——「每次进区都是一轮新的随机」
+                // 仅剩 App 重启 / 跨日两个场景成立。
+                pages = emptyList()
+                appendPoolPages(POOL_BATCH)
+                // v6：收藏频道空池（没有任何收藏）→ appendPoolPages 拿不到卡，pages 为空 = 白屏。
+                // 插引导页（仅 fav 空池可达；场景分区池 = 全区词必非空，不受影响）。
+                if (pages.isEmpty()) pages = listOf(Page.Guide)
+                restoreTo = 0
+            }
         }
         if (announce) pendingAnnounce = "换到${sceneName(channel)}频道。"
     }
@@ -362,7 +408,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     LaunchedEffect(channel, answerTick) { graduated = repo.graduatedScenes() }
 
     // 断点/频道切换跳页（restoreTo 置空防重复；需先于停稳监听声明，保证跳页先行）
-    // v5 R10：队列型取 frontier；池型恒为 0（D6 不恢复位置）；v9 转浏览/浏览模式装载也归 0
+    // v5 R10：队列型取 frontier；池型首次进区恒为 0（v20 起切回走快照恢复，见装载 effect）；
+    // v9 转浏览/浏览模式装载也归 0
     // v18 修复「切频道有时不播报、首卡不播报」：频道装载播报**不再依赖停稳事件**——
     // 目标页与切换前 currentPage 净不变（最常见：都停在第 0 页）时 `currentPage to
     // isScrollInProgress` 无变化，snapshotFlow 不发事件，停稳 collector 整个不跑，
@@ -426,6 +473,36 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         }
         if (insertAt >= pages.size) out.add(Page.TermPage(t, CardMode.REVIEW, newSeq, repeatCardId))
         pages = out
+    }
+
+    /** v20 收藏频道（QYJ 2026-09-21 反馈）：取消收藏后该词的浏览卡**即时移除**——收藏页的内容
+     *  本体就是收藏集合，取消后卡片还挂着是误导。v6 的「浏览中不重排已出卡」口径**保留给其他
+     *  池型频道**（分区/温故流/常用词：取消收藏不动已出卡，下次装载/重洗自然不再抽到）。
+     *  实现要点：
+     *  - 移除该词在 pages 里的**全部**卡（无限流池重洗后同词可能已出现多次）；
+     *  - 同步从抽取池余量剔除（否则临近队尾追加时又出来）；
+     *  - 落点校正：当前页之前的移除使下标左移（removedBefore）；当前页本身被移除时钳到
+     *    最近的合法下标——自然落在下一张保留卡上；落点没变就不跳页；
+     *  - 全部移光 → 插引导页（与装载分支同一兜底）；
+     *  - `scrollToPage` 是 suspend → 经 uiScope 派发；`pages` 写入先行，协程执行时读到新列表。
+     *  零写入契约不破坏：本函数只动 UI 会话态，不碰 favorites / TermState / DayState。 */
+    fun removeFavoriteCards(termId: String) {
+        val cur = pagerState.currentPage
+        var removedBefore = 0
+        var currentRemoved = false
+        pages.forEachIndexed { i, pg ->
+            if (pg is Page.TermPage && pg.t.id == termId) {
+                if (i < cur) removedBefore++
+                if (i == cur) currentRemoved = true
+            }
+        }
+        val kept = pages.filterNot { it is Page.TermPage && it.t.id == termId }
+        if (kept.size == pages.size) return
+        freePool = freePool.filterNot { it.id == termId }
+        pages = if (kept.isEmpty()) listOf(Page.Guide) else kept
+        val target = (cur - removedBefore).coerceIn(0, pages.lastIndex)
+        if (!currentRemoved && target == cur) return   // 落点未变，不必跳页
+        uiScope.launch { pagerState.scrollToPage(target) }
     }
 
     /** 作答（认识/忘了）：连击层 + 间隔层双层并存（prd v8 / design.md §13.2）。作答入口只剩
@@ -559,7 +636,20 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 graduated = graduated,
                 scenes = visibleScenes,
                 onOpenSettings = { showSettings = true },
-                onSelect = { channel = it },
+                onSelect = { new ->
+                    // v20：切走前保存当前频道的会话快照（页面流 + 抽取池 + 落点 + browseMode），
+                    // 切回时由装载 effect 原样恢复——rec 浏览不再被拽回完成卡，池型频道不再重新洗牌
+                    if (new != channel) {
+                        channelSnapshots[channel] = ChannelSnapshot(
+                            date = repo.today(),
+                            pages = pages,
+                            pool = freePool,
+                            page = pagerState.currentPage,
+                            browseMode = browseMode,
+                        )
+                        channel = new
+                    }
+                },
             )
 
             VerticalPager(
@@ -600,14 +690,19 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         revealed = p.mode == CardMode.FREE || revealed[p.seq] == true,
                         resultText = results[p.seq],
                         // v6 收藏星按钮：全卡型可见；只写 favorites（独立于 TermState/DayState，
-                        // 收藏分区零写入不破坏）。浏览中取消收藏**不重排**已出卡（pages 不动），
-                        // 后续 appendPoolPages 重洗时自然不再抽到该词。
+                        // 收藏分区零写入不破坏）。v20：取消收藏在 **fav 频道内即时移除**该词的卡；
+                        // 其他频道不重排已出卡，后续装载/重洗自然不再抽到该词。
                         isFavorite = p.t.id in favorites,
                         onToggleFavorite = {
                             val added = repo.toggleFavorite(p.t.id)
                             favorites = repo.favorites().toSet()
                             // 关键操作语音反馈（适老化硬约束：按钮点击朗读含义）
                             tts.speak(if (added) "已收藏" else "已取消收藏")
+                            // v20：收藏频道内取消收藏 → 该词的卡即时移出收藏页（removeFavoriteCards）；
+                            // 其他频道浏览卡不动（v6「不重排已出卡」口径保留），下次装载/重洗自然生效
+                            if (!added && channel == StudyRepository.CHANNEL_FAV) {
+                                removeFavoriteCards(p.t.id)
+                            }
                         },
                         // v8：防泄题分流删除（design.md §13.2）——点卡片一律重听「词 + 用途」
                         onSpeakTerm = { tts.speak(termSpeech(p.t)) },
