@@ -15,8 +15,9 @@ val OrangeBg = Color(0xFFFFF3E0)
 val GreenKnown = Color(0xFF1B5E20)
 val GreenBg = Color(0xFFE8F5E9)
 val RedForgot = Color(0xFFB71C1C)
-val AppSurface = Color(0xFFF5F7FA)
-val AppLine = Color(0xFFDDE2EA)
+// 页面底色用暖米色而非冷灰：白卡浮在暖底上更柔和，对老年用户更亲和（卡片靠投影分层，不用描边）
+val AppSurface = Color(0xFFF5F1E9)
+val AppLine = Color(0xFFE6E0D4)
 val AppText = Color(0xFF1A1A1A)
 val AppText2 = Color(0xFF424244)
 val StarGold = Color(0xFFF9A825)   // v6 收藏星按钮（藏 = 金色实心 ★；design.md §11.2 指定 #F9A825 系）

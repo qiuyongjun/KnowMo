@@ -1,5 +1,10 @@
 package com.knowmo.app.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -11,9 +16,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,6 +36,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -35,10 +49,12 @@ import com.knowmo.app.ui.theme.AppText
 import com.knowmo.app.ui.theme.AppText2
 import com.knowmo.app.ui.theme.BlueBg
 import com.knowmo.app.ui.theme.BlueDark
+import com.knowmo.app.ui.theme.BluePrimary
 import com.knowmo.app.ui.theme.GreenBg
 import com.knowmo.app.ui.theme.GreenKnown
 import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
+import com.knowmo.app.ui.theme.StarGold
 
 /* ---------- 频道 Tab（参考抖音顶部 tab） ---------- */
 
@@ -51,15 +67,18 @@ private const val SETTING_TAP_GAP_MS = 2000L
 /* ---------- v6 空收藏引导（引导卡与播报同源；AppRoot.cardSpeech 引用 FAV_GUIDE_SPEECH） ---------- */
 
 private const val FAV_GUIDE_TITLE = "还没有收藏的词"
-private const val FAV_GUIDE_BODY = "学习时点卡片右边的星星，就能把词收进来。"
+private const val FAV_GUIDE_BODY = "学习时点卡片右上角的星星，就能把词收进来。"
 val FAV_GUIDE_SPEECH = "$FAV_GUIDE_TITLE。$FAV_GUIDE_BODY。"
 
 /**
  * 频道 Tab（参考抖音顶部 tab）。
  * v6 渲染顺序：**推荐（固定第一）→ 收藏（固定第二）→ 可见场景分区**（`scenes` = 设置过滤排序后传入，
- * rec/fav 不参与隐藏与排序，故不在此列表里）。已完成分区（v5：该区每个词间隔天数都 >= 15，
- * design.md §9.5）加 🎓 标记、文字转绿，但仍可点进去自主复习；区内任何一词「忘了」清零即即时回退。
- * 收藏 tab 不参与毕业（fav 不在 SCENES，graduatedScenes 天然不含它）。
+ * rec/fav 不参与隐藏与排序，故不在此列表里）。已完成的分区（v5：该区每个词间隔天数都 >= 15，
+ * design.md §9.5；v16 起**面向用户的文案统一称「学完」**）加「学完」后缀、文字转绿，
+ * 但仍可点进去自主复习；区内任何一词「忘了」清零即即时回退。
+ * 收藏 tab 不参与该判定（fav 不在 SCENES，graduatedScenes 天然不含它）。
+ * ⚠️ 代码标识符沿用 `graduated` / `GRADUATED_DAYS`（多处引用、且与产品措辞解耦），
+ * 只把**用户能看到的文案**统一成「学完」—— 别为了对齐措辞去重命名标识符。
  * **隐藏设置入口（v6，prd v6 第 1 条）**：在推荐 tab 上**连点 5 次**（每次间隔 ≤ 2s，超时重置）
  * 回调 `onOpenSettings`；每次点击照常 `onSelect(CHANNEL_DAILY)`——第 1 次切到推荐，
  * 后 4 次重复选中推荐 = 无操作（design.md §11.3 已接受的副作用）。
@@ -80,12 +99,12 @@ fun ChannelBar(
         Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // 推荐（固定第一；连点 5 次打开设置页）
+        // 推荐（固定第一；连点 5 次打开设置）——不用图标，实心蓝底即可表达「当前所在」
         ChannelChip(
-            label = "⭐ 推荐",
+            label = "推荐",
             active = current == StudyRepository.CHANNEL_DAILY,
             isGraduated = false,
             onClick = {
@@ -102,17 +121,23 @@ fun ChannelBar(
                 }
             },
         )
-        // 收藏（固定第二；不参与毕业 / 隐藏 / 排序）
+        // 收藏（固定第二；不参与毕业 / 隐藏 / 排序）——金星图标与「推荐」区分（旧版两个 ⭐ 易混淆）
         ChannelChip(
-            label = "⭐ 收藏",
+            label = "收藏",
             active = current == StudyRepository.CHANNEL_FAV,
             isGraduated = false,
+            star = true,
             onClick = { onSelect(StudyRepository.CHANNEL_FAV) },
         )
         // 可见场景分区（设置过滤 + 排序后传入；AppRoot 在当前频道被隐藏时回退推荐）
         scenes.forEach { s ->
             ChannelChip(
-                label = if (s.id in graduated) "${s.icon} ${s.name} 🎓" else "${s.icon} ${s.name}",
+                // v16：完成的分区加**文字**后缀「学完」，不再用 🎓 emoji ——
+                // 本文件早就写明「场景 chip 只放文字：彩色 emoji 混在实心蓝底/白底胶囊里显杂乱」，
+                // 🎓 一直是那条规则的例外；且 emoji 在 20sp 小字下发虚，老年用户难辨认。
+                // 代价：chip 变宽（4 字分区名 + 「学完」= 6 字），顶栏一屏能放的频道变少，靠横向滚动兜。
+                // ⚠️ 与设置页的「学完 N 词」同一措辞：设置页是**词**级，这里是**分区**级（该区每个词都学完）。
+                label = if (s.id in graduated) "${s.name} 学完" else s.name,
                 active = s.id == current,
                 isGraduated = s.id in graduated,
                 onClick = { onSelect(s.id) },
@@ -121,22 +146,42 @@ fun ChannelBar(
     }
 }
 
-/** 频道 chip（v6 抽出：推荐 / 收藏 / 场景分区三种共用同一渲染） */
+/**
+ * 频道 chip（v6 抽出：推荐 / 收藏 / 场景分区三种共用同一渲染）。
+ * 选中态用**实心蓝底白字**（对比浅底深字的旧样式，老年用户更容易识别「当前在哪个频道」）；
+ * 未选中 = 白色胶囊浮在暖米色页面底上。
+ */
 @Composable
-private fun ChannelChip(label: String, active: Boolean, isGraduated: Boolean, onClick: () -> Unit) {
-    Box(
+private fun ChannelChip(
+    label: String,
+    active: Boolean,
+    isGraduated: Boolean,
+    onClick: () -> Unit,
+    star: Boolean = false,
+) {
+    Row(
         Modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (active) BlueBg else AppSurface)
+            .clip(RoundedCornerShape(50))
+            .background(if (active) BluePrimary else Color.White)
             .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (star) {
+            Icon(
+                Icons.Filled.Star,
+                contentDescription = null,
+                tint = StarGold,
+                modifier = Modifier.size(24.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+        }
         Text(
             label,
-            fontSize = 21.sp,
+            fontSize = 20.sp,
             fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
             color = when {
-                active -> BlueDark
+                active -> Color.White
                 isGraduated -> GreenKnown
                 else -> AppText2
             },
@@ -162,70 +207,117 @@ enum class CardMode { NEW, REVIEW, FREE }
 /**
  * 词条角标：三态。
  * 新学=蓝 / 复习=橙 / 浏览=绿（绿色=正面回炉，与「认识」配色同系，不与另两态冲突）。
- * v5 R10：浏览态文案「📖 温故」→「📖 看看」——同一徽标要同时服务推荐频道的温故流与场景分区，
+ * v5 R10：浏览态文案「温故」→「看看」——同一徽标要同时服务推荐频道的温故流与场景分区，
  * 而分区池含**未学词**，叫「温故」不成立。
+ * 徽标只放文字不放 emoji：emoji 在小字号下发虚，老年用户更难辨认。
  */
 @Composable
 fun TermBadge(mode: CardMode) {
     val (bg, fg, label) = when (mode) {
-        CardMode.NEW -> Triple(BlueBg, BlueDark, "✨ 新学")
-        CardMode.REVIEW -> Triple(OrangeBg, OrangeDark, "🔁 复习")
-        CardMode.FREE -> Triple(GreenBg, GreenKnown, "📖 看看")
+        CardMode.NEW -> Triple(BlueBg, BlueDark, "新学")
+        CardMode.REVIEW -> Triple(OrangeBg, OrangeDark, "复习")
+        CardMode.FREE -> Triple(GreenBg, GreenKnown, "看看")
     }
     Surface(color = bg, shape = RoundedCornerShape(50)) {
         Text(
             label,
-            fontSize = 19.sp,
+            fontSize = 17.sp,
             fontWeight = FontWeight.Bold,
             color = fg,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
         )
     }
 }
 
+/**
+ * 上滑引导：箭头图标做 0→-8dp 的往返浮动动画——用**运动**提示可滑方向（老年用户对静态
+ * 箭头的理解弱于动态暗示）；文案固定「上滑看下一个」（方向语义契约见 spec 组件规范）。
+ */
 @Composable
 fun SwipeHint() {
-    Text(
-        "上滑看下一个 ↑",
-        fontSize = 20.sp,
-        fontWeight = FontWeight.Bold,
-        color = AppText2,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
-        textAlign = TextAlign.Center,
+    val transition = rememberInfiniteTransition(label = "swipeHint")
+    val dy by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = -8f,
+        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
+        label = "dy",
     )
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.KeyboardArrowUp,
+            contentDescription = null,
+            tint = AppText2,
+            modifier = Modifier
+                .size(28.dp)
+                .offset(y = dy.dp),
+        )
+        Spacer(Modifier.width(4.dp))
+        Text("上滑看下一个", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppText2)
+    }
 }
 
 /**
  * v6 空收藏引导卡（**仅收藏频道空池可达**——场景分区池 = 全区词必非空，design.md §11.2）：
  * 大字引导文案，与播报同源（`FAV_GUIDE_SPEECH`，prd v6 第 3 条）。
+ * 视觉与词条卡/完成卡同语言（白卡 + 投影）；星标用与卡内收藏按钮**同款**的
+ * 米色圆底 + 金星——空状态图标即按钮的真实样子，降低「去哪点星星」的理解成本。
  */
 @Composable
 fun GuideCard() {
     Column(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+            .padding(horizontal = 18.dp, vertical = 14.dp),
     ) {
-        Text("⭐", fontSize = 64.sp)
-        Spacer(Modifier.height(16.dp))
-        Text(
-            FAV_GUIDE_TITLE,
-            fontSize = 30.sp,
-            fontWeight = FontWeight.Black,
-            color = AppText,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(12.dp))
-        Text(
-            FAV_GUIDE_BODY,
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = AppText2,
-            textAlign = TextAlign.Center,
-        )
-        // ⚠️ 不渲染 SwipeHint（「上滑看下一个 ↑」）：空收藏池时引导卡是 feed 里唯一的页，
+        Column(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .shadow(10.dp, RoundedCornerShape(28.dp))
+                .clip(RoundedCornerShape(28.dp))
+                .background(Color.White)
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Box(
+                Modifier
+                    .size(88.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(AppSurface),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Star,
+                    contentDescription = null,
+                    tint = StarGold,
+                    modifier = Modifier.size(44.dp),
+                )
+            }
+            Spacer(Modifier.height(24.dp))
+            Text(
+                FAV_GUIDE_TITLE,
+                fontSize = 30.sp,
+                fontWeight = FontWeight.Black,
+                color = AppText,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                FAV_GUIDE_BODY,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                color = AppText2,
+                textAlign = TextAlign.Center,
+            )
+        }
+        // ⚠️ 不渲染 SwipeHint（「上滑看下一个」）：空收藏池时引导卡是 feed 里唯一的页，
         // 引导上滑会误导（spec/frontend/component-guidelines.md 的方向语义约束）。
     }
 }

@@ -43,5 +43,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-text")
     implementation("androidx.compose.material3:material3")
+    // Material 核心图标集（Star/Check/Close/KeyboardArrowUp/PlayArrow），显式声明避免依赖传递变化
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.foundation:foundation")
 }

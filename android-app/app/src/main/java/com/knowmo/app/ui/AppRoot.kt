@@ -41,8 +41,6 @@ sealed interface Page {
     data object Guide : Page
 }
 
-data class SessionStats(val known: Int = 0, val forgot: Int = 0)
-
 /** 池型频道的预追加页数（v5 R10：温故流与分区共用同一条追加逻辑；临近队尾 / 确认后装载时预追加，池空重洗） */
 private const val POOL_BATCH = 2
 
@@ -76,7 +74,7 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    （`CHANNEL_COMMON`，不可显隐、恒入推荐——QYJ 拍板的内容源特例：默认只有推荐+收藏
  *    两个频道时推荐才有内容）。隐藏分区的词两个入口都抽不到。
  * 7. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
- * 8. 分区完成（design.md §9.5，days >= 15）→ 频道栏加 🎓，即时可逆
+ * 8. 分区完成（design.md §9.5，days >= 15）→ 频道栏加「学完」后缀（v16 起用文字，不再用 🎓），即时可逆
  *    （间隔层只由每日任务作答写入）
  * 9. 频道分两类（v5 R10，§5.7）：
  *    **队列型 = 只有每日任务频道**（`CHANNEL_DAILY` = "rec"）——`repo.ensureQueue()` / `DailyQueue` /
@@ -103,12 +101,18 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
 @Composable
 fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     var channel by remember { mutableStateOf(StudyRepository.CHANNEL_DAILY) }
-    var session by remember { mutableStateOf(SessionStats()) }
+    // v16：作答计数器 —— **每次作答 +1**，唯一用途是给「刷新分区完成徽章」的 effect 当 key。
+    // 为什么不能拿战果数字当 key：`mutableStateOf` 走**结构相等**，值没变就不重启 effect ——
+    // 答对但「忘了」次数不变时，徽章该重算却不会重算（v16 之前的 `DayStats(knownWords, forgot)`
+    // 有同样的毛病）。计数器每次作答必变，是唯一可靠的触发源。
+    // 战果数字本身（完成卡 / 播报）**不缓存**，直接读 repo 的持久口径 ——
+    // 本地累加或本地镜像都得与 repo 的写入严格同步，任一处漏改就漂移。
+    var answerTick by remember { mutableStateOf(0) }
     val revealed = remember { mutableStateMapOf<Int, Boolean>() }      // seq -> 任务卡是否已作答（v8：不再控制拼音显隐——卡片恒全展开，只控制按钮隐藏/结果文案；浏览卡不写这里）
     val results = remember { mutableStateMapOf<Int, String>() }        // seq -> 反馈文案
     var seqGen by remember { mutableStateOf(0) }                       // 页出现序号发生器（只在 effect/回调中递增）
     val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重（频道 + 页身份）
-    var graduated by remember { mutableStateOf(emptySet<String>()) }   // 已完成分区（频道栏 🎓）
+    var graduated by remember { mutableStateOf(emptySet<String>()) }   // 已完成分区（频道栏「学完」）
 
     // v9（prd 第 1 条）：**browseMode = 每日任务频道到达完成卡之后的自由浏览**——
     // false = 任务阶段（锁滑，唯一翻页动力是作答后自动前进）；true = 到达完成卡转浏览
@@ -146,7 +150,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     }
 
     // v6：打开设置页播报「已打开设置」（prd v6 第 2 条；keyed showSettings，关闭不播）。
-    // v14：打开时重取学习统计快照（覆盖上次打开之后的作答变化——今日战果/streak/分区进度）
+    // v14：打开时重取学习统计快照（覆盖上次打开之后的作答变化——今日战果/streak/分区进度）。
+    // v16：快照的总览分母依赖**可见分区**，所以显隐变化时也要重取 —— 见 onSetVisible 回调。
     LaunchedEffect(showSettings) {
         if (showSettings) {
             stats = repo.studyStats()
@@ -196,13 +201,11 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         return if (doneIdx >= 0) doneIdx else 0
     }
 
-    /** 任务区去重词数 = 总结卡战果里的 N（§5.3：N = 任务区去重词数）。池型页（浏览卡）不计入。 */
-    fun taskWordCount(): Int = pages.asSequence()
-        .filterIsInstance<Page.TermPage>()
-        .filter { it.mode != CardMode.FREE }
-        .map { it.t.id }
-        .distinct()
-        .count()
+    /* 完成卡战果里的 N（「今天学完了 N 个词」）= **当日任务区去重词数**，取自
+     * `repo.todayTaskWordCount()`（当日队列 distinct），**刻意不由 `pages` 派生** ——
+     * v9 的 `enterBrowse()` 在用户到达完成卡的**那一帧**就移除全部任务卡，pages 派生的计数
+     * 会当场归零，完成卡与语音都报「今天学完了 0 个词」（当日重启直接进浏览模式同理：
+     * pages 里只剩完成卡）。v16 修复。池型浏览页本就不在队列里，天然不计入。 */
 
     /** v5 R7 总结卡「条件出现」（§5.1）：`pending == 0` 且还没有总结卡 → 追加到任务区末尾；
      *  反向保底（`pending > 0` 且总结卡还在队尾）→ 移除。
@@ -239,8 +242,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     fun cardSpeech(p: Page): String = when (p) {
         is Page.TermPage -> if (p.mode == CardMode.FREE) termSpeech(p.t) else ""
         Page.Done ->
-            "太棒了，今日任务完成！今天学完了${taskWordCount()}个词，" +
-                "认识了${session.known}次，忘了${session.forgot}次。" +
+            "太棒了，今日任务完成！今天学完了${repo.todayTaskWordCount()}个词，" +
+                "忘了${repo.todayForgot()}次。" +
                 "上滑进入推荐模式，随便看看吧。"
         Page.Guide -> FAV_GUIDE_SPEECH    // v6 空收藏引导（文案与引导卡同源）
     }
@@ -330,14 +333,13 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
             if (pages.isEmpty()) pages = listOf(Page.Guide)
             restoreTo = 0
         }
-        session = SessionStats(repo.todayKnown(), repo.todayForgot())   // 战果当日持久口径（§5.3）
         if (announce) pendingAnnounce = "换到${sceneName(channel)}频道。"
     }
 
-    // 分区完成徽章：进入 / 切频道 / 每次作答（session 变化）后刷新。
+    // 分区完成徽章：进入 / 切频道 / 每次作答（answerTick 变化）后刷新。
     // 注：完成判定只依赖间隔层 days（design.md §9.5），徽章即时更新；「忘了」days=1 → 即时退出完成状态。
-    // 间隔层只由每日任务考试卡作答写入 → 分区 🎓 只能靠每日任务推进（浏览不写状态）。
-    LaunchedEffect(channel, session) { graduated = repo.graduatedScenes() }
+    // 间隔层只由每日任务考试卡作答写入 → 分区「学完」标记只能靠每日任务推进（浏览不写状态）。
+    LaunchedEffect(channel, answerTick) { graduated = repo.graduatedScenes() }
 
     // 断点/频道切换跳页（restoreTo 置空防重复；需先于停稳监听声明，保证跳页先行）
     // v5 R10：队列型取 frontier；池型恒为 0（D6 不恢复位置）；v9 转浏览/浏览模式装载也归 0
@@ -390,8 +392,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     }
 
     /** 作答（认识/忘了）：连击层 + 间隔层双层并存（prd v8 / design.md §13.2）。作答入口只剩
-     *  **每日任务卡**（温故流/分区/收藏都是浏览卡，没有 √/×）——`knownAnswers` / `forgotAnswers`
-     *  只在这里 +1，故总结卡战果天然只统计每日任务频道。
+     *  **每日任务卡**（温故流/分区/收藏都是浏览卡，没有 √/×）——战果只在每日任务频道产生，
+     *  故完成卡天然只统计每日任务（v16：战果数字不再缓存，完成卡与播报都直接读 repo 的持久口径）。
      *  - **间隔层**：作答即写（v7 口径保留：首见认识 → {1,今天,0}；首见忘了 → {1,今天,lapses+1}；
      *    SM-2 动态间隔 + 每日升一级闸门 + restoreTo 兑现 + 封顶分级，全在 repo.markKnown/markForgot 内）。
      *  - **连击层**（v8）：markKnown 返回连击计数 count——`count < DAILY_COMBO_TARGET` →
@@ -406,7 +408,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         if (p.qIndex >= 0) repo.markAnswered(p.qIndex)   // 池型页 qIndex=-1 不落库
         if (known) {
             val (count, upgraded, daysAfter) = repo.markKnown(t.id)
-            session = session.copy(known = session.known + 1)
             // 播报（v8 连击分级 + v5 R11 升级口径：满 3 且升级才报天数）
             val target = StudyRepository.DAILY_COMBO_TARGET
             val (msg, spoken) = when {
@@ -423,11 +424,12 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
             insertRepeatCard(t, p, repeat = count < target)
         } else {
             repo.markForgot(t.id)
-            session = session.copy(forgot = session.forgot + 1)
             results[p.seq] = "没关系，再学一遍 💪"
             tts.speak("${termSpeech(t)}。没关系，再学一遍。")
             insertRepeatCard(t, p, repeat = true)          // 忘了 → 连击清零，当日必重现
         }
+        // v16：本次作答一定会改间隔层，徽章可能要重算 —— 计数器无脑 +1（战果数字直接读 repo，不在这里缓存）
+        answerTick++
         // v5 R7 总结卡条件出现：全部任务词连击满 3 移出（无待处理卡）→ 总结卡此时才出现在队尾
         syncDonePage()
         // v5 R8 作答后自动前进（§5.5）：置触发键，由下面 keyed 该 seq 的 effect 等播报念完再翻页
@@ -499,7 +501,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         Column(
             Modifier
                 .fillMaxSize()
-                .background(androidx.compose.ui.graphics.Color.White)
+                .background(AppSurface)   // 暖米色整页底：状态栏/频道栏/卡片区同色，白卡浮其上
                 .statusBarsPadding()
                 .navigationBarsPadding(),
         ) {
@@ -569,9 +571,11 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         onAnswer = { known -> answer(p, known) },
                     )
                     Page.Done -> DoneCard(
-                        known = session.known,
-                        forgot = session.forgot,
-                        words = taskWordCount(),
+                        // v16：两个数都取**持久口径** —— v9 的 enterBrowse 会在到达完成卡的那一帧
+                        // 移除任务卡，由 pages 派生的计数会当场归零（见上方注释）。
+                        // 「认识了 x 个词」已从完成卡移除：连击机制下它恒等于 words（见 DoneCard KDoc）。
+                        words = repo.todayTaskWordCount(),
+                        forgot = repo.todayForgot(),
                         // v9：无「确认」按钮——到达完成卡即转浏览模式（enterBrowse，见 collector）；
                         // inBrowse 切换底部引导文案（浏览模式中显示「随便看看吧」）
                         inBrowse = browseMode,
@@ -596,9 +600,18 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                     settings.setSceneVisible(id, visible)
                     hiddenIds = settings.hiddenIds()
                     orderedScenes = settings.orderedScenes()
+                    // v16：总览分母 = 当前可学范围（常用词 + 可见分区），显隐一变口径就变 ——
+                    // 必须当场重取快照，否则用户开关分区后上面的「已学 X / N」纹丝不动。
+                    stats = repo.studyStats()
                 },
                 onMove = { id, delta ->
                     settings.moveScene(id, delta)
+                    orderedScenes = settings.orderedScenes()
+                },
+                // v16 拖动落位：与 onMove 同一套「写库 → 重读镜像」，区别只是步长任意
+                //（段内一次拖动可能跨多项，落点是目标分区在 order 里的下标）
+                onMoveTo = { id, targetIndex ->
+                    settings.moveSceneTo(id, targetIndex)
                     orderedScenes = settings.orderedScenes()
                 },
                 onSetQuota = { n ->

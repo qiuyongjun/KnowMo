@@ -105,13 +105,34 @@ fun pendingTaskCount(): Int = pages.count(::isPending)
 
 ## 完成度不由「进度」表达
 
-不展示进度条、不展示「第 x / y 张」，也不靠「滑到底」。完成是**事件**：队列里没有待处理卡时，完成卡才被插入 feed。`session` / 战果计数只能用于**展示成绩**，不得参与「做完了没有」的判定。
+不展示进度条、不展示「第 x / y 张」，也不靠「滑到底」。完成是**事件**：队列里没有待处理卡时，完成卡才被插入 feed。`dayStats` / 战果计数只能用于**展示成绩**，不得参与「做完了没有」的判定。
 
 ## 战果计数（当日持久）
 
-`DayState.knownAnswers` / `forgotAnswers` 是**当日持久计数**（隔天随 `DayState` 整体作废），`markKnown` / `markForgot` 各自 +1；UI 侧的 `SessionStats` 只是它的**重组镜像**，装载队列时用 `repo.todayKnown()` / `repo.todayForgot()` 初始化。
+**量纲契约（v16 起）：完成卡与设置页统一为「认识 → 去重词数、忘了 → 次数」。**
 
-`SessionStats` 只做**展示**（完成卡战果、播报），**不得**参与「做完了没有」的判定——那走 `pendingTaskCount()`。
+| 显示 | 取值 | 禁止 |
+|---|---|---|
+| 今天学完了 N 个词 | `repo.todayTaskWordCount()` = 当日队列 `queue.distinct().size` | **不得**由 UI 的 `pages` 派生 —— v9 的 `enterBrowse()` 在到达完成卡的**那一帧**移除全部任务卡，pages 派生的计数会当场归零（完成卡与语音都报「今天学完了 0 个词」） |
+| 认识了 x 个词（**仅设置页**） | `repo.todayKnownWords()` = `DayState.counts.count { it.value >= 1 }`（答对过、且连击未被清零的词数） | **不得**用 `knownAnswers` 次数 —— 连击满 3 才移出队列，次数口径会把 10 个词的成果报成 30 次。**完成卡不用这个数**：任务全做完时它恒等于 N（纯重复），见 `component-guidelines.md` 的完成卡文案节 |
+| 忘了 y 次 | `repo.todayForgot()` = `DayState.forgotAnswers` | 刻意**保留次数**：忘了是可重复发生的事件，不是词的属性 |
+
+`DayState` 三件套（`counts` / `knownAnswers` / `forgotAnswers`）仍是**当日持久**的（隔天随日期不符整体作废）；`knownAnswers` 字段 v16 起不再被 UI 读取，保留是为了 persist/load 读写对称与旧数据兼容。
+
+UI 侧的 `DayStats` 只是上述持久值的**重组镜像**：装载时初始化，**每次作答后从 repo 重读** —— 不要本地 `+1`，手工累加必须与 repo 的写入严格同步，任一处漏改就漂移（v16 之前就是两条账各自记账）。
+
+`DayStats` 只做**展示**（完成卡战果、播报），**不得**参与「做完了没有」的判定——那走 `pendingTaskCount()`。
+
+## 设置页统计快照的刷新时机（v16）
+
+`StudyStats` 是另一条链：由 `repo.studyStats()` 一次性构建、**零写入**，AppRoot 持为 state。
+重取时机有**两个**，少一个就会看到过期数字：
+
+1. **打开设置页时**（`LaunchedEffect(showSettings)`）—— 覆盖上次打开之后的作答变化（今日战果 / streak / 分区进度）；
+2. **分区显隐变化时**（`onSetVisible` 回调内）—— v16 起总览的分子分母都是「当前可学范围」
+   （常用词 + 可见分区），用户开一个分区分母当场就该变；只按"打开"重取会让它**纹丝不动**。
+
+设置页是 overlay，打开期间 feed 无法作答，所以除这两处之外不需要响应式订阅。
 
 ## Common Mistakes
 
@@ -125,3 +146,5 @@ fun pendingTaskCount(): Int = pages.count(::isPending)
 | 作答后翻页动画刚起步就被取消 | 复位写在了 `animateScrollToPage` 之前（key 被自己改写） | 复位放 `finally` 且比较后再清，见 Gotcha (2) |
 | 作答播报被掐断、卡片提前翻走 | `speaking` 没在 `onStart` 置位，`QUEUE_FLUSH` 的 `onStop` 把它清成 false | `speak()` 与 `onStart` 都置位，见 Gotcha (3) |
 | 重启后战果变成 0 | 用会话计数表达当日成绩 | 计数落 `DayState`，装载时从 repo 初始化 |
+| 完成卡显示「今天学完了 0 个词」 | 战果从 `pages` 派生，而 `enterBrowse()` 已把任务卡移除 | 改取 `repo.todayTaskWordCount()`（当日队列 distinct），见「战果计数」 |
+| 战果数字比实际夸张 3 倍 | 用「作答次数」表达「认识了几个词」（连击一词答 3 次） | 认识用去重词数、忘了用次数，见「战果计数」 |

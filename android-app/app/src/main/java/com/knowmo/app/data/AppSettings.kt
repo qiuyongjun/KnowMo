@@ -80,12 +80,29 @@ class AppSettings(context: Context) {
         persist()
     }
 
-    /** 上移（delta = -1）/ 下移（delta = +1），边界裁剪；rec/fav 不在 order 内，天然不可移动 */
+    /** 上移（delta = -1）/ 下移（delta = +1），边界裁剪；rec/fav/daily 不在 order 内，天然不可移动。
+     *  v16：转调 [moveSceneTo] —— 边界裁剪与落位逻辑只留一份，避免两处各自漂移。 */
     fun moveScene(id: String, delta: Int) {
+        val i = order.indexOf(id)
+        if (i < 0) return
+        moveSceneTo(id, i + delta)
+    }
+
+    /**
+     * v16 拖动重排落位：把 id 移到 order 的 `targetIndex` 处（越界裁剪）。
+     * 与 [moveScene] 同语义，区别只在步长不受 ±1 限制 —— 设置页的分区列表是**分段渲染**的
+     * （可见组 / 隐藏组各按 order 排），段内一次拖动可能跨多项；落点由调用方按
+     * 「目标分区在 order 里的下标」给出（`orderedScenes.indexOf(targetScene)`）。
+     * 段内拖动只调整同组相对位置 —— 同组项在 order 中的相对顺序与渲染顺序一致，
+     * 所以直接搬下标即可，本函数不必感知分组。
+     * 裁剪上界用 `order.lastIndex`：`removeAt(i)` 后长度恰为 lastIndex，
+     * `MutableList.add(lastIndex, …)` 是合法插入点（等价于追加到末尾）。
+     */
+    fun moveSceneTo(id: String, targetIndex: Int) {
         if (order.isEmpty()) return   // 防空区间：coerceIn(0, -1) 会抛异常
         val i = order.indexOf(id)
         if (i < 0) return
-        val j = (i + delta).coerceIn(0, order.lastIndex)
+        val j = targetIndex.coerceIn(0, order.lastIndex)
         if (i == j) return
         order = order.toMutableList().apply {
             removeAt(i)

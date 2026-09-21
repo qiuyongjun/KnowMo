@@ -33,9 +33,12 @@ data class TermState(val days: Int, val lastSeen: String, val lapses: Int = 0, v
  * counts = 每词当日**连击计数**（0–3，v8 恢复 v4 语义，prd v8 第 1 条：认识 +1 封顶 3、忘了清零；
  *          满 3 → 该词移出当日队列；v7 期间写入的 1/0「已作答标记」按计数自然沿用——隔天随 date
  *          整体作废，无需迁移）；
- * knownAnswers / forgotAnswers = 当日「认识」/「忘了」作答**次数**（v5 R7 完成卡战果，design.md §5.3）：
+ * knownAnswers / forgotAnswers = 当日「认识」/「忘了」作答**次数**（v5 R7 起持久化，design.md §5.3）：
  *   与 counts 同一当日生命周期（隔天随 date 不符整体作废），重启不清零——完成是跨会话可达的事件，
  *   会话计数重启归零会让最真实的完成卡显示「认识了 0 次」。
+ *   ⚠️ v16：**UI 战果已不再读 knownAnswers**——完成卡与设置页改用 counts 派生的**去重词数**
+ *   （`todayKnownWords()`）。字段本身保留：次数是 counts 之外的独立信息，且 persist/load 需读写对称，
+ *   删字段会让旧 JSON 多出一个被忽略的键（无害但无谓）。
  * v7（design.md §12.1）：**seen 字段删除**（教读机制废除）——persist 不再写 "seen" 键；
  *   load 遇旧 JSON 的 "seen" 键直接忽略（读写不对称仅此一处，向前兼容，无需迁移）。
  */
@@ -69,8 +72,9 @@ data class DailyQueue(
 )
 
 /**
- * v14 分区学习进度（设置页「学习统计」节的一行，只读快照）：
+ * 分区学习进度（v14 起；v16 起由设置页的**分区卡**消费 —— 合并显隐/排序之后每一行的进度部分）：
  * scene 携带分区定义（icon/name 直接渲染）；learned/total = 该区已学数/总词条数。
+ * **口径是分区自身**（不受该区显隐影响）：隐藏的分区照样报它自己学到哪儿了。
  * total 由 `STUDY_TERMS.filter` 动态算出——**不硬编码条数**（词库仍在扩，计数断言先跑
  * `research/vocab/check_wordbank_invariants.py`，工作备忘条款）。
  */
@@ -83,13 +87,24 @@ data class SceneProgress(val scene: Scene, val learned: Int, val total: Int)
  * learned / graduated / 各分区进度的口径都**限制在当前词库（STUDY_TERMS）内**：
  * termStates 可能残留已从词库删除的词 id（学习状态按 id 挂靠、id 永不复用），
  * 不剔除会让「已学 X / N」出现 X > N 的鬼账。
+ *
+ * ⚠️ v16：`totalWords` **不再是全词库条数**（原 549），而是**当前可学范围**词数
+ * （常用词 + 可见分区）—— 见 `studyStats()` 的 KDoc。QYJ 2026-09-21 拍板。
+ * ⚠️ v16：**面向用户的文案一律用「学完」**（设置页「学完 N 词」是**词**级计数；顶栏分区 chip 的
+ * 「学完」后缀是**分区**级 —— 该区每个词都学完）。字段名 `graduated` 沿用代码内的「毕业」术语
+ * （与 `GRADUATED_DAYS` / `graduatedScenes` 一脉相承），**别为了对齐措辞去重命名标识符**。
+ *
+ * v16：`todayKnownWords` 由 v5 R7 的「作答**次数**」改为「认识过的**去重词数**」——
+ * 连击机制下同一个词要点满 3 次「认识」才移出队列，次数口径会把 10 个词的成果报成 30 次，
+ * 与完成卡「今天学完了 N 个词」并列时量纲不一致（两处现已统一为**词数**）。
+ * 「忘了」刻意保留**次数**口径：忘了是可重复发生的事件，不是词的属性。
  */
 data class StudyStats(
     val totalWords: Int,
     val learned: Int,
     val graduated: Int,
     val favorites: Int,
-    val todayKnown: Int,
+    val todayKnownWords: Int,
     val todayForgot: Int,
     val streak: Int,
     val f30Total: Int,
@@ -108,7 +123,7 @@ data class StudyStats(
  * v4 曾用连击 + 间隔双层模型（design.md §9）：连击层管当日移出队列；间隔层管跨天调度（每日最多升一级）。
  * v5（09-17-scheduling-v5）：阶梯封顶延至 30（稳态日到期量降到配额可覆盖量级），毕业判定固定 15
  * 与封顶解耦；TermState 增 lapses 遗忘史（due 排序优先 + 升级减半）；推荐频道高债务日
- * （due ≥ DEBT_THRESHOLD）进清债模式扩配额全复习、不补新词。
+ * （due ≥ DEBT_THRESHOLD）进清债模式扩配额优先复习（**v16 起新词配额照给**，见 DEBT_QUOTA）。
  * v5 R7 附带当日战果计数（knownAnswers / forgotAnswers）——只加计数，不动调度逻辑。
  * v5 R9：场景分区改判为**专题自主练习**——完成卡只在每日任务频道
  * （CHANNEL_DAILY = "rec"）生效；分区**不做到期筛选**（该区全部词入池，故不存在空白屏）。
@@ -158,6 +173,13 @@ data class StudyStats(
  * 日常高频字词）**不进 AppSettings 显隐管理（不可开关、频道栏不出现）但恒入推荐范围**（内容源特例，
  * prd v9 第 4 条 QYJ 拍板——默认只有推荐 + 收藏两个频道时推荐才有内容）。UI 侧 v9：任务卡停稳静默（点按听读、自评）、
  * 完成卡上滑转浏览（取代 v7 点确认，AppRoot.enterBrowse）——见 AppRoot / DoneCard。
+ * v16（09-21，QYJ 拍板）：**战果量纲 + 统计范围 + 清债日新词**三处口径调整 ——
+ * ①完成卡与设置页统一为「认识 → 去重词数、忘了 → 次数」（见 [todayKnownWords] / [todayTaskWordCount]）：
+ *   连击满 3 才移出队列，旧的作答次数口径会把 10 个词报成「认识了 30 次」；
+ * ②[studyStats] 的分子分母都收窄到**当前可学范围**（常用词 + 可见分区）：隐藏分区里已学过的词不计入，
+ *   换来分子分母同口径、永不出现 X > N；
+ * ③**清债日不再把新词配额归零**（[DEBT_QUOTA] 现在含新词）—— 设置页承诺「新词固定几个，
+ *   不被复习挤掉」，v5 的实现让这句承诺在清债日整天不成立（该日约每周出现一次）。
  */
 class StudyRepository(
     context: Context,
@@ -188,11 +210,28 @@ class StudyRepository(
 
     fun today(): String = fmt.format(Date())
 
-    /** 当日「认识」作答次数（v5 R7 完成卡战果，持久口径：重启不清零，隔天随 DayState 作废） */
-    fun todayKnown(): Int = currentDay().knownAnswers
+    /**
+     * v16 当日「认识」的**去重词数**（完成卡与设置页的战果口径；持久口径：重启不清零，隔天随 DayState 作废）。
+     * `counts` 的键集 = 当日作答过的词，值 ≥ 1 = 该词连击未被清零（答对过且此后没忘）——
+     * 故本值 = 「今天答对过、目前还没忘掉」的词数，恒 ≤ 当日任务词数。
+     * 与 `DayState.knownAnswers`（作答**次数**，连击期间每点一次「认识」都 +1）刻意区分：
+     * v5 R7 起战果用的是次数口径，但连击满 3 才移出队列 ⇒ 10 个词的成果会显示成 30 次，
+     * 与「今天学完了 N 个词」量纲不符，v16 改为词数（设置页与完成卡统一）。
+     */
+    fun todayKnownWords(): Int = currentDay().counts.count { it.value >= 1 }
 
-    /** 当日「忘了」作答次数（同上） */
+    /** 当日「忘了」作答次数（不变；「忘了」是可重复发生的事件，保留次数口径） */
     fun todayForgot(): Int = currentDay().forgotAnswers
+
+    /**
+     * v16 当日任务区**去重词数**（完成卡「今天学完了 N 个词」的持久口径）。
+     * 取自当日队列的 distinct——**不随 UI 层 `pages` 的增删变化**：v9 的 `enterBrowse()` 在用户
+     * **到达完成卡的那一帧**就把全部任务卡移出 `pages`，若该数字由 pages 派生，完成卡会显示
+     * 「今天学完了 0 个词」（当日重启直接进浏览模式同理：pages 里只剩完成卡与浏览页）。
+     * `repeatCard` 插入的是同 id 的重复卡 → distinct 后不影响本值。
+     * 队列不存在（理论不可达：完成卡只在队列存在时出现）→ 0。
+     */
+    fun todayTaskWordCount(): Int = queues[CHANNEL_DAILY]?.queue?.distinct()?.size ?: 0
 
     /** v5 R11-4 f30 观测（只读）：答前 days == 30 的累计作答次数。
      *  落 SharedPreferences **独立 key**（不进主 state JSON——观测数据与学习状态解耦，清观测不清学习进度）。 */
@@ -368,12 +407,12 @@ class StudyRepository(
 
     /**
      * 分区完成判定：该分区**每个词 days >= GRADUATED_DAYS**（毕业判定 = 15，v5 与封顶 30 解耦——
-     * 毕业词继续升到 30 后 🎓 保持不回退）。
+     * 毕业词继续升到 30 后「学完」标记保持不回退）。
      * 达成 = 多轮**不同日**的「认识」升级（v7 首答定调度：1→~3→~7→~15，SM-2 动态间隔；
      * 任何一处「忘了」days 打回 1 → 即时退出完成状态（可逆）。
      * 空分区（`rec` 自身、或有词无条目的分区）不算完成。
      * R10：间隔层的唯一写入来源是**每日任务的复习卡作答**——在分区/温故流里浏览不写任何状态，
-     * 故分区 🎓 只能靠每日任务推进（这是 D4 的已接受代价，见 prd R10）。
+     * 故分区「学完」标记只能靠每日任务推进（这是 D4 的已接受代价，见 prd R10）。
      */
     fun isSceneGraduated(sceneId: String): Boolean {
         val ids = STUDY_TERMS.filter { it.scene == sceneId }.map { it.id }
@@ -450,22 +489,38 @@ class StudyRepository(
 
     /**
      * 学习统计只读快照（v14）：设置页「学习统计」节的全部数据，一次性构建（StudyStats KDoc）。
-     * 全函数**零写入**；learned/graduated/分区进度都以 STUDY_TERMS 为口径（剔除词库已删的鬼 id）。
-     * 「rec」是聚合频道不参与分区进度；「daily」（常用词）照常列出一行。
+     * 全函数**零写入**；分区进度以 STUDY_TERMS 为口径（剔除词库已删的鬼 id）。
+     * v16：`todayKnownWords` 走去重词数口径（见 [todayKnownWords]），不再用 knownAnswers 次数。
+     *
+     * v16 **总览范围口径 = 当前可学的词**（QYJ 2026-09-21 拍板）：分子分母都只算
+     * [scopeIds]`(CHANNEL_DAILY)`（常用词 + **可见分区**）——与调度器的推荐范围同一函数，
+     * 隐藏分区后分母不再包含那些词。原口径的分母是全词库（549），而缺省全隐藏时用户实际
+     * 只学得到常用词那十几条，"已学 3 / 549" 对用户没有意义。
+     * **隐藏分区里已学过的词也一并不计**（数字会随隐藏而下降）——这是 QYJ 选定的代价，
+     * 换来分子分母同口径、永不出现 X > N。
+     * 调用方须在**显隐变化后重取**本快照（分母依赖可见分区）。
+     *
+     * 分区进度列表 = **可管理分区**（排除 rec / fav / daily，与 `AppSettings.manageableIds` 同一判据）：
+     * 设置页把这些行与显隐开关合并成一张卡，常用词不可显隐、不在该卡出现，
+     * 但它的词**计入总览分母**（恒入推荐范围）。
      */
     fun studyStats(): StudyStats {
-        val scopedIds = STUDY_TERMS.map { it.id }.filter { termStates.containsKey(it) }
-        val scenes = SCENES.filter { it.id != CHANNEL_DAILY }.map { scene ->
-            val ids = STUDY_TERMS.filter { it.scene == scene.id }
-            SceneProgress(scene, ids.count { termStates.containsKey(it.id) }, ids.size)
-        }
+        // 当前可学范围（与 buildQueue / poolIds 的推荐范围同源，口径不会漂）
+        val currentIds = scopeIds(CHANNEL_DAILY)
+        val learnedIds = currentIds.filter { termStates.containsKey(it) }
+        val scenes = SCENES
+            .filter { it.id != CHANNEL_DAILY && it.id != CHANNEL_FAV && it.id != CHANNEL_COMMON }
+            .map { scene ->
+                val ids = STUDY_TERMS.filter { it.scene == scene.id }
+                SceneProgress(scene, ids.count { termStates.containsKey(it.id) }, ids.size)
+            }
         return StudyStats(
-            totalWords = STUDY_TERMS.size,
-            learned = scopedIds.size,
-            graduated = scopedIds.count { (termStates[it]?.days ?: 0) >= GRADUATED_DAYS },
+            totalWords = currentIds.size,
+            learned = learnedIds.size,
+            graduated = learnedIds.count { (termStates[it]?.days ?: 0) >= GRADUATED_DAYS },
             favorites = favoriteIds.size,
-            todayKnown = currentDay().knownAnswers,
-            todayForgot = currentDay().forgotAnswers,
+            todayKnownWords = todayKnownWords(),
+            todayForgot = todayForgot(),
             streak = studyStreak(),
             f30Total = f30Total(),
             f30Fail = f30Fail(),
@@ -496,7 +551,9 @@ class StudyRepository(
      * - learned = 全部已学词，双键排序：lapses 降序优先（忘词先见）→ 到期日升序（先清旧债）；
      * - due     = learned 中到期的词（isDue）；
      * - news    = 未学词洗牌；
-     * - pool：due ≥ DEBT_THRESHOLD（20）→ 清债模式 due.take(DEBT_QUOTA)（15 张全复习、不补新词，v5）；
+     * - pool：due ≥ DEBT_THRESHOLD（20）→ 清债模式 `interleave(due.take(DEBT_QUOTA - newsPool.size),
+     *   newsPool, DEBT_QUOTA)` —— v16：总额仍 15 张，但**新词配额照给**（不再整天学不到新词，
+     *   见该分支处注释）；v5 原口径是 `due.take(15)` 全复习、不补新词；
      *   否则 interleave(due.take(quota - newsPool.size), newsPool, quota)（R11-2 **交错**：格号 % 3 == 1
      *   优先放新词，news 非空时前 3 张内必有新词——做不完的用户也见得到新词；当日冻结由 ensureQueue
      *   持久化保证）；
@@ -530,8 +587,16 @@ class StudyRepository(
         // v6 R14 新词配额独立：新词速率恒定 = quotaNew（不被到期复习挤占，主流「新学/复习分开配置」），
         // 复习用剩余额度；新词上限同时受总量约束（quota < quotaNew 时取小，防总量爆表）
         val newsPool = news.take(minOf(newQuotaProvider(), quota))
-        val pool = if (due.size >= DEBT_THRESHOLD) due.take(DEBT_QUOTA)   // 清债模式：全复习、不补新词
-                   else interleave(due.take(max(0, quota - newsPool.size)), newsPool, quota)
+        // v16：清债日**不再把新词配额归零**。设置页承诺「新词固定几个，不被复习挤掉」，
+        // 而 v5 的实现是 `due.take(DEBT_QUOTA)`（15 张全复习、一个新词都不排）—— 那句承诺在清债日
+        // 整天不成立。清债日并不罕见：复习槽位 = quota - newQuota（默认 5/天），已学约 300 词时
+        // 每天自然到期 ~7 个 → 净积压 ~2 个 → 约 10 天攒到 DEBT_THRESHOLD(20) → 清债日约每周一次。
+        // 现改：总额仍以 DEBT_QUOTA 为上限（适老化防过载），先切出 newsPool 给新词，其余留给复习 ——
+        // 代价是清债日的复习量从 15 降到 DEBT_QUOTA - newsPool.size（默认 10），还债稍慢。
+        val pool = if (due.size >= DEBT_THRESHOLD)
+            interleave(due.take(max(0, DEBT_QUOTA - newsPool.size)), newsPool, DEBT_QUOTA)
+        else
+            interleave(due.take(max(0, quota - newsPool.size)), newsPool, quota)
 
         val queue = ArrayList<String>(pool.size)
         val modes = ArrayList<String>(pool.size)
@@ -548,7 +613,10 @@ class StudyRepository(
      * R11-2 交错编排（design.md §3）：格号 % 3 == 1 的位置优先放新词，其余位置优先到期词；
      * 任一池空则另一池顶上，直到配额或两池用尽。保证 news 非空时队列前 3 张内必有新词
      * （做不完的用户也见得到新词，新词通道不再因 due 垫底被关闭）；两池皆空返回空列表
-     * （合法状态，见 buildQueue KDoc）。清债模式不走本函数（due.take(DEBT_QUOTA)）。
+     * （合法状态，见 buildQueue KDoc）。**v16：清债日也走本函数** —— 改调
+     * `interleave(due.take(DEBT_QUOTA - newsPool.size), newsPool, DEBT_QUOTA)`；
+     * v5 原口径是清债日 `due.take(15)` 全复习、**绕过本函数**，代价是新词配额被整天归零
+     * （与设置页「新词固定几个，不被复习挤掉」的承诺矛盾）。
      */
     private fun interleave(due: List<String>, news: List<String>, quota: Int): List<String> {
         val out = ArrayList<String>(quota)
@@ -851,10 +919,16 @@ class StudyRepository(
         /** 分区毕业判定阈值（v5：固定 15，与 INTERVALS 封顶 30 显式解耦，不再跟随阶梯） */
         const val GRADUATED_DAYS = 15
 
-        /** 推荐频道清债模式触发阈值：到期词 ≥ 20 时当日全复习、不补新词（v5） */
+        /** 推荐频道清债模式触发阈值：到期词 ≥ 20 时当天进入清债模式（v5）。
+         *  v16：清债日**不再等同于「全复习、不补新词」**，新词配额照给 —— 见 [DEBT_QUOTA]。 */
         const val DEBT_THRESHOLD = 20
 
-        /** 清债模式配额：due.take(15)（v5：先清债再学新，阈值与扩容量保守） */
+        /** 清债日的**总**配额（v5 定 15；v16 起它不再等于复习量）：
+         *  清债日 pool = 复习 + 新词，新词照常给 `newsPool` 张（默认 5），复习占剩下的
+         *  `DEBT_QUOTA - newsPool.size`（默认 10）。
+         *  v5 原口径是「15 张全复习、不补新词」，与设置页「新词固定几个，不被复习挤掉」的承诺
+         *  直接矛盾 —— 清债日并不罕见（已学约 300 词时约每周一次），用户改了设置却整天学不到新词。
+         *  v16 改为保底新词，代价是清债日的复习量从 15 降到约 10，还债稍慢。 */
         const val DEBT_QUOTA = 15
 
         /** 分区抽词权重：**未学词**的固定中等权重（R10 D5）——比刚复习过的词（1.0）更靠前、
