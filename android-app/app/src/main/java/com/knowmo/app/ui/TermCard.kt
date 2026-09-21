@@ -71,7 +71,7 @@ fun TermCard(
     resultText: String?,
     isFavorite: Boolean,
     onSpeakTerm: () -> Unit,
-    onSpeakWord: () -> Unit,
+    onSpeakWord: (Char) -> Unit,
     onAnswer: (Boolean) -> Unit,
     onToggleFavorite: () -> Unit,
 ) {
@@ -140,7 +140,7 @@ fun TermCard(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(14.dp))
                                 .background(sceneColor(term.scene))
-                                .clickable { onSpeakWord() }
+                                .clickable { onSpeakWord(ch.c) }
                                 .padding(horizontal = 6.dp, vertical = 5.dp),
                         )
                     }
@@ -186,7 +186,7 @@ fun TermCard(
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
-                    "点一下再听 · 点单字读词",
+                    "点一下再听 · 点单字读字",
                     fontSize = 16.sp,
                     color = AppText2,
                 )

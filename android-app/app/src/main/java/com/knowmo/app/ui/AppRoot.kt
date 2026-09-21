@@ -57,11 +57,11 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播
  * 2. **任务卡静默**（v9 第 1 条）：每日任务卡（NEW/REVIEW 同一卡型，词+拼音+提示恒全显示，v8）
  *    停稳**不自动朗读**——用户直接按「认识 / 忘了」自评，或**点卡片听读**（词+提示）、
- *    点单字读词后再作答；作答后仍念「词+提示+反馈」（适老化）。
+ *    点单字读该字后再作答；作答后仍念「词+提示+反馈」（适老化）。
  *    **浏览卡**（温故流/分区/收藏）滑到停稳自动念「词 + 用途」（v9 第 2 条：自主学习划入即读）。
  * 3. **当日连击**（v8 保留）：同词当日 3 次「认识」才移出队列，任意「忘了」清零；
  *    未满 3 → `insertRepeatCard` 按 `repo.repeatCard` 的打散位置重插（同词不连续/紧邻，
- *    插入点之后的任务卡 qIndex 同步 +1）；间隔层作答即写（SM-2 + 每日最多升一级闸门 + 封顶分级）。
+     *    插入点之后的任务卡 qIndex 同步 +1）；完成当日连击后才写入跨日间隔（SM-2 + 封顶分级）。
  * 4. **任务锁滑**（v7 保留，v9 第 1 条不变）：每日任务频道任务阶段 `userScrollEnabled = false`
  *    ——任务中不允许滑动切换词卡，唯一翻页动力 = 作答后自动前进（等播报念完再翻）。
  * 5. **完成卡上滑转浏览**（v9 第 1 条，取代 v7「点确认」）：全部任务词连击满 3 → 完成卡落地，
@@ -82,7 +82,7 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    **池型 = 场景分区 + 推荐频道的温故流 + 收藏频道**——运行时从池里**加权随机**抽卡（v9 第 2 条：
  *    算法排列不用固定顺序）、无限追加、**不落库**（`appendPoolPages`）。两处的卡都是**浏览卡**
  *    （`CardMode.FREE`：词 + 逐字拼音 + 用途全展开、无 √/×——是否认识只在每日任务中出现、
- *    点卡重听、点单字读词、零写入）。
+ *    点卡重听、点单字读该字、零写入）。
  *    分区因此：**无完成卡**（`syncDonePage` 对非每日任务频道直接 return）、**不做到期筛选**
  *    （池 = 该区全部词含未学词 → 池必非空 → 不白屏）、**不恢复位置**（D6：每次进区都是一轮新的随机；
  *    装载时 `restoreTo = 0` 必须**显式归零**——切频道时 `pagerState.currentPage` 可能还是上一个频道
@@ -143,11 +143,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     var advanceAfterSpeechSeq by remember { mutableStateOf(-1) }
 
     val pagerState = rememberPagerState(pageCount = { pages.size })
-
-    // 欢迎语（TTS 未就绪时进 pending 队列，就绪后按序补播，始终先于卡片播报）
-    LaunchedEffect(Unit) {
-        tts.speak("欢迎回来。上滑开始学习。")
-    }
 
     // v6：打开设置页播报「已打开设置」（prd v6 第 2 条；keyed showSettings，关闭不播）。
     // v14：打开时重取学习统计快照（覆盖上次打开之后的作答变化——今日战果/streak/分区进度）。
@@ -294,6 +289,12 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // 上滑进入浏览流；当日重启不重放任务卡）；false 走任务模式（断点恢复按卡实例 answered[i]
     // 还原作答态，仍锁滑）。
     LaunchedEffect(channel) {
+        // v18：App 首次装载（冷启动 / 后台进程被杀后切换回来重建）→ 播与**恢复后状态**匹配的欢迎语。
+        // 旧实现是写死的「上滑开始学习」（LaunchedEffect(Unit)）：任务阶段是**锁滑**的（唯一前进方式
+        // 是作答，v9），切回来一听「上滑」就是错误指示 —— 欢迎语必须按队列状态分流。
+        // 时序：TTSSpeaker 未就绪时 speak 进 pending 队列按序补播，恒先于卡片播报（停稳播报有
+        // SETTLE_SPEECH_DELAY + restoreTo 守卫，见下方停稳 effect）。
+        val isAppEntry = firstChannelLoad
         val announce = !firstChannelLoad
         firstChannelLoad = false
         freePool = emptyList()
@@ -307,6 +308,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 pages = listOf(Page.Done)
                 appendPoolPages(POOL_BATCH)
                 restoreTo = 0
+                // 浏览模式可自由滑动，「上滑」指引成立
+                if (isAppEntry) tts.speak("欢迎回来。上滑继续浏览。")
             } else {
                 browseMode = false
                 pages = q.queue.mapIndexedNotNull { i, id ->
@@ -320,6 +323,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 syncDonePage()                   // 总结卡条件出现：pending == 0 才有收尾页
                 // 断点：frontier = 第一张待处理卡（都做完了则是总结卡）——「在哪儿」=「做到哪儿了」
                 restoreTo = frontierIndex()
+                // 任务阶段锁滑 → 不指引「上滑」，只说继续（作答是唯一前进方式）
+                if (isAppEntry) tts.speak("欢迎回来。继续学习。")
             }
         } else {
             browseMode = false                   // 仅 rec 频道有语义，切走时复位
@@ -394,8 +399,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     /** 作答（认识/忘了）：连击层 + 间隔层双层并存（prd v8 / design.md §13.2）。作答入口只剩
      *  **每日任务卡**（温故流/分区/收藏都是浏览卡，没有 √/×）——战果只在每日任务频道产生，
      *  故完成卡天然只统计每日任务（v16：战果数字不再缓存，完成卡与播报都直接读 repo 的持久口径）。
-     *  - **间隔层**：作答即写（v7 口径保留：首见认识 → {1,今天,0}；首见忘了 → {1,今天,lapses+1}；
-     *    SM-2 动态间隔 + 每日升一级闸门 + restoreTo 兑现 + 封顶分级，全在 repo.markKnown/markForgot 内）。
+     *  - **间隔层**：新词首次认识先建立 {1,今天,0}；已学词完成当日 3 次认识后才推进间隔；首见忘了 →
+     *    {1,今天,lapses+1}。SM-2 动态间隔 + restoreTo 兑现 + 封顶分级，全在 repo.markKnown/markForgot 内。
      *  - **连击层**（v8）：markKnown 返回连击计数 count——`count < DAILY_COMBO_TARGET` →
      *    `insertRepeatCard` 打散重插（同词不连续/紧邻，prd v8 第 1 条）；count == 3 → 移出当日队列。
      *    忘了 → 连击清零，当日同样打散重现（重新连击 3 次才能移出）。
@@ -412,7 +417,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
             val target = StudyRepository.DAILY_COMBO_TARGET
             val (msg, spoken) = when {
                 count < target ->
-                    "👍 记得牢！再认对 ${target - count} 次就学会" to "记得牢！再认对${target - count}次就学会。"
+                    "👍 再认对 ${target - count} 次就学会" to "再认对${target - count}次就学会。"
                 upgraded && daysAfter == 1 ->
                     "👍 这个词学会啦！明天再来复习" to "这个词学会啦！明天再来复习。"
                 upgraded ->
@@ -564,10 +569,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         },
                         // v8：防泄题分流删除（design.md §13.2）——点卡片一律重听「词 + 用途」
                         onSpeakTerm = { tts.speak(termSpeech(p.t)) },
-                        // v7 单字直读（prd v7 第 5 条）：点单字 = 只读词（不读提示、不开弹层），
+                        // v18 单字直读升级：点单字 = 只读被点的那个字（不再读整词），
                         // 与点卡片重听「词 + 用途」区分；字卡弹层已随 v7 删除。
-                        // v8：防泄题分流删除——未作答时也直读整词（拼音本来就可见，无密可泄）
-                        onSpeakWord = { tts.speak(p.t.text) },
+                        // v8：防泄题分流删除——未作答时也直读（拼音本来就可见，无密可泄）
+                        onSpeakWord = { ch -> tts.speak(ch.toString()) },
                         onAnswer = { known -> answer(p, known) },
                     )
                     Page.Done -> DoneCard(
