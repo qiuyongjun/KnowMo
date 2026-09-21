@@ -54,7 +54,9 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
 /**
  * 根界面：抖音式垂直 feed（v9：任务卡静默自评 + 完成卡上滑转浏览，prd v9 / design.md §14）。
  * 交互契约（v6–v8 未推翻条目沿用）：
- * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播
+ * 1. 滑到停稳（isScrollInProgress=false 后 ~200ms）才播报；快速连滑中间卡不闪播。
+ *    **例外（v18）**：频道装载的「换到 X 频道」+ 首卡播报不走停稳事件——切频道前后页码净不变时
+ *    snapshotFlow 不发事件（v18 前因此整段哑掉），改由跳页 effect 在 scrollToPage 后直接播
  * 2. **任务卡静默**（v9 第 1 条）：每日任务卡（NEW/REVIEW 同一卡型，词+拼音+提示恒全显示，v8）
  *    停稳**不自动朗读**——用户直接按「认识 / 忘了」自评，或**点卡片听读**（词+提示）、
  *    点单字读该字后再作答；作答后仍念「词+提示+反馈」（适老化）。
@@ -112,6 +114,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     val results = remember { mutableStateMapOf<Int, String>() }        // seq -> 反馈文案
     var seqGen by remember { mutableStateOf(0) }                       // 页出现序号发生器（只在 effect/回调中递增）
     val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重（频道 + 页身份）
+    // v18：最近一次停稳落点页的去重键。**离开该页就清掉它的 spokenKeys 键** —— 否则回滑 /
+    // 再次划到已听过的卡会被去重挡成整段沉默（「划入即读」要防的是同一次停稳的重播，
+    // 不是「回头重听」）。键随频道装载在 spokenKeys.clear() 处一并复位。
+    var lastSettledKey by remember { mutableStateOf<String?>(null) }
     var graduated by remember { mutableStateOf(emptySet<String>()) }   // 已完成分区（频道栏「学完」）
 
     // v9（prd 第 1 条）：**browseMode = 每日任务频道到达完成卡之后的自由浏览**——
@@ -136,7 +142,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
     var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 池型抽取池：顺序抽取，池空重洗（两个频道类型共用）
     var restoreTo by remember { mutableStateOf<Int?>(null) }             // 断点/频道切换的目标页
-    var pendingAnnounce by remember { mutableStateOf<String?>(null) }    // 频道播报（与首卡合并成一句播）
+    var pendingAnnounce by remember { mutableStateOf<String?>(null) }    // 频道播报（与首卡合并成一句播；主消费者 = 跳页 effect，停稳 collector 只兜底）
     var firstChannelLoad by remember { mutableStateOf(true) }
     // v5 R8 作答后自动前进（§5.5）：本次刚作答的卡 seq；-1 = 没有待办的自动前进。
     // 用作答卡的 seq 作 effect key（而非布尔）——既能触发，又能在收尾时置回 -1 取消
@@ -299,6 +305,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         firstChannelLoad = false
         freePool = emptyList()
         spokenKeys.clear()
+        lastSettledKey = null               // 去重键复位须同步：旧键留在 spokenKeys 会挡回头重听（v18）
         advanceAfterSpeechSeq = -1           // 频道已切换，丢弃上一频道未完成的自动前进
         if (channel == StudyRepository.CHANNEL_DAILY) {
             val q = repo.ensureQueue()
@@ -348,10 +355,29 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
 
     // 断点/频道切换跳页（restoreTo 置空防重复；需先于停稳监听声明，保证跳页先行）
     // v5 R10：队列型取 frontier；池型恒为 0（D6 不恢复位置）；v9 转浏览/浏览模式装载也归 0
+    // v18 修复「切频道有时不播报、首卡不播报」：频道装载播报**不再依赖停稳事件**——
+    // 目标页与切换前 currentPage 净不变（最常见：都停在第 0 页）时 `currentPage to
+    // isScrollInProgress` 无变化，snapshotFlow 不发事件，停稳 collector 整个不跑，
+    // pendingAnnounce 滞留到下一次滑动粘在错误的卡上（复现条件：从第 0 页切频道必哑；
+    // 从 ≥ 第 2 页切才有钳位事件可播）。改为跳页完成后**在此直接播**：
+    // - announce == null（App 首次装载）不播——欢迎语已在装载分支按队列状态播过；
+    // - 先记 spokenKeys 去重键再 speak，挡住停稳 collector 稍后对同一页的迟到事件（不重播）；
+    // - 用户已抢滑离目标页 → 不播不消费，交还给停稳 collector（它的 announce 消费逻辑兜底）。
     LaunchedEffect(pages, restoreTo) {
         val target = restoreTo ?: return@LaunchedEffect
         restoreTo = null
-        if (pages.isNotEmpty()) pagerState.scrollToPage(target.coerceIn(0, pages.lastIndex))
+        if (pages.isEmpty()) return@LaunchedEffect
+        val idx = target.coerceIn(0, pages.lastIndex)
+        pagerState.scrollToPage(idx)
+        val announce = pendingAnnounce ?: return@LaunchedEffect
+        if (pagerState.currentPage != idx) return@LaunchedEffect
+        pendingAnnounce = null
+        val p = pages.getOrNull(idx) ?: return@LaunchedEffect
+        val key = spokenKey(p)
+        // 落点键同步：跳页播过的卡若不登记 lastSettledKey，下一次停稳事件清的是旧键，
+        // 本页键留在 spokenKeys 里 → 回滑到首卡会被去重挡成沉默（v18）
+        lastSettledKey = key
+        if (spokenKeys.add(key)) tts.speak(announce + cardSpeech(p))
     }
 
     // 翻页落库（仅队列型任务阶段）+ 临近队尾预追加池型页（v5 R10 §5.7-2）。
@@ -459,14 +485,22 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 if (pagerState.currentPage != idx) return@collect   // 迟到的旧页事件（跳页/连滑已完成）：交给新事件播报，防错位闪播
                 if (restoreTo != null) return@collect               // 断点跳页完成前不播，防错位闪播
                 val p = pages.getOrNull(idx) ?: return@collect
+                val key = spokenKey(p)
+                // v18：落点换了页 = 离开了上一张落点卡 → 清它的去重键，回头再划到可以重新朗读；
+                // 同一页内的重复停稳事件（拖动后弹回等）键相同、不清，去重继续防同一次重播
+                if (lastSettledKey != null && lastSettledKey != key) spokenKeys.remove(lastSettledKey)
+                lastSettledKey = key
                 val announce = pendingAnnounce
                 pendingAnnounce = null
                 // v9：任务卡停稳返回空文案 → 整体沉默（显示词卡不朗读，prd v9 第 1 条）；
                 // 浏览卡 / 完成卡 / 引导卡照常播报。换频道播报与本卡播报拼成**一句**：
-                // 分开 speak 会互相 FLUSH 掉
+                // 分开 speak 会互相 FLUSH 掉。
+                // v18：频道装载播报的主消费者已移到跳页 effect（currentPage 净不变时本 collector
+                // 收不到事件，见该处注释）；此处 announce 实际恒为 null，保留只为兜底
+                // （跳页 effect 因用户抢滑提前 return 而未消费的场景）。
                 val text = cardSpeech(p)
                 val full = if (announce != null) announce + text else text
-                if (full.isNotBlank() && spokenKeys.add(spokenKey(p))) tts.speak(full)
+                if (full.isNotBlank() && spokenKeys.add(key)) tts.speak(full)
             }
     }
 

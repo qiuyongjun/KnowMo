@@ -19,7 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -98,10 +98,11 @@ fun TermCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TermBadge(mode)
                 Spacer(Modifier.weight(1f))
+                // 收藏按钮：圆角矩形（v18，QYJ 拍板弃圆形），圆角半径与用途提示块（16dp）同语言
                 Box(
                     Modifier
                         .size(56.dp)
-                        .clip(RoundedCornerShape(50))
+                        .clip(RoundedCornerShape(16.dp))
                         .background(AppSurface)
                         .clickable { onToggleFavorite() },
                     contentAlignment = Alignment.Center,
@@ -178,15 +179,17 @@ fun TermCard(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // v18：图标由三角播放（PlayArrow）改为提示（Info）——这个提示行讲的不是「播放」
+                // 而是操作引导；文案「再听」→「朗读」（QYJ 拍板）。Info 在 material-icons-core 核心集内
                 Icon(
-                    Icons.Filled.PlayArrow,
+                    Icons.Filled.Info,
                     contentDescription = null,
                     tint = AppText2,
                     modifier = Modifier.size(20.dp),
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
-                    "点一下再听 · 点单字读字",
+                    "点一下朗读 · 点单字读字",
                     fontSize = 16.sp,
                     color = AppText2,
                 )
