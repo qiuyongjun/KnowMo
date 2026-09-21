@@ -1,4 +1,0 @@
-terms=499 scenes=15 per={'daily': 16, 'market': 29, 'transit': 35, 'hospital': 30, 'bank': 30, 'gov': 30, 'food': 103, 'phone': 32, 'medicine': 30, 'express': 30, 'property': 29, 'appliance': 64, 'emergency': 17, 'weather': 24}
-fails=0 [] | pypinyin_diffs=10 | orphan=[] | intra_dup=[] | cross_dup=5
-id_prefix_mismatch=0
--> D:\QYJ\MyProject\Mando\.trellis\tasks\09-17-elderly-literacy-app\research\vocab\_wordbank_invariants.md

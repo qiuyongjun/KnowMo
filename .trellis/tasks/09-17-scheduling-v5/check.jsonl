@@ -1,3 +1,0 @@
-{"file": ".trellis/tasks/09-17-elderly-literacy-app/design.md", "reason": "v4 契约基线：检查 v5 改动是否破坏双层状态机其余语义（连击/闸门/断点恢复/自由刷）"}
-{"file": ".trellis/tasks/09-17-scheduling-v5/research/v4-analysis.md", "reason": "检查要点来源：验收场景（lapse 排序、清债配额、防泄题、peek 不写状态）与不得误改清单"}
-{"file": ".trellis/tasks/09-17-scheduling-v5/research/daily-quota-and-self-study-review.md", "reason": "R10 检查要点：六条决策（D1–D6）与七条连锁结论（P1–P7）是否逐条落地；有无「浏览卡仍在写状态」「分区仍在作答」这类回退"}

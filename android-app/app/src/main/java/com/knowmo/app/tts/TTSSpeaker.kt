@@ -51,7 +51,7 @@ class TTSSpeaker(context: Context) {
                 // 按序补播就绪前排队的请求（QUEUE_ADD 接续，不互相打断）
                 pendingQueue.forEach { text ->
                     tts?.setSpeechRate(rate)
-                    tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "shibang-utt")
+                    tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "knowmo-utt")
                 }
                 pendingQueue.clear()
             }
@@ -99,7 +99,7 @@ class TTSSpeaker(context: Context) {
         }
         speaking = true                 // ⚠️ 同步置位，勿挪进 listener（原因见 speaking KDoc）
         tts?.setSpeechRate(rate)
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "shibang-utt")
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "knowmo-utt")
     }
 
     /** 立即停止当前朗读（快速连滑打断播报用） */

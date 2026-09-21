@@ -1,1 +1,0 @@
-rows=74 groups=12 -> D:\QYJ\MyProject\Mando\.trellis\tasks\09-17-elderly-literacy-app\research\vocab\scene_appliance.md
