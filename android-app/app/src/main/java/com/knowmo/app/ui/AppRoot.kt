@@ -572,7 +572,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         // v18 单字直读升级：点单字 = 只读被点的那个字（不再读整词），
                         // 与点卡片重听「词 + 用途」区分；字卡弹层已随 v7 删除。
                         // v8：防泄题分流删除——未作答时也直读（拼音本来就可见，无密可泄）
-                        onSpeakWord = { ch -> tts.speak(ch.toString()) },
+                        onSpeakWord = { c -> tts.speak(c) },
                         onAnswer = { known -> answer(p, known) },
                     )
                     Page.Done -> DoneCard(

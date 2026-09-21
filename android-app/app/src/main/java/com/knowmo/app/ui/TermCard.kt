@@ -71,7 +71,7 @@ fun TermCard(
     resultText: String?,
     isFavorite: Boolean,
     onSpeakTerm: () -> Unit,
-    onSpeakWord: (Char) -> Unit,
+    onSpeakWord: (String) -> Unit,
     onAnswer: (Boolean) -> Unit,
     onToggleFavorite: () -> Unit,
 ) {
