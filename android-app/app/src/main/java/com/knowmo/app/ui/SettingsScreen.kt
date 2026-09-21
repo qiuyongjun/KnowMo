@@ -21,11 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -58,8 +54,6 @@ import com.knowmo.app.ui.theme.AppLine
 import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.AppText
 import com.knowmo.app.ui.theme.AppText2
-import com.knowmo.app.ui.theme.BlueBg
-import com.knowmo.app.ui.theme.BlueDark
 import com.knowmo.app.ui.theme.BluePrimary
 import com.knowmo.app.ui.theme.GreenBg
 import com.knowmo.app.ui.theme.GreenKnown
@@ -86,8 +80,12 @@ private val DONE_BAR_SPACE = 104.dp
  *   纯展示零写入（进出设置页不改学习状态，池型零写入契约不破坏）。
  * ①每日学习词数量（3/5/10/15/20，缺省 10）②每天学几个新词（1/3/5/10，缺省 5）—— 两组同为配额语义、
  *   合一张卡；**当日队列冻结不变、次日生效**（只写 `AppSettings`，不触碰当日队列）。
- * ③④**分区显示与顺序**（v16 合并为一张卡）：每行 = 分区名 + 进度 + ↑↓ + 显隐开关，
- *   分「已显示 / 未显示」两段，段内长按拖动重排。
+ * ③④**分区显示与顺序**（v16 合并为一张卡）：每行 = 分区名 + 进度 + 显隐开关，
+ *   分「已显示 / 未显示」两段。v17（QYJ 2026-09-21）：
+ *   **↑↓ 按钮删除**（点按箭头是拖动之外的第三种重排方式，实测多余——只留拖动）；
+ *   **未显示的分区不挂拖动手势**（隐藏态没有顺序语义，拖了也没意义）；
+ *   **新开启显示的分区自动排到「已显示」段末尾**（= 未显示段之前，落位统一在
+ *   `AppSettings.setSceneVisible` 里做，UI 不感知）。
  *
  * v16 本轮重构（QYJ 2026-09-21）—— 原版实测 ≈ 2530dp ≈ 3.5 屏，其中约七成是**同一批分区被列了两遍**
  * （统计里 14 行进度条 + 管理里 13 行操作行），出口按钮还在第 3.5 屏。逐条修法：
@@ -97,9 +95,9 @@ private val DONE_BAR_SPACE = 104.dp
  *    中途想退出不必滚到底。
  * 3. **可见分区自动排前面**：渲染顺序 = 可见组（按 order）+ 隐藏组（按 order），
  *    用户不必在「想看的」和「已关掉的」之间翻找。
- * 4. **段内长按拖动重排**（新增）：拖动仅在同段内生效 —— 跨段意味着改变可见性，
- *    那是开关的职责，不做隐式迁移。↑↓ 按钮**保留**（适老化备选：老人/家属点按比拖拽更稳），
- *    两种方式写同一份持久层（`moveSceneTo` / `moveScene`）。
+ * 4. **已显示段内长按拖动重排**：拖动仅在「已显示」段内生效 —— 跨段意味着改变可见性，
+ *    那是开关的职责，不做隐式迁移。未显示段不参与拖动（v17，QYJ 拍板）；
+ *    开关显隐时的落位（开 → 已显示段末尾；关 → 未显示段开头）由持久层统一处理。
  *
  * ⚠️ 拖动实现的两个前提，改动前务必先读：
  * - **行高固定**（[SCENE_ROW_H]）：让位位移 = ±行高，行高变了算法要跟着改；
@@ -114,7 +112,6 @@ fun SettingsScreen(
     quotaNew: Int,
     stats: StudyStats,   // v14 只读快照（AppRoot 在「打开设置页」与「显隐变化」时各重取一次）
     onSetVisible: (String, Boolean) -> Unit,
-    onMove: (String, Int) -> Unit,        // ↑↓：delta = ±1
     onMoveTo: (String, Int) -> Unit,      // v16 拖动落位：目标分区在 order 里的下标
     onSetQuota: (Int) -> Unit,
     onSetQuotaNew: (Int) -> Unit,
@@ -230,7 +227,7 @@ fun SettingsScreen(
             SettingsCard {
                 Text("分区显示与顺序", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
                 Text(
-                    "长按某一项可以拖动排序，也可以用 ↑↓ 一点点挪。点右边的按钮决定它显不显示。",
+                    "长按上面已显示的分区可以拖动排序；未显示的不能拖。点右边的按钮决定它显不显示。",
                     fontSize = 17.sp,
                     color = AppText2,
                 )
@@ -251,7 +248,6 @@ fun SettingsScreen(
                         allOrdered = orderedScenes,
                         progressById = progressById,
                         onSetVisible = onSetVisible,
-                        onMove = onMove,
                         onMoveTo = onMoveTo,
                     )
                 }
@@ -268,7 +264,6 @@ fun SettingsScreen(
                         allOrdered = orderedScenes,
                         progressById = progressById,
                         onSetVisible = onSetVisible,
-                        onMove = onMove,
                         onMoveTo = onMoveTo,
                     )
                 }
@@ -335,16 +330,16 @@ private fun SceneSectionHeader(title: String, count: Int) {
 }
 
 /**
- * 一段分区行（v16）：**段内**长按拖动重排 + ↑↓ 微调 + 显隐开关。
+ * 一段分区行（v17）：**已显示段内**长按拖动重排 + 显隐开关；**未显示段只渲染行，不挂拖动手势**。
  *
- * 拖动模型（前提：行高固定 = [SCENE_ROW_H]）：
+ * 拖动模型（前提：行高固定 = [SCENE_ROW_H]，仅 [isHiddenGroup] == false 时启用）：
  * - 拖动中的行按手指位移整体平移（`dragDy`），并抬升（缩放 + 阴影）表明「它被拿起来了」；
  * - 被跨过的行整体让位一格（向上拖则下方行上移、向下拖则上方行下移）—— 位移 = ±行高，可精确算；
- * - 松手时把落点换算成**目标分区在 order 里的下标**交给持久层。段内拖动只改同组相对位置，
- *   而同组项在 order 中的相对顺序与渲染顺序一致，所以直接搬下标即可，不必感知分组。
+ * - 松手时把落点换算成**目标分区在 order 里的下标**交给持久层。
  *
  * **跨段不生效**：拖到另一段的范围会被钳回本段 —— 跨段等于改变可见性，那是开关的职责，
- * 隐式迁移会让「拖了一下」变成「开关变了」这种难以预期的事。两段各自独立成段，天然互不干扰。
+ * 隐式迁移会让「拖了一下」变成「开关变了」这种难以预期的事。v17 起未显示段干脆不挂手势，
+ * 顺序语义只属于已显示的分区。
  *
  * ⚠️ 手势 block 会**被记住不再重建**，所以闭包里不能直接用 `scenes` / `allOrdered` / `onMoveTo`
  * —— 段内重排后列表内容变了，而 `pointerInput` 的 key 仍是同一个 id，读到的会是旧列表。
@@ -359,10 +354,10 @@ private fun SceneRows(
     allOrdered: List<Scene>,
     progressById: Map<String, SceneProgress>,
     onSetVisible: (String, Boolean) -> Unit,
-    onMove: (String, Int) -> Unit,
     onMoveTo: (String, Int) -> Unit,
 ) {
-    // 拖动会话态（本段私有）：谁在拖、从本段哪个下标起、手指累计移动多少像素
+    // 拖动会话态（本段私有）：谁在拖、从本段哪个下标起、手指累计移动多少像素。
+    // 未显示段（isHiddenGroup = true）不会开拖动会话，这些状态恒为初值。
     var draggingId by remember { mutableStateOf<String?>(null) }
     var dragFrom by remember { mutableStateOf(0) }
     var dragDy by remember { mutableStateOf(0f) }
@@ -391,25 +386,24 @@ private fun SceneRows(
             scene = s,
             hidden = isHiddenGroup,
             progress = progressById[s.id],
-            dragging = isDragging,
-            enabledUp = i > 0,
-            enabledDown = i < scenes.lastIndex,
-            onMove = onMove,
             onSetVisible = onSetVisible,
-            modifier = Modifier
-                .zIndex(if (isDragging) 1f else 0f)
-                .graphicsLayer {
-                    translationY = if (isDragging) dragDy else shift
-                    if (isDragging) {
-                        scaleX = 1.02f
-                        scaleY = 1.02f
-                        shadowElevation = 10f
-                        shape = RoundedCornerShape(12.dp)
-                        clip = true
+            modifier = run {
+                val base = Modifier
+                    .zIndex(if (isDragging) 1f else 0f)
+                    .graphicsLayer {
+                        translationY = if (isDragging) dragDy else shift
+                        if (isDragging) {
+                            scaleX = 1.02f
+                            scaleY = 1.02f
+                            shadowElevation = 10f
+                            shape = RoundedCornerShape(12.dp)
+                            clip = true
+                        }
                     }
-                }
-                .background(if (isDragging) Color.White else Color.Transparent)
-                .pointerInput(s.id) {
+                    .background(if (isDragging) Color.White else Color.Transparent)
+                // v17：未显示段不挂拖动手势 —— 隐藏分区没有顺序语义，不允许拖动位置
+                if (isHiddenGroup) base
+                else base.pointerInput(s.id) {
                     detectDragGesturesAfterLongPress(
                         onDragStart = {
                             draggingId = s.id
@@ -435,26 +429,23 @@ private fun SceneRows(
                             dragDy = 0f
                         },
                     )
-                },
+                }
+            },
         )
         if (i < scenes.lastIndex) HorizontalDivider(color = AppLine, thickness = 1.dp)
     }
 }
 
 /**
- * 分区行（v16）：左侧 = 分区名 +（进度条 + 已学/总数），右侧 = ↑ / ↓ / 显隐开关。
+ * 分区行（v17）：左侧 = 分区名 +（进度条 + 已学/总数），右侧 = 显隐开关（v17 起 ↑↓ 已删，
+ * 操作区只剩开关一项，名称列因此拿到更多宽度）。
  * 隐藏段的分区名用次级文字色（`AppText2`）—— 与「显示」按钮的橙系配色一起表达当前状态。
- * 名称单行省略：操作区固定占 156dp，小屏上留给名称的宽度有限（≥360dp 屏可完整显示 4 字以内的分区名）。
  */
 @Composable
 private fun SceneRow(
     scene: Scene,
     hidden: Boolean,
     progress: SceneProgress?,
-    dragging: Boolean,
-    enabledUp: Boolean,
-    enabledDown: Boolean,
-    onMove: (String, Int) -> Unit,
     onSetVisible: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -510,14 +501,12 @@ private fun SceneRow(
                 )
             }
         }
-        // 拖动进行中禁用 ↑↓：两套重排同时生效会互相打架（拖动提交的是绝对落点）
-        ArrowButton(up = true, enabled = enabledUp && !dragging) { onMove(scene.id, -1) }
-        Spacer(Modifier.width(4.dp))
-        ArrowButton(up = false, enabled = enabledDown && !dragging) { onMove(scene.id, +1) }
-        Spacer(Modifier.width(4.dp))
-        // 目标可见性 = 当前态取反。**不要**把 `hidden` 直接塞进 `onSetVisible(id, visible)` 的
-        // 第二个参数 —— 参数名与实参语义相反是最容易被改错的地方。
-        ShowHideButton(hidden) { onSetVisible(scene.id, !hidden) }
+        // ⚠️ v17 修 v16 回归：`onSetVisible` 的第二参数是**目标可见性** = 当前是否隐藏（`hidden`），
+        // 不是「取反」。v16 曾在这里写成 `!hidden` —— 隐藏中点「显示」传 false（往 hidden 里加
+        // 已存在的 id）、可见中点「隐藏」传 true（从 hidden 里删不存在的 id），**两个方向都是
+        // 原样写回、界面毫无反应**。历史教训：v14 原本就是 `isHidden`（对的），v16 重构时误判
+        // 成 bug 才改反 —— 改语义前先核对持久层函数（`setSceneVisible`）的参数定义。
+        ShowHideButton(hidden) { onSetVisible(scene.id, hidden) }
     }
 }
 
@@ -554,41 +543,12 @@ private fun QuotaSelector(selected: Int, options: List<Int>, onSelect: (Int) -> 
 }
 
 /**
- * v6 设置页 ↑/↓ 顺序按钮：**40×64dp**、矢量箭头。高度保持 64dp（适老化可点目标下限），
- * 宽度收窄到 40dp —— 分区行要同时容纳「名称 + 进度 + ↑ + ↓ + 开关」，
- * 原 56dp 宽会把名称列挤到放不下 4 个汉字（v16 合并列表后实测）。
- * 边界（已到顶/底）置灰且不可点。
- * v16 修对比度：旧版禁用态 = `AppSurface` 容器 + `AppLine` 箭头，两者在白色卡片上几乎无差别
- * —— 按钮在视觉上"消失"（既看不到容器，也看不清箭头），老人会以为界面坏了。
- * 现禁用态 = `AppLine` 容器 + 中灰箭头（≈3.2:1，满足 WCAG 1.4.11 图形元素 ≥3:1 的下限；
- * 禁用态刻意弱于可用态，但必须仍然可见）。
- */
-@Composable
-private fun ArrowButton(up: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .size(width = 40.dp, height = 64.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (enabled) BlueBg else AppLine)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            if (up) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-            contentDescription = if (up) "上移" else "下移",
-            tint = if (enabled) BlueDark else AppText2.copy(alpha = 0.6f),
-            modifier = Modifier.size(26.dp),
-        )
-    }
-}
-
-/**
  * v6 设置页显示/隐藏开关：**68×64dp** 大按钮。**本组件只渲染「当前态」**
  * （当前隐藏 → 显示「显示」），点击语义是"取反"—— 目标值由调用点算好再交给 `onSetVisible`，
  * 组件自身不持有可见性状态。
  * 隐藏中的分区按钮显示「显示」（橙系，引导恢复），可见分区显示「隐藏」（绿系）——
- * 颜色本身也承担状态说明（不依赖小字识别）。宽度 68dp 是 v16 为「名称 + 进度 + ↑↓ + 开关」
- * 挤在一行所做的收缩（原 88dp），高度仍是 64dp。
+ * 颜色本身也承担状态说明（不依赖小字识别）。
+ * v17：↑↓ 按钮删除后它是行内唯一的操作按钮（宽度维持 68dp 不变）。
  */
 @Composable
 private fun ShowHideButton(isHidden: Boolean, onClick: () -> Unit) {

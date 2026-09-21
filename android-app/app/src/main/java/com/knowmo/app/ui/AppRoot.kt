@@ -604,12 +604,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                     // 必须当场重取快照，否则用户开关分区后上面的「已学 X / N」纹丝不动。
                     stats = repo.studyStats()
                 },
-                onMove = { id, delta ->
-                    settings.moveScene(id, delta)
-                    orderedScenes = settings.orderedScenes()
-                },
-                // v16 拖动落位：与 onMove 同一套「写库 → 重读镜像」，区别只是步长任意
-                //（段内一次拖动可能跨多项，落点是目标分区在 order 里的下标）
+                // v16 拖动落位（v17 起仅已显示分区可拖；↑↓ 按钮已删，无 onMove 回调）：
+                // 与 onSetVisible 同一套「写库 → 重读镜像」，落点是目标分区在 order 里的下标
                 onMoveTo = { id, targetIndex ->
                     settings.moveSceneTo(id, targetIndex)
                     orderedScenes = settings.orderedScenes()

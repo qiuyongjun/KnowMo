@@ -72,29 +72,32 @@ class AppSettings(context: Context) {
         persist()
     }
 
-    /** 设置分区可见性；rec/fav/daily 与未知 id 一律忽略（daily 不可显隐——推荐内容源特例；防御，正常入口来自设置页已排除） */
+    /**
+     * 设置分区可见性；rec/fav/daily 与未知 id 一律忽略（daily 不可显隐——推荐内容源特例；防御，正常入口来自设置页已排除）。
+     *
+     * v17（QYJ 2026-09-21）：开关显隐后把该分区在 order 里搬到**两组边界**处 ——
+     * 开显示 → 落到「已显示」段**末尾**（= 未显示段之前，QYJ 拍板「开启显示的默认移动到
+     * 未显示的前面」）；关显示 → 落到「未显示」段**开头**（离原位置最近的隐藏位，便于再开回来）。
+     * 同时由此维持 order 的分组不变量：**已显示段整体在前、未显示段整体在后**（与设置页
+     * 的分段渲染一致，拖动落位换算 order 下标的前提也依赖同组相对序与渲染序一致）。
+     * 实现是同一条表达式：`可见组(不含 id) + [id] + 隐藏组(不含 id)`。
+     */
     fun setSceneVisible(id: String, visible: Boolean) {
         if (id == StudyRepository.CHANNEL_DAILY || id == StudyRepository.CHANNEL_FAV || id == StudyRepository.CHANNEL_COMMON) return
         if (id !in manageableIds()) return
         if (visible) hidden.remove(id) else hidden.add(id)
+        val visibleGroup = order.filter { it != id && it !in hidden }
+        val hiddenGroup = order.filter { it != id && it in hidden }
+        order = visibleGroup + id + hiddenGroup
         persist()
-    }
-
-    /** 上移（delta = -1）/ 下移（delta = +1），边界裁剪；rec/fav/daily 不在 order 内，天然不可移动。
-     *  v16：转调 [moveSceneTo] —— 边界裁剪与落位逻辑只留一份，避免两处各自漂移。 */
-    fun moveScene(id: String, delta: Int) {
-        val i = order.indexOf(id)
-        if (i < 0) return
-        moveSceneTo(id, i + delta)
     }
 
     /**
      * v16 拖动重排落位：把 id 移到 order 的 `targetIndex` 处（越界裁剪）。
-     * 与 [moveScene] 同语义，区别只在步长不受 ±1 限制 —— 设置页的分区列表是**分段渲染**的
-     * （可见组 / 隐藏组各按 order 排），段内一次拖动可能跨多项；落点由调用方按
-     * 「目标分区在 order 里的下标」给出（`orderedScenes.indexOf(targetScene)`）。
-     * 段内拖动只调整同组相对位置 —— 同组项在 order 中的相对顺序与渲染顺序一致，
-     * 所以直接搬下标即可，本函数不必感知分组。
+     * 设置页的分区列表是**分段渲染**的（可见组 / 隐藏组各按 order 排），段内一次拖动可能
+     * 跨多项；落点由调用方按「目标分区在 order 里的下标」给出（`orderedScenes.indexOf(targetScene)`）。
+     * v17 起只有**已显示段**可拖（未显示段不挂手势），且 `setSceneVisible` 维持
+     * 「可见组在前、隐藏组在后」的 order 不变量，段内拖动天然不会破坏分组边界。
      * 裁剪上界用 `order.lastIndex`：`removeAt(i)` 后长度恰为 lastIndex，
      * `MutableList.add(lastIndex, …)` 是合法插入点（等价于追加到末尾）。
      */
