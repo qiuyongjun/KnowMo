@@ -18,12 +18,10 @@ import kotlin.math.max
  * `days = (prevDays * ease).roundToInt().coerceIn(1, cap)`；v8 封顶分级：成熟词（ease=2.5 且 lapses=0）
  * cap=60、普通词 cap=30（见 nextInterval KDoc）。ease 默认 2.5（SM-2 初始值），
  * 认识升级时 `ease = min(2.5, ease + 0.1)`（答对加难度），忘了时 `ease = max(1.3, ease - 0.2)`（答错降难度）。
- * v7（09-20，design.md §12.1）确立的**作答即写**口径 v8 保留：连击期间同词一日可多次作答，
- * 即多次走本状态机——每日最多升一级闸门重新发挥作用（同日第 2、3 次「认识」不再升级）。
- * 「忘了」→ days=1（次日必回池重考）+ restoreTo=减半目标（v6 R14 延迟兑现：重考「认识」才把 days 提到
- * max(nextInterval, restoreTo)——熟词忘一次不重走全程，也不会凭空消失减半天数）+ lapses+1 + ease 降 0.2。
- * 每日最多升一级闸门保留（lastSeen != today() 才升级；restoreTo 兑现是闸门分支唯一例外，
- * v8 连击恢复后重新可达：忘了当日重考认识 → 兑现减半目标）。
+ * 当前调度规则：新词第一次认识只建立 1 天的学习中状态；已学词在同日第 1、2 次认识时只推进日内连击，
+ * 第 3 次认识才提交跨日间隔。这样未完成连击就退出时，原到期状态仍保留，次日会重新回池。
+ * 「忘了」→ days=1（次日必回池重考）+ restoreTo=减半目标；restoreTo 只在后续日期完成一次完整连击时兑现，
+ * 避免同日重答直接恢复长间隔；同时保留 lapses+1 与 ease 降 0.2。
  * 旧 JSON 无 "ease" 键 → 缺省 2.5；无 "restoreTo" 键 → 缺省 0（兼容，无需迁移代码）；"lapses" 键缺省 0。
  */
 data class TermState(val days: Int, val lastSeen: String, val lapses: Int = 0, val ease: Double = 2.5, val restoreTo: Int = 0)
@@ -119,7 +117,7 @@ data class StudyStats(
  * day = {"date", "counts", "knownAnswers", "forgotAnswers"}
  * （v7 起 "seen" 键废除不写，旧 JSON 读时忽略）；queues 各频道含 "answered" / "confirmed"。
  *
- * 历史决策记录（措辞已按 v8 现状校准）：
+ * 历史决策记录（当前规则以 markKnown / markForgot 为准）：
  * v4 曾用连击 + 间隔双层模型（design.md §9）：连击层管当日移出队列；间隔层管跨天调度（每日最多升一级）。
  * v5（09-17-scheduling-v5）：阶梯封顶延至 30（稳态日到期量降到配额可覆盖量级），毕业判定固定 15
  * 与封顶解耦；TermState 增 lapses 遗忘史（due 排序优先 + 升级减半）；推荐频道高债务日
@@ -166,7 +164,7 @@ data class StudyStats(
  * ④间隔封顶分级：成熟词（ease=2.5 且 lapses=0）60 天（INTERVAL_CAP_MATURE）、普通词 30 天
  * （INTERVAL_CAP_NORMAL）——nextInterval 增 lapses 参数；
  * ⑤防泄题契约废除（v3 以来）——所有任务卡全显示拼音+提示（UI 层改动，见 AppRoot / TermCard）；
- * v7 的「作答即写间隔层」口径保留：连击期间多次作答即多次走状态机，每日升一级闸门重新发挥作用。
+ * 当前规则覆盖上述历史口径：连击未满 3 次不推进跨日间隔，第 3 次认识才提交状态；同日重学不兑现 restoreTo。
  * v9（09-20，prd v9 / design.md §14）：**推荐范围收窄 + 常用词特例**——构造函数注入 `recScenesProvider`
  * （MainActivity 传 settings.visibleScenes()），推荐频道（每日任务 + 温故流）只抽**可见分区**的词，
  * 隐藏分区的词两个入口都抽不到（prd v9 第 3 条）；常用词分区（CHANNEL_COMMON = "daily"，v15 清理后 19 条
@@ -206,7 +204,7 @@ class StudyRepository(
         load()
     }
 
-    /* ---------- 间隔层状态机（作答即写；与连击层并存，prd v8 / design.md §13.1） ---------- */
+    /* ---------- 间隔层状态机（连击完成后写；与连击层并存） ---------- */
 
     fun today(): String = fmt.format(Date())
 
@@ -257,27 +255,19 @@ class StudyRepository(
     }
 
     /**
-     * 「认识」作答（prd v8 / design.md §13.1）：**连击层 + 间隔层双层并存**。
+     * 「认识」作答（连击层 + 间隔层双层并存）：
      * - 连击层（当日）：counts[id] = min(3, +1)；返回 count < 3 时由调用方（AppRoot）调 `repeatCard`
      *   插入重复卡，满 3 即移出当日队列（本函数不插卡，保持 API 薄）；
-     * - 间隔层（全局，**作答即写**，v7 口径 v8 保留——连击期间多次作答即多次走本状态机，
-     *   每日最多升一级闸门因此重新发挥作用）：
-     *   无 TermState（首见词）→ 首写 {1, 今天, 0, ease=2.5}（首次学会）；
-     *   有状态且 lastSeen ≠ 今天 → days=max(nextInterval(cur.days, cur.ease, cur.lapses), cur.restoreTo)
-     *   （v6 R14：忘了的重考词新间隔不低于 restoreTo 减半目标，兑现后清零）、ease=min(2.5, cur.ease+0.1)、
-     *   lastSeen=今天（每日最多升一级闸门）；
-     *   lastSeen == 今天（当日已升级）→ 闸门不升级（days/ease 不变）；
-     *   **唯一例外** restoreTo > 0 → 兑现 days=restoreTo 并清零（v6 R14；v8 连击恢复后重新可达：
-     *   忘了当日重考「认识」即兑现减半目标）。
+     * - 新词第一次认识只建立「学习中」状态 {1, 今天, 0, ease=2.5}，保证中途退出后次日仍会回来；
+     * - 已学词只有当日连击达到 3 次时才推进跨日间隔。这样未完成连击就退出时，原到期状态仍保留，
+     *   次日会重新进入队列；
+     * - 忘了留下的 restoreTo 也只在后续日期完成一次完整连击时兑现，避免同日看过答案后直接恢复长间隔。
      * 返回 Triple(count, upgraded, daysAfter)：count = 本次作答后的连击计数（0–3，AppRoot 据此决定是否
-     * 插重复卡）；upgraded = 本次作答决定了间隔层（首写 / 升级 / 兑现减半都算 true；闸门挡住为 false）；
-     * daysAfter = 写库后的 days（未升级时为原 days）。v5 R7：当日「认识」次数 +1。
+     * 插重复卡）；upgraded = 本次作答是否真正推进了跨日间隔；daysAfter = 写库后的 days（未升级时为原 days）。
+     * v5 R7：当日「认识」次数 +1。
      *
-     * ⚠️ 历史备注：v6 R12 曾恢复 v4 连击（当日满 3 次「认识」才写间隔层）——那依赖队尾反复追加
-     * 考核卡让同词当日可答 3 次；v7 废除追加机制、每词一卡直考后，count 恒 < 3、间隔层永远不可写
-     * （新词学不会、到期词永远不清，调度死亡），故 v7 按prd 明文口径改回首答定调度；
-     * v8 恢复连击并以 `repeatCard` **最小间隔插入**重现重复卡（取代队尾追加），连击层与
-     * 「作答即写」并存（即本函数现状）。
+     * 设计取舍：过去曾因重复卡无法可靠生成而采用首答定调度，导致「连击未完成但跨日间隔已推进」。
+     * 当前重复卡由 `repeatCard` 稳定插入，因此恢复「第 3 次认识才提交间隔」的规则，避免中途退出漏掉到期词。
      */
     fun markKnown(id: String): Triple<Int, Boolean, Int> {
         val d = currentDay()
@@ -285,16 +275,19 @@ class StudyRepository(
         // f30 观测：必须取**写库之前**的 days；v8 去重——id 今日已作答过（连击第 2、3 次）不再计数
         if (id !in d.counts) recordF30(termStates[id]?.days, forgot = false)
         val cur = termStates[id]
+        // v8 连击计数：「认识」+1 封顶 DAILY_COMBO_TARGET（v7 写的 1/0 已作答标记按计数自然沿用）
+        val count = min(DAILY_COMBO_TARGET, (d.counts[id] ?: 0) + 1)
         var upgraded = false
         var daysAfter = cur?.days ?: 0
-        // 写间隔层（首写 / 升级）；闸门：lastSeen != today() 才升级
+
         when {
+            // 新词先落一个 1 天学习状态；跨日升级仍要等下一次完整连击。
             cur == null -> {
                 termStates[id] = TermState(1, today(), 0, 2.5)
-                upgraded = true
                 daysAfter = 1
             }
-            cur.lastSeen != today() -> {
+            // 只有第三次「认识」才提交跨日间隔。若当天中途退出，cur 保持原到期状态。
+            count >= DAILY_COMBO_TARGET && cur.lastSeen != today() -> {
                 // R14：忘了的重考词新间隔不低于 restoreTo（减半目标），兑现后清零
                 val ni = max(nextInterval(cur.days, cur.ease, cur.lapses), cur.restoreTo)
                 val newEase = min(2.5, cur.ease + 0.1)
@@ -302,16 +295,8 @@ class StudyRepository(
                 upgraded = true
                 daysAfter = ni
             }
-            cur.restoreTo > 0 -> {
-                // 闸门唯一例外：当日已升级但仍有待兑现减半目标 → 兑现（重考通过即恢复半程，对齐 Anki）
-                termStates[id] = TermState(cur.restoreTo, today(), cur.lapses, cur.ease, 0)
-                upgraded = true
-                daysAfter = cur.restoreTo
-            }
-            // 其余 lastSeen == 今天：闸门兜底不升级（v8 连击第 2、3 次认识落在这里）
+            // 同日第 2/3 次认识，以及忘了后的同日重学，只推进连击，不提前恢复长间隔。
         }
-        // v8 连击计数：「认识」+1 封顶 DAILY_COMBO_TARGET（v7 写的 1/0 已作答标记按计数自然沿用）
-        val count = min(DAILY_COMBO_TARGET, (d.counts[id] ?: 0) + 1)
         day = d.copy(counts = d.counts + (id to count), knownAnswers = d.knownAnswers + 1)
         persist()
         return Triple(count, upgraded, daysAfter)
@@ -321,9 +306,8 @@ class StudyRepository(
      * 「忘了」作答（prd v8 / design.md §13.1）：
      * - 连击层：counts[id] **清零**——须重新连击 3 次才能移出当日队列；未满 3 由调用方（AppRoot）
      *   调 `repeatCard` 插入重复卡（该词当日必定重现）；
-     * - 间隔层：立即写 {1, 今天, lapses+1, ease-0.2, restoreTo=减半目标}（**作答即写**，v7 口径保留）。
-     *   days 归 1 保证次日必回池重考（修复 R13 直接减半的回归：忘了的词当天没被重新学会会凭空消失
-     *   减半天数——恰恰是最需要尽快再见的词）；减半目标记在 restoreTo，重考「认识」时才兑现
+     * - 间隔层：立即写 {1, 今天, lapses+1, ease-0.2, restoreTo=减半目标}，保证次日必回池重考。
+     *   （忘了的词当天没被重新学会时不能凭空消失）；减半目标记在 restoreTo，后续日期完成 3 次「认识」时才兑现
      *   （markKnown，Anki new-interval=50% 思路）。连忘两次 restoreTo 被覆盖为 1，从头来。
      * 返回作答后的连击计数（恒 0，与 markKnown 的 Triple 口径对齐，方便调用方统一分流）。
      * v5 R7：当日「忘了」次数 +1（完成卡战果）。
@@ -408,7 +392,7 @@ class StudyRepository(
     /**
      * 分区完成判定：该分区**每个词 days >= GRADUATED_DAYS**（毕业判定 = 15，v5 与封顶 30 解耦——
      * 毕业词继续升到 30 后「学完」标记保持不回退）。
-     * 达成 = 多轮**不同日**的「认识」升级（v7 首答定调度：1→~3→~7→~15，SM-2 动态间隔；
+     * 达成 = 多轮**不同日**完成连击后的「认识」升级（1→~3→~7→~15，SM-2 动态间隔；
      * 任何一处「忘了」days 打回 1 → 即时退出完成状态（可逆）。
      * 空分区（`rec` 自身、或有词无条目的分区）不算完成。
      * R10：间隔层的唯一写入来源是**每日任务的复习卡作答**——在分区/温故流里浏览不写任何状态，
@@ -567,8 +551,8 @@ class StudyRepository(
      * R10：R9 的 `else -> learned + news`（分区全量入队）分支已删除——分区是**池型**频道（§5.7），
      * 不再生成队列，保留那个分支只会是一段永远走不到、却看起来仍在服务分区的死代码。
      * v8（design.md §13.1）：首排仍**每词恰好一张卡**（无教读卡）；连击未满 3 的重复卡不在首排——
-     * 由 `repeatCard` 在作答后**运行时**插入（打散，prd v8 第 1 条）。作答即写间隔层（首答定调度），
-     * 当日没答满连击的到期词保持到期 → 次日自动回池（遗留词机制，由 isDue 保证，与连击无关）。
+     * 由 `repeatCard` 在作答后**运行时**插入（打散，prd v8 第 1 条）。只有连击完成后才写入跨日间隔，
+     * 当日没答满连击的到期词保持到期 → 次日自动回池（遗留词机制，由 isDue 保证）。
      */
     fun buildQueue(): DailyQueue {
         val scope = scopeIds(CHANNEL_DAILY)
