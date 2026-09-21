@@ -22,26 +22,46 @@ data class Term(
 
 data class Scene(val id: String, val name: String, val icon: String, val color: Color)
 
+/**
+ * 场景分区定义。**当前 = 7 项**（推荐 + 常用词 + 5 个场景分区）。
+ *
+ * ## 分区退役史（删除的分区 id **永久退役**）
+ * 词条仍可能带这些 id 前缀（id 是"首次归属"，永不改，见 WordBank.kt 文件头 id 契约），
+ * 但**不能再有 `Scene` 项**。`AppSettings.load()` 靠 `MERGED_INTO` 表把「当初被用户打开的
+ * 已退役分区」的可见性迁移到接收分区。
+ *
+ * - **v17**（可管理分区 13 → 10）：删 `bank`（并入 `gov`）、`medicine`（并入 `hospital`）、
+ *   `emergency`（内容分流到 phone / hospital / property / gov）。
+ * - **v18**（可管理分区 10 → 5）：整区移除 `market` / `gov` / `express` / `property` / `weather`。
+ *   其中 `weather` 24 条全部归入 `daily`；`gov` 与 `express` 只留了 7 条例外（身份证 + 快递 6 条）
+ *   归入 `daily`；**`market` / `property` 的词条全部删除**（含 v17 刚从 `emergency` 迁入
+ *   `property` 的 4 条安全类词 —— QYJ 2026-09-21 明确选择一起删）。
+ *   ⇒ 词库 550 → **414** 条。
+ */
 val SCENES = listOf(
+    // 推荐：聚合频道，不是分区——不参与「分区学完」判定（graduatedScenes 显式排除），
+    // 也没有自己的词条（词来自「可见分区 + 常用词」，见 StudyRepository.scopeIds）。
     Scene("rec", "推荐", "⭐", Color(0xFFEDE7F6)),
-    // v9（prd 第 4 条）：常用词默认分区——日常生活高频字词、非固定场景。在 SCENES 里
-    // （参与分区毕业），但不进 AppSettings 显隐管理（不可开关、频道栏永不出现），
-    // 其词由 StudyRepository 特例（CHANNEL_COMMON）恒入推荐范围——默认只有
-    // 推荐+收藏两个频道时推荐才有内容。
+    // 常用词（v9 设立；v17 升级为固定频道）：日常生活高频字词 + **跨场景通用词**，
+    // **不是固定某个场景的内容**。在 SCENES 里（参与分区毕业判定），但**不进 AppSettings
+    // 显隐管理**（order/hidden 均不含 daily ⇒ 不可开关、不可移除）。
+    // 两重身份：① 推荐频道的基础内容源（StudyRepository 的 CHANNEL_COMMON 特例，恒入推荐范围）；
+    // ② 频道栏的第三个固定频道（恒显示，渲染在 ui/Common.kt 的 ChannelBar，不经 visibleScenes）。
+    // 规模沿革：v16 37 条 → v17 通用词回流 72 条 → **v18 收纳 weather 与 7 条例外词共 103 条**——
+    // 它现在是全库最大的分区，也是「不设场景限制、什么都能放」的那个兜底分区。
     Scene("daily", "常用词", "🔤", Color(0xFFE0F7FA)),
-    Scene("market", "买菜", "🛒", Color(0xFFE8F5E9)),
     Scene("transit", "公交地铁", "🚌", Color(0xFFE3F2FD)),
+    // v17：原「药品说明」分区并入本院区（用药是看病的下游）——名字保持「医院」不变，
+    // 以维持 chip 宽度（适老化：4 字 chip 比 2 字显著占宽，见 Common.kt 的「学完」后缀注释）。
     Scene("hospital", "医院", "🏥", Color(0xFFFFEBEE)),
-    Scene("bank", "银行", "🏦", Color(0xFFFFF8E1)),
-    Scene("gov", "办事", "🏛️", Color(0xFFF3E5F5)),
-    Scene("food", "吃饭", "🍜", Color(0xFFFFF3E0)),
+    // v18：**由「吃饭」改名为「面馆」**（QYJ 2026-09-21）—— 本区实为面馆语境：`food-33`~`food-65`
+    // 原就是独立「面馆」分区（2026-09-20 并入），v11 又专项补了 30 条面馆词（调料罐/加料栏/
+    // 价目表规格/墙面证照/后厨物件）。改名只是 name 字段变化：**scene id 仍是 `food`**（id 永不可变，
+    // 93 条词条的学习状态按 `scene`+`id` 双重挂靠，改 id 或改 scene id 都会造成失联）。
+    // chip 宽度不变（2 字），图标 🍜 本就贴合面馆。
+    Scene("food", "面馆", "🍜", Color(0xFFFFF3E0)),
     Scene("phone", "手机微信", "📱", Color(0xFFE8EAF6)),
-    Scene("medicine", "药品说明", "💊", Color(0xFFE0F2F1)),
-    Scene("express", "快递驿站", "📦", Color(0xFFEFEBE9)),
-    Scene("property", "物业水电", "🏠", Color(0xFFECEFF1)),
     Scene("appliance", "家电", "🔌", Color(0xFFF0F4C3)),
-    Scene("emergency", "紧急求助", "📞", Color(0xFFFBE9E7)),
-    Scene("weather", "天气日历", "📅", Color(0xFFE1F5FE)),
 )
 
 fun sceneColor(id: String): Color = SCENES.firstOrNull { it.id == id }?.color ?: Color(0xFFF5F7FA)

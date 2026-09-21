@@ -6,6 +6,7 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.ln
 import kotlin.random.Random
 import kotlin.math.roundToInt
@@ -56,8 +57,8 @@ data class DayState(
  * v7（design.md §12.1）：**confirmed** = 总结卡（原完成卡）是否已被用户点「确认」——
  * 确认后当日重启 / 切频道回来直接进温故流浏览模式（browseMode），不重放考试卡与总结卡；
  * 旧 JSON 无 "confirmed" 键 → 缺省 false（兼容，无需迁移）；新队列构建恒 false。
- * v8（design.md §13.1）：连击未满 3 的词由 `repeatCard` 在**运行时**把重复卡插入三平行数组
- * （同下标同步，queue 运行中增长 + persist）；断点恢复原样还原（含已插入的重复卡），机制不变。
+ * v8（design.md §13.1）：连击未满 3 的词由作答事务在**运行时**插入重复卡；每张卡有稳定
+ * `cardId`，断点恢复原样还原（含已插入的重复卡），不依赖会变化的队列下标定位。
  */
 data class DailyQueue(
     val date: String,
@@ -67,6 +68,17 @@ data class DailyQueue(
     val answered: List<Boolean>,
     val position: Int,
     val confirmed: Boolean = false,
+    /** 卡实例 id；旧 JSON 没有该字段时由仓库按日期/下标补齐。 */
+    val cardIds: List<String> = emptyList(),
+)
+
+/** 一次作答后的结果；重复卡已在仓库事务中写入，UI 只负责同步页面。 */
+data class AnswerResult(
+    val count: Int,
+    val upgraded: Boolean,
+    val daysAfter: Int,
+    val repeatCardId: String? = null,
+    val insertBeforeCardId: String? = null,
 )
 
 /**
@@ -112,12 +124,12 @@ data class StudyStats(
 
 /**
  * 学习状态仓库：间隔层（TermState）+ 连击层（DayState）+ 每日队列（DailyQueue）。
- * SharedPreferences + JSON 持久化（36 词量级不上 Room）；全部收在 "state" 一个 JSON 里：
+ * SharedPreferences + JSON 持久化（当前词库规模不上 Room）；主状态收在 "state" 一个 JSON 里：
  * terms = {"days", "lastSeen", "lapses", "ease", "restoreTo"}；
  * day = {"date", "counts", "knownAnswers", "forgotAnswers"}
  * （v7 起 "seen" 键废除不写，旧 JSON 读时忽略）；queues 各频道含 "answered" / "confirmed"。
  *
- * 历史决策记录（当前规则以 markKnown / markForgot 为准）：
+ * 历史决策记录（当前规则以 answerCard 为准）：
  * v4 曾用连击 + 间隔双层模型（design.md §9）：连击层管当日移出队列；间隔层管跨天调度（每日最多升一级）。
  * v5（09-17-scheduling-v5）：阶梯封顶延至 30（稳态日到期量降到配额可覆盖量级），毕业判定固定 15
  * 与封顶解耦；TermState 增 lapses 遗忘史（due 排序优先 + 升级减半）；推荐频道高债务日
@@ -126,7 +138,7 @@ data class StudyStats(
  * v5 R9：场景分区改判为**专题自主练习**——完成卡只在每日任务频道
  * （CHANNEL_DAILY = "rec"）生效；分区**不做到期筛选**（该区全部词入池，故不存在空白屏）。
  * v5 R10（本轮）：自主学习（温故流 + 场景分区）改判为**纯浏览的池型频道**，频道因此分两类——
- * **队列型（只有每日任务频道）**：`buildQueue` / `ensureQueue` / `markAnswered` /
+ * **队列型（只有每日任务频道）**：`buildQueue` / `ensureQueue` / `answerCard` /
  * `saveQueuePosition` 一律**不带 channel 参数**（内部固定 CHANNEL_DAILY），让「队列 = 每日任务」
  * 成为签名层面的事实；**池型（13 个场景分区 + 推荐频道的温故流）**：`poolIds` 运行时抽取、抽完重洗、
  * 无限追加、**不落库**，分区池 = 该区**全部词**（含未学词）加权随机。
@@ -145,7 +157,7 @@ data class StudyStats(
  * 顶层 `"favorites"`（旧数据缺省空集，无需迁移），**与学习状态（TermState / DayState）完全独立**。
  * 每日配额改由构造函数注入 `quotaProvider`（MainActivity 组装 `{ appSettings.quota() }`）——
  * **只在 buildQueue 重建队列时读**，当日队列冻结语义不变（设置页改配额次日生效）。
- * v6 R14（09-20）：①忘了的减半改为**延迟兑现**——markForgot 写 {days=1, restoreTo=原days/2}，
+ * v6 R14（09-20）：①忘了的减半改为**延迟兑现**——answerCard 写 {days=1, restoreTo=原days/2}，
  * 次日必回池重考，答满连击才把 days 提到 max(nextInterval, restoreTo)（Anki new-interval=50% 思路；
  * 修复 R13「忘了词当天未答满连击会凭空消失减半天数」的回归）。②新词配额独立注入
  * `newQuotaProvider`（设置页「每天学几个新词」）：新词速率恒定、不被到期复习挤占，
@@ -157,8 +169,8 @@ data class StudyStats(
  * SM-2 动态间隔、ease、restoreTo、lapses 排序、每日升一级闸门、f30 观测、buildQueue 配额与交错全不动。
  * v8（09-20，design.md §13）：**连击回归 + 打散插入 + 全显拼音 + 封顶分级**——
  * ①恢复 v4 连击语义（当日 3 次「认识」才移出当日队列，任意「忘了」清零），但插入方式从 v4 的队尾
- * 追加改为**最小间隔插入**：`repeatCard` 把重复卡插到源卡下标 + MIN_GAP + 1（钳到队尾），
- * queue/modes/answered 三平行数组同步插入 + persist；
+ * 追加改为**最小间隔插入**：`answerCard` 把重复卡插到源卡下标 + MIN_GAP + 1（钳到队尾），
+ * queue/modes/answered/cardIds 四组数组在同一事务内同步插入 + persist；
  * ②counts 恢复连击计数（0–3），v7 写的 1/0 按计数自然沿用（隔天作废，无需迁移）；新增 `comboCount(id)`；
  * ③f30 观测去重：每词每日只计**首次**作答（`id in counts` 守卫，防连击相关观测膨胀）；
  * ④间隔封顶分级：成熟词（ease=2.5 且 lapses=0）60 天（INTERVAL_CAP_MATURE）、普通词 30 天
@@ -168,9 +180,13 @@ data class StudyStats(
  * v9（09-20，prd v9 / design.md §14）：**推荐范围收窄 + 常用词特例**——构造函数注入 `recScenesProvider`
  * （MainActivity 传 settings.visibleScenes()），推荐频道（每日任务 + 温故流）只抽**可见分区**的词，
  * 隐藏分区的词两个入口都抽不到（prd v9 第 3 条）；常用词分区（CHANNEL_COMMON = "daily"，v15 清理后 19 条，
- * v16 日用洗护补充后 **37 条**：公共标识字 + 跨场景通用词 + 居家消耗品包装词）
- * **不进 AppSettings 显隐管理（不可开关、频道栏不出现）但恒入推荐范围**（内容源特例，
- * prd v9 第 4 条 QYJ 拍板——默认只有推荐 + 收藏两个频道时推荐才有内容）。UI 侧 v9：任务卡停稳静默（点按听读、自评）、
+ * v16 日用洗护补充后 37 条，v17 通用词回流后 72 条，**v18 收纳「天气日历」整区与 7 条例外词后 103 条**：
+ * 公共标识字 + 跨场景通用词 + 居家消耗品包装词 + 时间/天气词 + 身份证 + 快递核心词）
+ * **不进 AppSettings 显隐管理（不可开关）但恒入推荐范围**（内容源特例，
+ * prd v9 第 4 条 QYJ 拍板——默认场景分区全隐藏时，推荐仍靠常用词有内容）。
+ * ⚠️ v17：daily **同时是频道栏的第三个固定频道**（默认显示、不可移除）；作为频道它是**池型**
+ * （channel != CHANNEL_DAILY 自然落入 §5.7 的池型分支，浏览零写入），其词仍在推荐范围内。
+ * UI 侧 v9：任务卡停稳静默（点按听读、自评）、
  * 完成卡上滑转浏览（取代 v7 点确认，AppRoot.enterBrowse）——见 AppRoot / DoneCard。
  * v16（09-21，QYJ 拍板）：**战果量纲 + 统计范围 + 清债日新词**三处口径调整 ——
  * ①完成卡与设置页统一为「认识 → 去重词数、忘了 → 次数」（见 [todayKnownWords] / [todayTaskWordCount]）：
@@ -179,6 +195,21 @@ data class StudyStats(
  *   换来分子分母同口径、永不出现 X > N；
  * ③**清债日不再把新词配额归零**（[DEBT_QUOTA] 现在含新词）—— 设置页承诺「新词固定几个，
  *   不被复习挤掉」，v5 的实现让这句承诺在清债日整天不成立（该日约每周出现一次）。
+ * v17（09-21，QYJ 拍板）：**分区合并 + 通用词回流 + daily 升为固定频道** ——
+ * ①`SCENES` 由 13 个可管理分区降到 10（删 `bank` → 并入 `gov`、`medicine` → 并入 `hospital`、
+ *   解散 `emergency` 分流到 phone/hospital/property/gov）；**本类的逻辑零改动** ——
+ *   `scopeIds` / `isSceneGraduated` / `studyStats` / `poolIds` 全部按 `term.scene` 过滤，
+ *   不含任何分区白名单（这正是「按 scene 而非按 id 前缀」的价值）；
+ * ②「常用词」回流 35 条通用词（37 → 72 条），daily 由「推荐的内容源」升为**同时可浏览的固定频道**；
+ * ③词库总量 565 → 550（去重删 15 条）。⚠️ **按 id 前缀做过滤/统计一律是 bug**（v17 起 id 前缀
+ *   只表示首次归属）—— 见 WordBank.kt 文件头 id 契约。
+ * v18（09-21，QYJ 拍板）：**分区大幅收敛，可管理分区 10 → 5** ——
+ * ①整区移除 `weather`（24 条**全部**归入 `daily`）、`gov`（56 条删除，**唯留 `gov-2` 身份证**
+ *   归入 daily）、`express`（30 条删除，留 快递/包裹/取件码/驿站/收件人/退货 **6 条**归入 daily）、
+ *   `market`（25 条）与 `property`（32 条）**全部删除** —— 其中 property 的 4 条安全类词
+ *   （灭火器/安全出口/电梯困人/电梯警铃，v17 刚从解散的 emergency 迁入）经 QYJ 确认**一并删除**；
+ * ②词库 550 → **414**（删 136、迁 daily 31）；`daily` 由 72 涨到 **103 条**，成为全库最大分区；
+ * ③**本类逻辑仍零改动** —— 分区集合来自 `SCENES`，本文件没有任何硬编码的分区清单。
  */
 class StudyRepository(
     context: Context,
@@ -227,7 +258,7 @@ class StudyRepository(
      * 取自当日队列的 distinct——**不随 UI 层 `pages` 的增删变化**：v9 的 `enterBrowse()` 在用户
      * **到达完成卡的那一帧**就把全部任务卡移出 `pages`，若该数字由 pages 派生，完成卡会显示
      * 「今天学完了 0 个词」（当日重启直接进浏览模式同理：pages 里只剩完成卡与浏览页）。
-     * `repeatCard` 插入的是同 id 的重复卡 → distinct 后不影响本值。
+     * `answerCard` 插入的是同 id 的重复卡 → distinct 后不影响本值。
      * 队列不存在（理论不可达：完成卡只在队列存在时出现）→ 0。
      */
     fun todayTaskWordCount(): Int = queues[CHANNEL_DAILY]?.queue?.distinct()?.size ?: 0
@@ -240,130 +271,95 @@ class StudyRepository(
     fun f30Fail(): Int = prefs.getInt("f30_fail", 0)
 
     /**
-     * v5 R11-4 f30 观测（**只读、不改任何调度行为**，design.md §5.8-6）：作答时若该词**答前**
-     * days == 30 → 独立 prefs key `f30_total` +1（「忘了」再 `f30_fail` +1）。
-     * 必须在写库**之前**由调用方取 `termStates[id]?.days` 传入。
-     * v8 去重（design.md §13.1）：连击恢复后同词一日可答 3 次，调用方以 `id in counts` 守卫——
-     * 每词每日只计**首次**作答（去重后口径与 v7「无重复观测噪声」等价）。
-     * ⚠️ 封顶分级后 days==60 的成熟词不再触发 f30（观测点仍为 30）——预期内的口径变化，
-     * 后续按实测遗忘率调参时留意（design.md §13.3）。
+     * 在仓库内原子提交一次作答：更新词状态、当日连击、队列卡状态及重复卡后只持久化一次。
+     * `cardId` 是卡实例身份，避免重复卡插入后使用旧下标误答其他卡；已提交卡会直接返回 null，
+     * 同时防止快速双击造成连击被重复累计。
      */
-    private fun recordF30(beforeDays: Int?, forgot: Boolean) {
-        if (beforeDays != 30) return
-        val e = prefs.edit().putInt("f30_total", f30Total() + 1)
-        if (forgot) e.putInt("f30_fail", f30Fail() + 1)
-        e.apply()
-    }
+    fun answerCard(cardId: String, known: Boolean): AnswerResult? {
+        val rawQueue = queues[CHANNEL_DAILY] ?: return null
+        if (rawQueue.date != today()) return null
+        val q = normalizeQueue(rawQueue)
+        val index = q.cardIds.indexOf(cardId)
+        if (index !in q.queue.indices || q.answered[index]) return null
 
-    /**
-     * 「认识」作答（连击层 + 间隔层双层并存）：
-     * - 连击层（当日）：counts[id] = min(3, +1)；返回 count < 3 时由调用方（AppRoot）调 `repeatCard`
-     *   插入重复卡，满 3 即移出当日队列（本函数不插卡，保持 API 薄）；
-     * - 新词第一次认识只建立「学习中」状态 {1, 今天, 0, ease=2.5}，保证中途退出后次日仍会回来；
-     * - 已学词只有当日连击达到 3 次时才推进跨日间隔。这样未完成连击就退出时，原到期状态仍保留，
-     *   次日会重新进入队列；
-     * - 忘了留下的 restoreTo 也只在后续日期完成一次完整连击时兑现，避免同日看过答案后直接恢复长间隔。
-     * 返回 Triple(count, upgraded, daysAfter)：count = 本次作答后的连击计数（0–3，AppRoot 据此决定是否
-     * 插重复卡）；upgraded = 本次作答是否真正推进了跨日间隔；daysAfter = 写库后的 days（未升级时为原 days）。
-     * v5 R7：当日「认识」次数 +1。
-     *
-     * 设计取舍：过去曾因重复卡无法可靠生成而采用首答定调度，导致「连击未完成但跨日间隔已推进」。
-     * 当前重复卡由 `repeatCard` 稳定插入，因此恢复「第 3 次认识才提交间隔」的规则，避免中途退出漏掉到期词。
-     */
-    fun markKnown(id: String): Triple<Int, Boolean, Int> {
+        val id = q.queue[index]
         val d = currentDay()
-        touchStreak()   // v14：作答日旁路记账（连续学习天数），不影响下方任何调度写入
-        // f30 观测：必须取**写库之前**的 days；v8 去重——id 今日已作答过（连击第 2、3 次）不再计数
-        if (id !in d.counts) recordF30(termStates[id]?.days, forgot = false)
         val cur = termStates[id]
-        // v8 连击计数：「认识」+1 封顶 DAILY_COMBO_TARGET（v7 写的 1/0 已作答标记按计数自然沿用）
-        val count = min(DAILY_COMBO_TARGET, (d.counts[id] ?: 0) + 1)
+        val beforeDays = cur?.days
+        val firstAnswer = id !in d.counts
+        val streakUpdate = nextStreakUpdate()
+        var count = 0
         var upgraded = false
         var daysAfter = cur?.days ?: 0
 
-        when {
-            // 新词先落一个 1 天学习状态；跨日升级仍要等下一次完整连击。
-            cur == null -> {
-                termStates[id] = TermState(1, today(), 0, 2.5)
-                daysAfter = 1
+        if (known) {
+            count = min(DAILY_COMBO_TARGET, (d.counts[id] ?: 0) + 1)
+            when {
+                // 新词先落一个 1 天学习状态；跨日升级仍要等下一次完整连击。
+                cur == null -> {
+                    termStates[id] = TermState(1, today(), 0, 2.5)
+                    daysAfter = 1
+                }
+                // 只有第三次「认识」才提交跨日间隔。若当天中途退出，cur 保持原到期状态。
+                count >= DAILY_COMBO_TARGET && cur.lastSeen != today() -> {
+                    // 忘了的重考词新间隔不低于 restoreTo，兑现后清零。
+                    val ni = max(nextInterval(cur.days, cur.ease, cur.lapses), cur.restoreTo)
+                    val newEase = min(2.5, cur.ease + 0.1)
+                    termStates[id] = TermState(ni, today(), cur.lapses, newEase, 0)
+                    upgraded = true
+                    daysAfter = ni
+                }
+                // 同日第 2/3 次认识，以及忘了后的同日重学，只推进连击。
             }
-            // 只有第三次「认识」才提交跨日间隔。若当天中途退出，cur 保持原到期状态。
-            count >= DAILY_COMBO_TARGET && cur.lastSeen != today() -> {
-                // R14：忘了的重考词新间隔不低于 restoreTo（减半目标），兑现后清零
-                val ni = max(nextInterval(cur.days, cur.ease, cur.lapses), cur.restoreTo)
-                val newEase = min(2.5, cur.ease + 0.1)
-                termStates[id] = TermState(ni, today(), cur.lapses, newEase, 0)
-                upgraded = true
-                daysAfter = ni
-            }
-            // 同日第 2/3 次认识，以及忘了后的同日重学，只推进连击，不提前恢复长间隔。
+            day = d.copy(counts = d.counts + (id to count), knownAnswers = d.knownAnswers + 1)
+        } else {
+            val newEase = max(1.3, (cur?.ease ?: 2.5) - 0.2)
+            // days=1（次日必回池）+ restoreTo 记减半目标；cur==null 视为 days=1。
+            val restore = max(1, (cur?.days ?: 1) / 2)
+            termStates[id] = TermState(1, today(), (cur?.lapses ?: 0) + 1, newEase, restore)
+            day = d.copy(counts = d.counts + (id to 0), forgotAnswers = d.forgotAnswers + 1)
         }
-        day = d.copy(counts = d.counts + (id to count), knownAnswers = d.knownAnswers + 1)
-        persist()
-        return Triple(count, upgraded, daysAfter)
-    }
 
-    /**
-     * 「忘了」作答（prd v8 / design.md §13.1）：
-     * - 连击层：counts[id] **清零**——须重新连击 3 次才能移出当日队列；未满 3 由调用方（AppRoot）
-     *   调 `repeatCard` 插入重复卡（该词当日必定重现）；
-     * - 间隔层：立即写 {1, 今天, lapses+1, ease-0.2, restoreTo=减半目标}，保证次日必回池重考。
-     *   （忘了的词当天没被重新学会时不能凭空消失）；减半目标记在 restoreTo，后续日期完成 3 次「认识」时才兑现
-     *   （markKnown，Anki new-interval=50% 思路）。连忘两次 restoreTo 被覆盖为 1，从头来。
-     * 返回作答后的连击计数（恒 0，与 markKnown 的 Triple 口径对齐，方便调用方统一分流）。
-     * v5 R7：当日「忘了」次数 +1（完成卡战果）。
-     * f30 观测（v8 去重）：答前 days == 30 且今日首次作答 → `f30_total` +1 且 `f30_fail` +1。
-     */
-    fun markForgot(id: String): Int {
-        val d = currentDay()
-        touchStreak()   // v14：忘了也算当天学过（streak 以「当日有作答」为准，认识/忘了不区分）
-        // f30 观测：必须取**写库之前**的 days；v8 去重——id 今日已作答过不再计数
-        if (id !in d.counts) recordF30(termStates[id]?.days, forgot = true)
-        val cur = termStates[id]
-        val newEase = max(1.3, (cur?.ease ?: 2.5) - 0.2)
-        // days=1（次日必回池）+ restoreTo 记减半目标：cur==null 视为 days=1，目标仍 1（行为同旧版）
-        val restore = max(1, (cur?.days ?: 1) / 2)
-        termStates[id] = TermState(1, today(), (cur?.lapses ?: 0) + 1, newEase, restore)
-        // v8：连击清零（忘了即 0；该词当日重现由调用方 repeatCard 负责）
-        day = d.copy(counts = d.counts + (id to 0), forgotAnswers = d.forgotAnswers + 1)
-        persist()
-        return 0
-    }
+        val answered = q.answered.toMutableList()
+        answered[index] = true
+        var updatedQueue = q.copy(answered = answered)
+        var repeatCardId: String? = null
+        var insertBeforeCardId: String? = null
 
-    /** 当日连击计数（0–3，v8）：调用方据此决定是否插入重复卡（< 3 → repeatCard） */
-    fun comboCount(id: String): Int = currentDay().counts[id] ?: 0
+        // 忘了，或认识连击未满：在同一事务里插入下一张重复卡。
+        if (!known || count < DAILY_COMBO_TARGET) {
+            val insertAt = min(index + 1 + MIN_GAP, q.queue.size)
+            val newRepeatCardId = newCardId()
+            repeatCardId = newRepeatCardId
+            insertBeforeCardId = q.cardIds.getOrNull(insertAt)
+            updatedQueue = updatedQueue.copy(
+                queue = updatedQueue.queue.toMutableList().apply { add(insertAt, id) },
+                modes = updatedQueue.modes.toMutableList().apply { add(insertAt, MODE_REVIEW) },
+                answered = updatedQueue.answered.toMutableList().apply { add(insertAt, false) },
+                cardIds = updatedQueue.cardIds.toMutableList().apply { add(insertAt, newRepeatCardId) },
+            )
+        }
 
-    /**
-     * v8 最小间隔插入（design.md §13.1，取代 v4 的队尾追加）：把 `id` 的重复卡插入当日队列——
-     * `insertAt = min(afterIndex + 1 + MIN_GAP, queue.size)`，即与源卡（afterIndex）之间至少隔
-     * MIN_GAP 张其他卡；尾部剩余不足时钳到队尾（尽力而为，不拒绝插入——同词当日重现比严格间距更重要）。
-     * **同词间隔不变量由构造保证**：所有插入点 = 源卡下标 + MIN_GAP + 1，按归纳法任意两张同词卡之间
-     * ≥ MIN_GAP 张其他卡（不连续、不紧邻，prd v8 第 1 条）。
-     * queue/modes/answered 三平行数组**同下标**同步插入（mode=REVIEW、answered=false）+ persist，
-     * 返回 insertAt（调用方据此在 pages 同一下标插入页面并修正后续卡的 qIndex，见 AppRoot.answer）。
-     * 插入点恒在当前卡之后 → position / frontier / 当前卡下标不受影响。
-     * 前置条件：调用方已确认 `comboCount(id) < 3`（repo 不重复判，保持 API 薄）；
-     * 无队列 / afterIndex 越界 → 返回 -1（调用方不插页，防御性兜底）。
-     */
-    fun repeatCard(id: String, afterIndex: Int): Int {
-        val q = queues[CHANNEL_DAILY] ?: return -1
-        if (afterIndex < 0 || afterIndex >= q.queue.size) return -1
-        val insertAt = min(afterIndex + 1 + MIN_GAP, q.queue.size)
-        queues[CHANNEL_DAILY] = q.copy(
-            queue = q.queue.toMutableList().apply { add(insertAt, id) },
-            modes = q.modes.toMutableList().apply { add(insertAt, MODE_REVIEW) },
-            answered = q.answered.toMutableList().apply { add(insertAt, false) },
+        queues[CHANNEL_DAILY] = updatedQueue
+        val f30TotalAfter = if (firstAnswer && beforeDays == 30) f30Total() + 1 else null
+        val f30FailAfter = if (firstAnswer && beforeDays == 30 && !known) f30Fail() + 1 else null
+        persist(
+            f30TotalAfter = f30TotalAfter,
+            f30FailAfter = f30FailAfter,
+            streakUpdate = streakUpdate,
         )
-        persist()
-        return insertAt
+        return AnswerResult(count, upgraded, daysAfter, repeatCardId, insertBeforeCardId)
     }
+
+    /** 当日连击计数（0–3，供统计或调试读取）。 */
+    fun comboCount(id: String): Int = currentDay().counts[id] ?: 0
 
     /* ---------- 到期与间隔计算（v6 R12：SM-2 简化版；v8：封顶分级 30/60） ---------- */
 
     /**
      * SM-2 简化版动态间隔：`days = (prevDays * ease).roundToInt().coerceIn(1, cap)`。
      * - 认识升级：ease 在 [1.3, 2.5]，间隔随 ease 增长；
-     * - 忘了：days 归 1 + restoreTo 记减半目标（markForgot，重考「认识」时在 markKnown 兑现）、ease 降 0.2；
+     * - 忘了：days 归 1 + restoreTo 记减半目标（answerCard，重考「认识」时兑现）、ease 降 0.2；
      * - **v8 封顶分级**（design.md §13.1）：成熟词（ease 已到上限 2.5 且 lapses == 0）cap =
      *   [INTERVAL_CAP_MATURE]（60），普通词 cap = [INTERVAL_CAP_NORMAL]（30）——
      *   预期稳态日到期量 ~12/天 → ~7/天，清债日振荡消失；f30 实测遗忘率不达标时可下调
@@ -457,19 +453,16 @@ class StudyRepository(
         fmt.format(Date(d.time - DAY_MS))
     }.getOrNull()
 
-    /**
-     * streak 旁路记账（v14，唯一新增的写路径）：`markKnown` / `markForgot` 开头各调一次。
-     * 今天已记过 → 不动；昨天记过 → +1；断 ≥ 2 天（含首次）→ 重计 1。
-     * **刻意独立于 persist()**：不进主 state JSON、不触碰 termStates/day/queues
-     * （与 f30 观测同模式——统计旁路与学习状态解耦，design.md §16.1），
-     * v8 调度语义零改动；streak key 残留在升级/回滚场景均无害。
-     */
-    private fun touchStreak() {
+    /** 作答事务需要一并提交的连续学习天数变更；当天已记账时返回 null。 */
+    private data class StreakUpdate(val count: Int, val lastDate: String)
+
+    /** 计算连续学习天数，不在这里写库，避免一次作答产生多个持久化步骤。 */
+    private fun nextStreakUpdate(): StreakUpdate? {
         val t = today()
-        if (prefs.getString(KEY_STREAK_LAST_DATE, null) == t) return
+        if (prefs.getString(KEY_STREAK_LAST_DATE, null) == t) return null
         val last = prefs.getString(KEY_STREAK_LAST_DATE, null)
         val next = if (last != null && last == dayBefore(t)) prefs.getInt(KEY_STREAK, 0) + 1 else 1
-        prefs.edit().putInt(KEY_STREAK, next).putString(KEY_STREAK_LAST_DATE, t).apply()
+        return StreakUpdate(next, t)
     }
 
     /**
@@ -536,8 +529,8 @@ class StudyRepository(
      * - learned = 全部已学词，双键排序：lapses 降序优先（忘词先见）→ 到期日升序（先清旧债）；
      * - due     = learned 中到期的词（isDue）；
      * - news    = 未学词洗牌；
-     * - pool：due ≥ DEBT_THRESHOLD（20）→ 清债模式 `interleave(due.take(DEBT_QUOTA - newsPool.size),
-     *   newsPool, DEBT_QUOTA)` —— v16：总额仍 15 张，但**新词配额照给**（不再整天学不到新词，
+     * - pool：due ≥ DEBT_THRESHOLD（20）→ 清债模式；总量按用户配额增加最多 5 张（默认 10 → 15），
+     *   同时**新词配额照给**（不再整天学不到新词；低配额用户不会突然跳到 15 张），
      *   见该分支处注释）；v5 原口径是 `due.take(15)` 全复习、不补新词；
      *   否则 interleave(due.take(quota - newsPool.size), newsPool, quota)（R11-2 **交错**：格号 % 3 == 1
      *   优先放新词，news 非空时前 3 张内必有新词——做不完的用户也见得到新词；当日冻结由 ensureQueue
@@ -552,7 +545,7 @@ class StudyRepository(
      * R10：R9 的 `else -> learned + news`（分区全量入队）分支已删除——分区是**池型**频道（§5.7），
      * 不再生成队列，保留那个分支只会是一段永远走不到、却看起来仍在服务分区的死代码。
      * v8（design.md §13.1）：首排仍**每词恰好一张卡**（无教读卡）；连击未满 3 的重复卡不在首排——
-     * 由 `repeatCard` 在作答后**运行时**插入（打散，prd v8 第 1 条）。只有连击完成后才写入跨日间隔，
+     * 由 `answerCard` 在作答后**运行时**插入（打散，prd v8 第 1 条）。只有连击完成后才写入跨日间隔，
      * 当日没答满连击的到期词保持到期 → 次日自动回池（遗留词机制，由 isDue 保证）。
      */
     fun buildQueue(): DailyQueue {
@@ -568,39 +561,47 @@ class StudyRepository(
             )
         val due = learned.filter { isDue(termStates[it]!!) }
         val news = scope.filter { termStates[it] == null }.shuffled()
-        val quota = quotaProvider()
+        val quota = quotaProvider().coerceAtLeast(0)
         // v6 R14 新词配额独立：新词速率恒定 = quotaNew（不被到期复习挤占，主流「新学/复习分开配置」），
         // 复习用剩余额度；新词上限同时受总量约束（quota < quotaNew 时取小，防总量爆表）
-        val newsPool = news.take(minOf(newQuotaProvider(), quota))
+        val newsQuota = newQuotaProvider().coerceAtLeast(0)
+        val newsPool = news.take(minOf(newsQuota, quota))
         // v16：清债日**不再把新词配额归零**。设置页承诺「新词固定几个，不被复习挤掉」，
         // 而 v5 的实现是 `due.take(DEBT_QUOTA)`（15 张全复习、一个新词都不排）—— 那句承诺在清债日
         // 整天不成立。清债日并不罕见：复习槽位 = quota - newQuota（默认 5/天），已学约 300 词时
         // 每天自然到期 ~7 个 → 净积压 ~2 个 → 约 10 天攒到 DEBT_THRESHOLD(20) → 清债日约每周一次。
-        // 现改：总额仍以 DEBT_QUOTA 为上限（适老化防过载），先切出 newsPool 给新词，其余留给复习 ——
-        // 代价是清债日的复习量从 15 降到 DEBT_QUOTA - newsPool.size（默认 10），还债稍慢。
+        // 清债总量按用户配额计算：默认 10 → 15；设置 3/5 时分别为 8/10，设置 15/20 时不降级。
+        // 这样保留清债加速，又不让「每日学习词数量」在清债日失去意义。
+        val debtQuota = if (quota == 0) 0
+        else max(quota, min(quota + (DEBT_QUOTA - DAILY_POOL_QUOTA), DEBT_QUOTA))
         val pool = if (due.size >= DEBT_THRESHOLD)
-            interleave(due.take(max(0, DEBT_QUOTA - newsPool.size)), newsPool, DEBT_QUOTA)
+            interleave(due.take(max(0, debtQuota - newsPool.size)), newsPool, debtQuota)
         else
             interleave(due.take(max(0, quota - newsPool.size)), newsPool, quota)
 
         val queue = ArrayList<String>(pool.size)
         val modes = ArrayList<String>(pool.size)
         val answered = ArrayList<Boolean>(pool.size)
+        val cardIds = ArrayList<String>(pool.size)
         for (id in pool) {
             queue.add(id)
             modes.add(if (termStates[id] == null) MODE_NEW else MODE_REVIEW)
             answered.add(false)
+            cardIds.add(newCardId())
         }
-        return DailyQueue(today(), CHANNEL_DAILY, queue, modes, answered, 0, confirmed = false)
+        return DailyQueue(
+            today(), CHANNEL_DAILY, queue, modes, answered, 0,
+            confirmed = false,
+            cardIds = cardIds,
+        )
     }
 
     /**
      * R11-2 交错编排（design.md §3）：格号 % 3 == 1 的位置优先放新词，其余位置优先到期词；
      * 任一池空则另一池顶上，直到配额或两池用尽。保证 news 非空时队列前 3 张内必有新词
      * （做不完的用户也见得到新词，新词通道不再因 due 垫底被关闭）；两池皆空返回空列表
-     * （合法状态，见 buildQueue KDoc）。**v16：清债日也走本函数** —— 改调
-     * `interleave(due.take(DEBT_QUOTA - newsPool.size), newsPool, DEBT_QUOTA)`；
-     * v5 原口径是清债日 `due.take(15)` 全复习、**绕过本函数**，代价是新词配额被整天归零
+     * （合法状态，见 buildQueue KDoc）。**v16：清债日也走本函数** —— 由 buildQueue 传入按用户配额
+     * 计算的 debtQuota；v5 原口径是清债日 `due.take(15)` 全复习、**绕过本函数**，代价是新词配额被整天归零
      * （与设置页「新词固定几个，不被复习挤掉」的承诺矛盾）。
      */
     private fun interleave(due: List<String>, news: List<String>, quota: Int): List<String> {
@@ -622,7 +623,14 @@ class StudyRepository(
      */
     fun ensureQueue(): DailyQueue {
         val existing = queues[CHANNEL_DAILY]
-        if (existing != null && existing.date == today()) return existing
+        if (existing != null && existing.date == today()) {
+            val normalized = normalizeQueue(existing)
+            if (normalized != existing) {
+                queues[CHANNEL_DAILY] = normalized
+                persist()
+            }
+            return normalized
+        }
         val fresh = buildQueue()
         queues[CHANNEL_DAILY] = fresh
         persist()
@@ -638,18 +646,6 @@ class StudyRepository(
         val q = queues[CHANNEL_DAILY] ?: return
         if (q.confirmed) return
         queues[CHANNEL_DAILY] = q.copy(confirmed = true)
-        persist()
-    }
-
-    /** 断点续刷用：标记该卡实例已作答（answered[i]=true），按卡逐卡持久化（design.md §9.1） */
-    fun markAnswered(index: Int) {
-        val q = queues[CHANNEL_DAILY] ?: return
-        if (index < 0 || index >= q.queue.size) return
-        val ans = q.answered.toMutableList()
-        while (ans.size < q.queue.size) ans.add(false)   // 旧数据兜底
-        if (ans[index]) return
-        ans[index] = true
-        queues[CHANNEL_DAILY] = q.copy(answered = ans)
         persist()
     }
 
@@ -675,7 +671,8 @@ class StudyRepository(
      *   但浏览不写状态、不算学会（未学词走 `poolWeight` 的固定中等权重分支）；
      * - **收藏频道（`fav`，v6）** = 收藏词加权随机（同一套加权逻辑，复用 else 分支）。
      *   ⚠️ 收藏池**可能为空**（没有任何收藏）→ 调用方（AppRoot）拿不到卡时插引导页，场景分区不存在这种情况。
-     * 抽完由调用方重洗（`AppRoot.appendPoolPages`），场景分区池必非空（每区 ≥ 17 词——v10 清理后最小分区 emergency，§5.7-8）。
+     * 抽完由调用方重洗（`AppRoot.appendPoolPages`），场景分区池必非空（v18 后最小分区 `transit` 40 词，
+     * 另加固定频道 `daily` 103 词；`fav` 是唯一可能为空的池）。
      */
     fun poolIds(channel: String): List<String> {
         // 池的构成差异保留（统一的是抽卡**算法**，不是池的范围）：
@@ -686,7 +683,7 @@ class StudyRepository(
     }
 
     /** 加权随机排列（Efraimidis–Spirakis 指数键）：key = -ln(u)/w，升序即无放回加权抽样。
-     *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n ≤ 565）且边界更少。 */
+     *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n ≤ 414）且边界更少。 */
     private fun weightedShuffle(ids: List<String>): List<String> {
         val rnd = Random.Default
         return ids.map { id ->
@@ -719,9 +716,39 @@ class StudyRepository(
         return day
     }
 
+    /** 为新卡生成不会因队列插入而变化的实例 id。 */
+    private fun newCardId(): String = UUID.randomUUID().toString()
+
+    /** 为旧版本队列补齐卡实例 id，并修正三组并行数组长度。 */
+    private fun normalizeQueue(q: DailyQueue): DailyQueue {
+        val ids = ArrayList<String>(q.queue.size)
+        val used = mutableSetOf<String>()
+        q.queue.forEachIndexed { index, termId ->
+            val stored = q.cardIds.getOrNull(index)
+            var cardId: String? = if (!stored.isNullOrBlank() && used.add(stored)) stored else null
+            if (cardId == null) {
+                var fallback = "legacy-${q.date}-$index-$termId"
+                while (!used.add(fallback)) fallback = "$fallback-${UUID.randomUUID()}"
+                cardId = fallback
+            }
+            ids.add(requireNotNull(cardId))
+        }
+
+        val modes = q.modes.take(q.queue.size).toMutableList()
+        val answered = q.answered.take(q.queue.size).toMutableList()
+        while (modes.size < q.queue.size) modes.add(MODE_REVIEW)
+        while (answered.size < q.queue.size) answered.add(false)
+        return q.copy(modes = modes, answered = answered, cardIds = ids)
+    }
+
     /* ---------- 持久化（读写对称） ---------- */
 
-    private fun persist() {
+    /** 持久化主状态，并在作答事务中一并提交统计旁路数据。 */
+    private fun persist(
+        f30TotalAfter: Int? = null,
+        f30FailAfter: Int? = null,
+        streakUpdate: StreakUpdate? = null,
+    ) {
         runCatching {
             val obj = JSONObject()
             val ts = JSONObject()
@@ -746,7 +773,9 @@ class StudyRepository(
                     .put("forgotAnswers", d.forgotAnswers),
             )
             val qs = JSONObject()
-            queues.forEach { (ch, q) ->
+            queues.toMap().forEach { (ch, rawQueue) ->
+                val q = normalizeQueue(rawQueue)
+                if (q != rawQueue) queues[ch] = q
                 qs.put(
                     ch,
                     JSONObject()
@@ -754,6 +783,7 @@ class StudyRepository(
                         .put("queue", JSONArray(q.queue))
                         .put("modes", JSONArray(q.modes))
                         .put("answered", JSONArray(q.answered))
+                        .put("cardIds", JSONArray(q.cardIds))
                         .put("position", q.position)
                         // v7 总结卡确认标记（旧版本读到多余 key 无害）
                         .put("confirmed", q.confirmed),
@@ -762,7 +792,14 @@ class StudyRepository(
             obj.put("queues", qs)
             // v6 收藏：顶层 "favorites" 有序数组（LinkedHashSet 保序）；与学习状态独立
             obj.put("favorites", JSONArray(favoriteIds.toList()))
-            prefs.edit().putString("state", obj.toString()).apply()
+            val editor = prefs.edit().putString("state", obj.toString())
+            f30TotalAfter?.let { editor.putInt("f30_total", it) }
+            f30FailAfter?.let { editor.putInt("f30_fail", it) }
+            streakUpdate?.let {
+                editor.putInt(KEY_STREAK, it.count)
+                    .putString(KEY_STREAK_LAST_DATE, it.lastDate)
+            }
+            editor.apply()
         }
     }
 
@@ -813,6 +850,7 @@ class StudyRepository(
                     val queue = mutableListOf<String>()
                     val modes = mutableListOf<String>()
                     val answered = mutableListOf<Boolean>()
+                    val cardIds = mutableListOf<String>()
                     qj.optJSONArray("queue")?.let { ja ->
                         for (i in 0 until ja.length()) queue.add(ja.optString(i))
                     }
@@ -822,10 +860,13 @@ class StudyRepository(
                     qj.optJSONArray("answered")?.let { aa ->
                         for (i in 0 until aa.length()) answered.add(aa.optBoolean(i))
                     }
+                    qj.optJSONArray("cardIds")?.let { ca ->
+                        for (i in 0 until ca.length()) cardIds.add(ca.optString(i))
+                    }
                     // 读写对称兜底：modes/answered 与 queue 等长（旧数据缺省 REVIEW/未作答）
                     while (modes.size < queue.size) modes.add(MODE_REVIEW)
                     while (answered.size < queue.size) answered.add(false)
-                    queues[ch] = DailyQueue(
+                    queues[ch] = normalizeQueue(DailyQueue(
                         qj.optString("date"),
                         ch,
                         queue,
@@ -834,7 +875,8 @@ class StudyRepository(
                         qj.optInt("position", 0),
                         // v7 总结卡确认标记：旧 JSON 无 "confirmed" 键 → 缺省 false（读写对称）
                         qj.optBoolean("confirmed", false),
-                    )
+                        cardIds,
+                    ))
                 }
             }
             // v6 收藏：旧 JSON 无 "favorites" 键 → 缺省空集（无需迁移；读写对称）
@@ -871,12 +913,12 @@ class StudyRepository(
         const val CHANNEL_COMMON = "daily"
 
         /** v8 连击目标（恢复 v4 语义，prd v8 第 1 条）：当日同一个词累计 3 次「认识」→ 移出当日队列；
-         *  任意一次「忘了」→ 清零。v7 曾随追加机制一并删除，v8 恢复但重复卡改由 `repeatCard`
+         *  任意一次「忘了」→ 清零。v7 曾随追加机制一并删除，v8 恢复但重复卡改由 `answerCard`
          *  最小间隔插入（取代 v4 的队尾追加，见 [MIN_GAP]）。 */
         const val DAILY_COMBO_TARGET = 3
 
         /** v8 最小间隔（prd v8 第 1 条打散约束）：同词两张卡之间至少隔 2 张其他卡——
-         *  「避免连续/紧邻出现」的最小满足（QYJ 授权口径，可调）。repeatCard 插入点 = 源卡下标
+         *  「避免连续/紧邻出现」的最小满足（QYJ 授权口径，可调）。answerCard 插入点 = 源卡下标
          *  + [MIN_GAP] + 1；队尾剩余不足时钳到队尾（尽力而为）。 */
         const val MIN_GAP = 2
 
@@ -884,12 +926,15 @@ class StudyRepository(
          *  池型频道不设配额（R10：分区 = 该区全部词，只是抽取顺序加权随机）。
          *  v6：buildQueue 改读构造注入的 quotaProvider（设置页「每日学习词数量」），本常量保留为
          *  quotaProvider 的**缺省值**（未注入时的兜底）。
-         *  ⚠️ 容量观测记录（2026-09-20，QYJ 拍板「先不动、留记录」）：稳态持有量 ≈ 复习槽位(NEW=5) ×
-         *  封顶间隔(30~60 天) = **150~300 条**，而词库 v16 已 565 条（超载 1.9~3.8 倍；v15 时为 549 条 /
-         *  1.8~3.7 倍，v16 的 daily 日用洗护净 +16 条是最近一次推高）。扩库不提配额
-         *  → 复习债累积 → 触发 DEBT_THRESHOLD=20 清债模式 → 新词长期学不进去。无债运转需把
-         *  DAILY_POOL_QUOTA 提到 **14~22**。暂不动，待实机 f30 观测出现复习债征兆（清债频繁触发、
-         *  新词多日不进队列）再议。依据：research/vocab/char_coverage_report.md 容量节。 */
+         *  ⚠️ 容量观测记录（2026-09-20 起，QYJ 拍板「先不动、留记录」）：稳态持有量 ≈ 复习槽位(NEW=5) ×
+         *  封顶间隔(30~60 天) = **150~300 条**，而词库 v18 为 414 条（超载 **1.4~2.8 倍**）。
+         *  历史：v15 549 条 / 1.8~3.7；v16 565 条 / 1.9~3.8（daily 日用洗护净 +16）；v17 550 条 /
+         *  1.8~3.7（去重删 15，但 daily 37→72）；**v18 414 条 / 1.4~2.8（删 136、daily 72→103）**——
+         *  总量第一次明显回落，超载已接近「无债运转」的边界（仍需 quota 提到 14~22 才完全不超载）。
+         *  扩库不提配额 → 复习债累积 → 触发 DEBT_THRESHOLD=20 清债模式 → 新词长期学不进去。
+         *  暂不动，待实机 f30 观测出现复习债征兆（清债频繁触发、新词多日不进队列）再议。
+         *  依据：research/vocab/char_coverage_report.md 容量节（该文件已随 Trellis 卸载删除，
+         *  仅存 git 历史 `9604d1b`）。 */
         const val DAILY_POOL_QUOTA = 10
 
         /** v6 R14 每日新词配额缺省值（newQuotaProvider 兜底；设置页「每天学几个新词」注入）——
@@ -909,12 +954,9 @@ class StudyRepository(
          *  v16：清债日**不再等同于「全复习、不补新词」**，新词配额照给 —— 见 [DEBT_QUOTA]。 */
         const val DEBT_THRESHOLD = 20
 
-        /** 清债日的**总**配额（v5 定 15；v16 起它不再等于复习量）：
-         *  清债日 pool = 复习 + 新词，新词照常给 `newsPool` 张（默认 5），复习占剩下的
-         *  `DEBT_QUOTA - newsPool.size`（默认 10）。
-         *  v5 原口径是「15 张全复习、不补新词」，与设置页「新词固定几个，不被复习挤掉」的承诺
-         *  直接矛盾 —— 清债日并不罕见（已学约 300 词时约每周一次），用户改了设置却整天学不到新词。
-         *  v16 改为保底新词，代价是清债日的复习量从 15 降到约 10，还债稍慢。 */
+        /** 清债日的默认上限（默认配额 10 → 清债总量 15）；实际总量按用户配额计算：
+         *  `max(baseQuota, min(baseQuota + 5, DEBT_QUOTA))`，并保留新词配额。
+         *  因此低配额用户不会突然跳到 15 张，高配额用户也不会被清债上限反向降级。 */
         const val DEBT_QUOTA = 15
 
         /** 分区抽词权重：**未学词**的固定中等权重（R10 D5）——比刚复习过的词（1.0）更靠前、

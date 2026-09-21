@@ -72,11 +72,18 @@ val FAV_GUIDE_SPEECH = "$FAV_GUIDE_TITLE。$FAV_GUIDE_BODY。"
 
 /**
  * 频道 Tab（参考抖音顶部 tab）。
- * v6 渲染顺序：**推荐（固定第一）→ 收藏（固定第二）→ 可见场景分区**（`scenes` = 设置过滤排序后传入，
- * rec/fav 不参与隐藏与排序，故不在此列表里）。已完成的分区（v5：该区每个词间隔天数都 >= 15，
- * design.md §9.5；v16 起**面向用户的文案统一称「学完」**）加「学完」后缀、文字转绿，
- * 但仍可点进去自主复习；区内任何一词「忘了」清零即即时回退。
- * 收藏 tab 不参与该判定（fav 不在 SCENES，graduatedScenes 天然不含它）。
+ * 渲染顺序：**推荐（固定第一）→ 收藏（固定第二）→ 常用词（固定第三，v17）→ 可见场景分区**
+ * （`scenes` = 设置过滤排序后传入；显隐与排序只管场景分区，固定频道不参与）。
+ *
+ * **固定频道的三种「不可移除」各有来源**：推荐与收藏不在 `SCENES`（无 Scene 项可开关）；
+ * 常用词在 `SCENES` 里但被 `AppSettings.manageableIds()` 排除，故 order/hidden 都不含它、
+ * 设置页也没有它的行 —— 用户**无从关闭**，这是 v17「默认频道显示、不可移除」的实现方式
+ * （不是靠一个禁用态的开关）。见 StudyData.kt 的 `SCENES` 注释。
+ *
+ * 已完成的分区（该区每个词间隔天数都 >= 15，v16 起面向用户的文案统一称「学完」）加「学完」
+ * 后缀、文字转绿，但仍可点进去自主复习；区内任何一词「忘了」清零即即时回退。
+ * 收藏 tab 不参与该判定（fav 不在 SCENES，graduatedScenes 天然不含它）；常用词在 SCENES
+ * 里故参与判定，但 72 条词全部 ≥15 天实际不可达 —— 保留该分支只为行为一致。
  * ⚠️ 代码标识符沿用 `graduated` / `GRADUATED_DAYS`（多处引用、且与产品措辞解耦），
  * 只把**用户能看到的文案**统一成「学完」—— 别为了对齐措辞去重命名标识符。
  * **隐藏设置入口（v6，prd v6 第 1 条）**：在推荐 tab 上**连点 5 次**（每次间隔 ≤ 2s，超时重置）
@@ -128,6 +135,17 @@ fun ChannelBar(
             isGraduated = false,
             star = true,
             onClick = { onSelect(StudyRepository.CHANNEL_FAV) },
+        )
+        // 常用词（固定第三，v17）：v9 起长期只作推荐的内容源、频道栏永不出现；v17 升为
+        // **默认显示的固定频道**——恒在、不可移除（`AppSettings.manageableIds()` 排除它，
+        // 故设置页无此行、order/hidden 不含它，用户无从关闭）。
+        // 它同时仍是推荐范围的一部分（`StudyRepository.scopeIds` 的 CHANNEL_COMMON 特例），
+        // 所以这 72 条词既会被推荐队列推给用户，也能在这里主动翻阅（池型频道，浏览零写入）。
+        ChannelChip(
+            label = if (StudyRepository.CHANNEL_COMMON in graduated) "常用词 学完" else "常用词",
+            active = current == StudyRepository.CHANNEL_COMMON,
+            isGraduated = StudyRepository.CHANNEL_COMMON in graduated,
+            onClick = { onSelect(StudyRepository.CHANNEL_COMMON) },
         )
         // 可见场景分区（设置过滤 + 排序后传入；AppRoot 在当前频道被隐藏时回退推荐）
         scenes.forEach { s ->

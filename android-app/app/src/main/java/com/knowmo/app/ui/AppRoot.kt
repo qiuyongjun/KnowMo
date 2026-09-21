@@ -19,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import com.knowmo.app.data.AppSettings
+import com.knowmo.app.data.AnswerResult
 import com.knowmo.app.data.STUDY_TERMS
 import com.knowmo.app.data.StudyRepository
 import com.knowmo.app.data.Term
@@ -28,15 +29,15 @@ import com.knowmo.app.ui.theme.AppSurface
 import kotlinx.coroutines.delay
 
 /** feed 页：词条卡（mode 由调度器运行时计算：新学/复习/浏览）或总结卡。
- *  seq = 本会话内的出现序号：v8 起每日队列**首排每词一张卡**，连击未满 3 的词由 `repeatCard`
+ *  seq = 本会话内的出现序号：v8 起每日队列**首排每词一张卡**，连击未满 3 的词由 `answerCard`
  *  在作答后运行时插入重复卡（打散，prd v8 第 1 条）——展开/作答状态仍按「出现」记录而非按词记录
  *  （同一词的多次出现各自独立作答），池型浏览页与任务页互不干扰，旧数据兼容也更稳。
- *  qIndex = 该卡在持久化当日队列中的下标（作答时 markAnswered 用；repeatCard 插入的新卡带新下标）；
- *  池型页（温故流 / 分区浏览）= -1（不落库）。
+ *  cardId = 持久化队列中的稳定卡实例 id；重复卡插入后原有卡的身份不变。
+ *  池型页（温故流 / 分区浏览）= null（不落库）。
  *  v6：`Guide` = 空收藏引导页（**仅收藏频道空池可达**——场景分区池必非空；大字引导 + 播报同源 FAV_GUIDE_SPEECH，
  *  防 VerticalPager pageCount == 0 白屏）。 */
 sealed interface Page {
-    data class TermPage(val t: Term, val mode: CardMode, val seq: Int, val qIndex: Int) : Page
+    data class TermPage(val t: Term, val mode: CardMode, val seq: Int, val cardId: String?) : Page
     data object Done : Page
     data object Guide : Page
 }
@@ -62,8 +63,8 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    点单字读该字后再作答；作答后仍念「词+提示+反馈」（适老化）。
  *    **浏览卡**（温故流/分区/收藏）滑到停稳自动念「词 + 用途」（v9 第 2 条：自主学习划入即读）。
  * 3. **当日连击**（v8 保留）：同词当日 3 次「认识」才移出队列，任意「忘了」清零；
- *    未满 3 → `insertRepeatCard` 按 `repo.repeatCard` 的打散位置重插（同词不连续/紧邻，
-     *    插入点之后的任务卡 qIndex 同步 +1）；完成当日连击后才写入跨日间隔（SM-2 + 封顶分级）。
+ *    未满 3 → `answerCard` 在仓库事务内插入重复卡（同词不连续/紧邻）；完成当日连击后才写入跨日间隔
+ *    （SM-2 + 封顶分级）。
  * 4. **任务锁滑**（v7 保留，v9 第 1 条不变）：每日任务频道任务阶段 `userScrollEnabled = false`
  *    ——任务中不允许滑动切换词卡，唯一翻页动力 = 作答后自动前进（等播报念完再翻）。
  * 5. **完成卡上滑转浏览**（v9 第 1 条，取代 v7「点确认」）：全部任务词连击满 3 → 完成卡落地，
@@ -73,8 +74,11 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    false 走断点恢复（仍锁滑）。
  * 6. **推荐范围收窄**（v9 第 3/4 条）：推荐频道（每日任务 + 温故流）只含**可见分区**的词
  *    （`recScenesProvider` 注入，MainActivity 传 settings.visibleScenes()）+ **常用词分区**
- *    （`CHANNEL_COMMON`，不可显隐、恒入推荐——QYJ 拍板的内容源特例：默认只有推荐+收藏
- *    两个频道时推荐才有内容）。隐藏分区的词两个入口都抽不到。
+ *    （`CHANNEL_COMMON`，恒入推荐——QYJ 拍板的内容源特例：默认场景分区全隐藏时，推荐仍靠
+ *    常用词有内容）。隐藏分区的词两个入口都抽不到。
+ *    ⚠️ v17：`CHANNEL_COMMON` 同时成了**第三个固定频道**（默认显示、不可移除，见 Common.kt 的
+ *    ChannelBar）。它是**池型频道**（channel != CHANNEL_DAILY → 走 appendPoolPages 分支），
+ *    浏览零写入；其词仍在推荐范围内，两条入口并存。
  * 7. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
  * 8. 分区完成（design.md §9.5，days >= 15）→ 频道栏加「学完」后缀（v16 起用文字，不再用 🎓），即时可逆
  *    （间隔层只由每日任务作答写入）
@@ -163,8 +167,12 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // v6：设置显隐改动**即时生效**——当前频道被隐藏（非 rec/fav 且不在可见分区）→ 回退推荐频道。
     // 回退由既有的 LaunchedEffect(channel) 装载分支自然接管（重建队列 / 重建池型页）。
     LaunchedEffect(visibleScenes) {
+        // ⚠️ v17：固定频道有三个（推荐 / 收藏 / 常用词），三者都**不来自 visibleScenes**，
+        // 必须全部放行。漏掉 CHANNEL_COMMON 的后果：点「常用词」频道的那一瞬就被本 effect
+        // 判为"当前频道已被隐藏"弹回推荐 —— 表现为该 tab 完全点不动。
         if (channel != StudyRepository.CHANNEL_DAILY &&
             channel != StudyRepository.CHANNEL_FAV &&
+            channel != StudyRepository.CHANNEL_COMMON &&
             channel !in visibleScenes.map { it.id }
         ) {
             channel = StudyRepository.CHANNEL_DAILY
@@ -179,7 +187,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
 
     /** 待处理（pending）口径（v8 语义同 v7）：每日任务卡（非 FREE）**未作答**——
      *  首见词也是任务卡，无「教读待处理」这一态；v8 连击插入的重复卡 unanswered 时同样计入
-     *  （repeatCard 插入的新 seq 未写 revealed）。
+     *  （answerCard 插入的新 seq 未写 revealed）。
      *  浏览卡（`CardMode.FREE`：温故流 / 分区 / 收藏）恒不计入——它们不是当日任务，也没有作答入口。 */
     fun isPending(p: Page): Boolean =
         p is Page.TermPage && p.mode != CardMode.FREE && revealed[p.seq] != true
@@ -250,7 +258,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     }
 
     /** 池型追加（v5 R10 §5.7-2）：从池里顺序取 count 张追加到**尾部**；池空用 `repo.poolIds(channel)`
-     *  重洗补满（**无限流**，随时可停）。qIndex = -1 → 不落库。三个使用场景共用同一实现：
+     *  重洗补满（**无限流**，随时可停）。cardId = null → 不落库。三个使用场景共用同一实现：
      *  - 池型（分区/收藏）= 该范围**全部词**（含未学词）；
      *  - 队列型（`rec`）温故流 = v5 完成卡之后的追加，以及 **v9 转浏览模式后的装载**；
      *    池 = 推荐范围**已学词**（作答即写间隔层 → 转浏览前已答的词必有 TermState，池必非空）。
@@ -267,7 +275,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
             }
             val next = freePool.firstOrNull() ?: return@repeat
             freePool = freePool.drop(1)
-            extra.add(Page.TermPage(next, CardMode.FREE, nextSeq(), -1))
+            extra.add(Page.TermPage(next, CardMode.FREE, nextSeq(), null))
         }
         if (extra.isNotEmpty()) pages = pages + extra
     }
@@ -283,7 +291,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         repo.markConfirmed()
         browseMode = true
         val target = (pagerState.currentPage - doneIdx).coerceIn(0, pages.size - 1)
-        pages = pages.filter { it is Page.Done || (it is Page.TermPage && it.qIndex < 0) }
+        pages = pages.filter { it is Page.Done || (it is Page.TermPage && it.cardId == null) }
         pagerState.scrollToPage(target)
         advanceAfterSpeechSeq = -1
     }
@@ -325,7 +333,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                     val seq = nextSeq()
                     // 断点恢复：按该卡实例的 answered[i] 逐卡恢复展开态（design.md §9.1）
                     if (q.answered[i]) revealed[seq] = true
-                    Page.TermPage(t, mode, seq, i)
+                    Page.TermPage(t, mode, seq, q.cardIds[i])
                 }
                 syncDonePage()                   // 总结卡条件出现：pending == 0 才有收尾页
                 // 断点：frontier = 第一张待处理卡（都做完了则是总结卡）——「在哪儿」=「做到哪儿了」
@@ -400,25 +408,23 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         }
     }
 
-    /** v8 连击重复卡插入（design.md §13.2；v9 修正 qIndex 平移）：`repeat` 为真且是任务卡
-     *  （qIndex ≥ 0）时调 `repo.repeatCard` 拿 insertAt，pages 在**同一下标**插入 REVIEW 页——
-     *  任务阶段任务卡区与 queue 一一对应，pages 下标 == queue 下标恒成立；插入点恒在当前卡之后
-     *  → 已有卡下标 / frontier 不受影响。⚠️ 插入点之后的任务卡在 queue 里的下标都 +1 了，
-     *  pages 里对应卡的 qIndex 必须同步 +1（否则 markAnswered 会按旧下标标记错卡——v8 实现缺陷，
-     *  v9 修正）。repo 返回 -1（无队列 / afterIndex 越界的防御兜底）则不插页。 */
-    fun insertRepeatCard(t: Term, p: Page.TermPage, repeat: Boolean) {
-        if (!repeat || p.qIndex < 0) return
-        val insertAt = repo.repeatCard(t.id, p.qIndex)
-        if (insertAt < 0) return
+    /** 将仓库事务已插入的重复卡同步到页面；页面只按稳定 cardId 找定位，不平移旧卡身份。 */
+    fun insertRepeatCard(t: Term, p: Page.TermPage, result: AnswerResult) {
+        val repeatCardId = result.repeatCardId ?: return
+        val currentIndex = pages.indexOfFirst { (it as? Page.TermPage)?.cardId == p.cardId }
+        if (currentIndex < 0) return
+        val beforeIndex = result.insertBeforeCardId?.let { beforeId ->
+            pages.indexOfFirst { (it as? Page.TermPage)?.cardId == beforeId }
+        } ?: -1
+        val insertAt = beforeIndex.takeIf { it > currentIndex }
+            ?: minOf(currentIndex + 1 + StudyRepository.MIN_GAP, pages.size)
         val newSeq = nextSeq()
         val out = ArrayList<Page>(pages.size + 1)
         pages.forEachIndexed { i, pg ->
-            if (i == insertAt) out.add(Page.TermPage(t, CardMode.REVIEW, newSeq, insertAt))
-            out.add(
-                if (pg is Page.TermPage && pg.qIndex >= insertAt) pg.copy(qIndex = pg.qIndex + 1) else pg
-            )
+            if (i == insertAt) out.add(Page.TermPage(t, CardMode.REVIEW, newSeq, repeatCardId))
+            out.add(pg)
         }
-        if (insertAt >= pages.size) out.add(Page.TermPage(t, CardMode.REVIEW, newSeq, insertAt))
+        if (insertAt >= pages.size) out.add(Page.TermPage(t, CardMode.REVIEW, newSeq, repeatCardId))
         pages = out
     }
 
@@ -426,46 +432,48 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
      *  **每日任务卡**（温故流/分区/收藏都是浏览卡，没有 √/×）——战果只在每日任务频道产生，
      *  故完成卡天然只统计每日任务（v16：战果数字不再缓存，完成卡与播报都直接读 repo 的持久口径）。
      *  - **间隔层**：新词首次认识先建立 {1,今天,0}；已学词完成当日 3 次认识后才推进间隔；首见忘了 →
-     *    {1,今天,lapses+1}。SM-2 动态间隔 + restoreTo 兑现 + 封顶分级，全在 repo.markKnown/markForgot 内。
-     *  - **连击层**（v8）：markKnown 返回连击计数 count——`count < DAILY_COMBO_TARGET` →
-     *    `insertRepeatCard` 打散重插（同词不连续/紧邻，prd v8 第 1 条）；count == 3 → 移出当日队列。
+     *    {1,今天,lapses+1}。SM-2 动态间隔 + restoreTo 兑现 + 封顶分级，全在 repo.answerCard 内。
+     *  - **连击层**（v8）：answerCard 返回连击计数 count——`count < DAILY_COMBO_TARGET` →
+     *    仓库事务内插入重复卡（同词不连续/紧邻，prd v8 第 1 条）；count == 3 → 移出当日队列。
      *    忘了 → 连击清零，当日同样打散重现（重新连击 3 次才能移出）。
      *  - **播报按剩余次数分级**（v4 口径恢复）：1 → 再认对 2 次；2 → 再认对 1 次；3 → 学会啦
      *    （upgraded 才播天数，闸门挡住不播——沿用 v5 R11 口径）。
      *  展开/文案按 seq（本次出现）记录；作答同时按卡实例落库 answered（断点恢复用，design.md §9.1）。 */
-    fun answer(p: Page.TermPage, known: Boolean) {
-        val t = p.t
-        revealed[p.seq] = true
-        if (p.qIndex >= 0) repo.markAnswered(p.qIndex)   // 池型页 qIndex=-1 不落库
-        if (known) {
-            val (count, upgraded, daysAfter) = repo.markKnown(t.id)
-            // 播报（v8 连击分级 + v5 R11 升级口径：满 3 且升级才报天数）
-            val target = StudyRepository.DAILY_COMBO_TARGET
-            val (msg, spoken) = when {
-                count < target ->
-                    "👍 再认对 ${target - count} 次就学会" to "再认对${target - count}次就学会。"
-                upgraded && daysAfter == 1 ->
-                    "👍 这个词学会啦！明天再来复习" to "这个词学会啦！明天再来复习。"
-                upgraded ->
-                    "👍 这个词学会啦！${daysAfter} 天后再来复习" to "这个词学会啦！${daysAfter}天后再来复习。"
-                else -> "👍 这个词学会啦" to "这个词学会啦。"
+        fun answer(p: Page.TermPage, known: Boolean) {
+            val cardId = p.cardId ?: return
+            if (revealed[p.seq] == true) return
+            val t = p.t
+            val result = repo.answerCard(cardId, known) ?: return
+            revealed[p.seq] = true
+            if (known) {
+                val count = result.count
+                val upgraded = result.upgraded
+                val daysAfter = result.daysAfter
+                // 播报（v8 连击分级 + v5 R11 升级口径：满 3 且升级才报天数）
+                val target = StudyRepository.DAILY_COMBO_TARGET
+                val (msg, spoken) = when {
+                    count < target ->
+                        "👍 再认对 ${target - count} 次就学会" to "再认对${target - count}次就学会。"
+                    upgraded && daysAfter == 1 ->
+                        "👍 这个词学会啦！明天再来复习" to "这个词学会啦！明天再来复习。"
+                    upgraded ->
+                        "👍 这个词学会啦！${daysAfter} 天后再来复习" to "这个词学会啦！${daysAfter}天后再来复习。"
+                    else -> "👍 这个词学会啦" to "这个词学会啦。"
+                }
+                results[p.seq] = msg
+                tts.speak("${termSpeech(t)}。$spoken")
+            } else {
+                results[p.seq] = "没关系，再学一遍 💪"
+                tts.speak("${termSpeech(t)}。没关系，再学一遍。")
             }
-            results[p.seq] = msg
-            tts.speak("${termSpeech(t)}。$spoken")
-            insertRepeatCard(t, p, repeat = count < target)
-        } else {
-            repo.markForgot(t.id)
-            results[p.seq] = "没关系，再学一遍 💪"
-            tts.speak("${termSpeech(t)}。没关系，再学一遍。")
-            insertRepeatCard(t, p, repeat = true)          // 忘了 → 连击清零，当日必重现
+            insertRepeatCard(t, p, result)
+            // v16：本次作答一定会改间隔层，徽章可能要重算 —— 计数器无脑 +1（战果数字直接读 repo，不在这里缓存）
+            answerTick++
+            // v5 R7 总结卡条件出现：全部任务词连击满 3 移出（无待处理卡）→ 总结卡此时才出现在队尾
+            syncDonePage()
+            // v5 R8 作答后自动前进（§5.5）：置触发键，由下面 keyed 该 seq 的 effect 等播报念完再翻页
+            advanceAfterSpeechSeq = p.seq
         }
-        // v16：本次作答一定会改间隔层，徽章可能要重算 —— 计数器无脑 +1（战果数字直接读 repo，不在这里缓存）
-        answerTick++
-        // v5 R7 总结卡条件出现：全部任务词连击满 3 移出（无待处理卡）→ 总结卡此时才出现在队尾
-        syncDonePage()
-        // v5 R8 作答后自动前进（§5.5）：置触发键，由下面 keyed 该 seq 的 effect 等播报念完再翻页
-        advanceAfterSpeechSeq = p.seq
-    }
 
     // 滑动即播（v9 契约）。
     // ⚠️ key 只有 pagerState（**去掉 pages**）：转浏览装载浏览页、完成卡条件出现都在本 effect
