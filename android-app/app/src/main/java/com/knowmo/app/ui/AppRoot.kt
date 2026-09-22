@@ -51,6 +51,13 @@ private const val POOL_BATCH = 2
 private const val SETTLE_SPEECH_DELAY_MS = 200L
 
 /**
+ * v21.1 作答夸奖池（QYJ 2026-09-22 反馈）：连击未满时「认识」的播报从池中**随机取一条**——
+ * 不再报「再认对 N 次就学会」（那是向老人解释调度机制：每天要听几十遍、语气像系统提示不像夸奖，
+ * 且次数信息没有行动价值）。随机变化消除「每句都一样」的单调感；TTS 友好——短句、无符号、口语。
+ */
+private val ANSWER_PRAISE = listOf("认对了，真棒", "好，记住了", "不错不错", "记得好", "真厉害")
+
+/**
  * v20 频道会话快照（QYJ 2026-09-21 三条反馈的统一载体，见 AppRoot 内 channelSnapshots 注释）：
  * 切走频道时保存该频道的页面流 / 抽取池 / 落点 / browseMode，切回时原样恢复。
  * date 用于隔日作废：快照跨天一律丢弃，走完整装载（队列重建 / 重新洗牌）。
@@ -513,8 +520,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
      *  - **连击层**（v8）：answerCard 返回连击计数 count——`count < DAILY_COMBO_TARGET` →
      *    仓库事务内插入重复卡（同词不连续/紧邻，prd v8 第 1 条）；count == 3 → 移出当日队列。
      *    忘了 → 连击清零，当日同样打散重现（重新连击 3 次才能移出）。
-     *  - **播报按剩余次数分级**（v4 口径恢复）：1 → 再认对 2 次；2 → 再认对 1 次；3 → 学会啦
-     *    （upgraded 才播天数，闸门挡住不播——沿用 v5 R11 口径）。
+     *  - **播报分级**（v21.1 起）：连击未满 → 随机夸奖（ANSWER_PRAISE，不报剩余次数）；
+     *    满 3 → 学会啦（upgraded 才播天数，闸门挡住不播——沿用 v5 R11 口径）；
+     *    忘了 → 「没关系，再学一遍」（不变）。
      *  展开/文案按 seq（本次出现）记录；作答同时按卡实例落库 answered（断点恢复用，design.md §9.1）。 */
         fun answer(p: Page.TermPage, known: Boolean) {
             val cardId = p.cardId ?: return
@@ -527,10 +535,14 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 val upgraded = result.upgraded
                 val daysAfter = result.daysAfter
                 // 播报（v8 连击分级 + v5 R11 升级口径：满 3 且升级才报天数）
+                // v21.1（QYJ 2026-09-22 三项拍板）：连击未满 → 随机夸奖池（不报次数）；
+                // 满 3 升级 → 保留「N 天后再来复习」（复习计划信息，只在升级那刻说一次）；忘了 → 不动
                 val target = StudyRepository.DAILY_COMBO_TARGET
                 val (msg, spoken) = when {
-                    count < target ->
-                        "👍 再认对 ${target - count} 次就学会" to "再认对${target - count}次就学会。"
+                    count < target -> {
+                        val praise = ANSWER_PRAISE.random()
+                        "👍 $praise" to "$praise。"
+                    }
                     upgraded && daysAfter == 1 ->
                         "👍 这个词学会啦！明天再来复习" to "这个词学会啦！明天再来复习。"
                     upgraded ->

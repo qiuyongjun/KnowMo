@@ -33,6 +33,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.knowmo.app.data.Term
+import com.knowmo.app.data.TermChar
 import com.knowmo.app.data.sceneColor
 import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.AppText
@@ -117,35 +118,25 @@ fun TermCard(
                     term.chars.size == 5 -> 42.sp
                     else -> 36.sp
                 }
+                val blockColor = sceneColor(term.scene)
                 // 字 + 拼音上下成对渲染（v21：原是两个独立 FlowRow，拼音与字块各自均布、
-                // 多字词对不齐——字的读音看起来"漂"在词下方。成对列后拼音恒对正自己的字）
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                // 多字词对不齐——字的读音看起来"漂"在词下方。成对列后拼音恒对正自己的字）。
+                // v21.1（QYJ 2026-09-22 反馈）：四字词按「每排两字」分两排——四字挤一排横向
+                // 过宽、视觉密度不均，两排更接近方块字的均衡观感；其余字数保持单条 FlowRow
+                // 自动排布不变。
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    term.chars.forEach { ch ->
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                ch.c,
-                                fontSize = charSize,
-                                fontWeight = FontWeight.Black,
-                                color = AppText,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(sceneColor(term.scene))
-                                    .clickable { onSpeakWord(ch.c) }
-                                    // 字块垂直 padding 上小下大：汉字字形重心偏上，
-                                    // 对称留白在白卡上看起来反而"下沉"，下侧多留 2dp 修正
-                                    .padding(start = 8.dp, end = 8.dp, top = 3.dp, bottom = 7.dp),
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                ch.p,
-                                fontSize = 22.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = BluePrimary,
-                            )
+                    val rows = if (term.chars.size == 4) term.chars.chunked(2) else listOf(term.chars)
+                    rows.forEach { rowChars ->
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            rowChars.forEach { ch ->
+                                CharPinyinCell(ch, charSize, blockColor, onSpeakWord)
+                            }
                         }
                     }
                 }
@@ -250,6 +241,42 @@ fun TermCard(
             // FREE 卡没有 resultText，不受上面分支影响，恒显示上滑引导。
             if (!isExam) SwipeHint()
         }
+    }
+}
+
+/**
+ * 单个「字块 + 拼音」成对单元格（v21.1 从 TermCard 抽出，供四字词分排渲染复用）：
+ * 字块底色用场景色、点击读单字（v7），拼音恒对正自己的字（v21 成对渲染契约）。
+ * 字块垂直 padding 上小下大：汉字字形重心偏上，对称留白在白卡上看起来反而"下沉"，
+ * 下侧多留 2dp 修正。
+ */
+@Composable
+private fun CharPinyinCell(
+    ch: TermChar,
+    charSize: TextUnit,
+    blockColor: Color,
+    onSpeakWord: (String) -> Unit,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            ch.c,
+            fontSize = charSize,
+            fontWeight = FontWeight.Black,
+            color = AppText,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .clip(RoundedCornerShape(14.dp))
+                .background(blockColor)
+                .clickable { onSpeakWord(ch.c) }
+                .padding(start = 8.dp, end = 8.dp, top = 3.dp, bottom = 7.dp),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            ch.p,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = BluePrimary,
+        )
     }
 }
 

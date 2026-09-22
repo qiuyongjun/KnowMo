@@ -327,8 +327,13 @@ class StudyRepository(
         var insertBeforeCardId: String? = null
 
         // 忘了，或认识连击未满：在同一事务里插入下一张重复卡。
+        // v21.1（QYJ 2026-09-22 反馈）：插入位置**随机化**——原固定「源卡下标 + 3」让队列开头
+        // 几个词的重复卡总是紧跟其后，形成「先在三个词循环」的体感；现在在下界（源卡后至少隔
+        // [MIN_GAP] 张）与队列末尾之间随机取点，重复卡被打散进当日剩余队列。UI 侧
+        // （AppRoot.insertRepeatCard）按 insertBeforeCardId 的 cardId 定位，不依赖固定偏移。
         if (!known || count < DAILY_COMBO_TARGET) {
-            val insertAt = min(index + 1 + MIN_GAP, q.queue.size)
+            val earliest = index + 1 + MIN_GAP
+            val insertAt = if (earliest < q.queue.size) (earliest..q.queue.size - 1).random() else q.queue.size
             val newRepeatCardId = newCardId()
             repeatCardId = newRepeatCardId
             insertBeforeCardId = q.cardIds.getOrNull(insertAt)
@@ -574,10 +579,14 @@ class StudyRepository(
         // 这样保留清债加速，又不让「每日学习词数量」在清债日失去意义。
         val debtQuota = if (quota == 0) 0
         else max(quota, min(quota + (DEBT_QUOTA - DAILY_POOL_QUOTA), DEBT_QUOTA))
+        // v21.1（QYJ 2026-09-22 反馈）：取出的复习词在入队前**洗牌**——挑选仍按 lapses 降序 /
+        // 到期日升序 take（忘得最多、欠得最久的词优先占复习槽位），但取出的这一批当天以随机顺序
+        // 呈现。原固定排序让每天开头都是同一批难词，与重复卡插入叠加形成「先在三个词循环」的体感。
+        // 新词交错编排（interleave 的「前 3 张内必有新词」保证）不受影响。
         val pool = if (due.size >= DEBT_THRESHOLD)
-            interleave(due.take(max(0, debtQuota - newsPool.size)), newsPool, debtQuota)
+            interleave(due.take(max(0, debtQuota - newsPool.size)).shuffled(), newsPool, debtQuota)
         else
-            interleave(due.take(max(0, quota - newsPool.size)), newsPool, quota)
+            interleave(due.take(max(0, quota - newsPool.size)).shuffled(), newsPool, quota)
 
         val queue = ArrayList<String>(pool.size)
         val modes = ArrayList<String>(pool.size)
@@ -918,8 +927,9 @@ class StudyRepository(
         const val DAILY_COMBO_TARGET = 3
 
         /** v8 最小间隔（prd v8 第 1 条打散约束）：同词两张卡之间至少隔 2 张其他卡——
-         *  「避免连续/紧邻出现」的最小满足（QYJ 授权口径，可调）。answerCard 插入点 = 源卡下标
-         *  + [MIN_GAP] + 1；队尾剩余不足时钳到队尾（尽力而为）。 */
+         *  「避免连续/紧邻出现」的最小满足（QYJ 授权口径，可调）。
+         *  v21.1：插入点不再固定为源卡下标 + [MIN_GAP] + 1，而是在该下界与队列末尾之间
+         *  **随机取点**（见 answerCard）——[MIN_GAP] 降级为打散约束的下界。 */
         const val MIN_GAP = 2
 
         /** 每日任务频道池配额（R11-2 后由 interleave 消费：格号 % 3 == 1 优先新词，直到配额）；

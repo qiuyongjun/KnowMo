@@ -54,8 +54,8 @@ import com.knowmo.app.ui.theme.cardShadow
  * @param words 当日任务区去重词数（N = 今天学完了 N 个词）。**持久口径**——取自当日队列
  *   （`repo.todayTaskWordCount()`），不由 pages 派生（到达完成卡时任务卡已被 enterBrowse 移除）
  * @param forgot 当日「忘了」作答**次数**（持久口径；忘了是可重复发生的事件，不是词的属性）
- * @param inBrowse 是否已处于浏览模式（true = 当日重启 / 已转浏览后的完成卡，引导文案改「随便看看吧」，
- *   不再重复「上滑进入推荐模式」）
+ * @param inBrowse 是否已处于浏览模式（true = 当日重启 / 已转浏览后的完成卡，**v21.1 起不再渲染
+ *   任何引导行**——底部 SwipeHint 已有「上滑看下一个」；false = 任务阶段的完成卡，渲染「上滑进入推荐模式」）
  */
 @Composable
 fun DoneCard(words: Int, forgot: Int, inBrowse: Boolean) {
@@ -114,14 +114,17 @@ fun DoneCard(words: Int, forgot: Int, inBrowse: Boolean) {
             )
             Spacer(Modifier.height(18.dp))
             // v9（prd 第 1 条）：上滑引导取代 v7 确认按钮——到达本卡即转浏览模式，
-            // 上滑进入推荐浏览；浏览模式中不再重复「进入推荐模式」
-            Text(
-                if (inBrowse) "随便看看吧" else "上滑进入推荐模式",
-                fontSize = 26.sp,
-                fontWeight = FontWeight.Black,
-                color = BluePrimary,
-                textAlign = TextAlign.Center,
-            )
+            // 上滑进入推荐浏览。v21.1（QYJ 反馈）：浏览模式**不再渲染「随便看看吧」**——
+            // 底部 SwipeHint（「上滑看下一个」）已承担引导职责，再显示一句是重复。
+            if (!inBrowse) {
+                Text(
+                    "上滑进入推荐模式",
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Black,
+                    color = BluePrimary,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
         SwipeHint()
     }
