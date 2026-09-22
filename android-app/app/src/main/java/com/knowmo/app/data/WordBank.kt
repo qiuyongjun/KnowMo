@@ -1,15 +1,15 @@
 package com.knowmo.app.data
 
 /**
- * 词库 v18：6 个有词的分区 414 词条（5 个场景分区 311 条 + 常用词 103 条）。
+ * 词库 v21：6 个有词的分区 452 词条（5 个场景分区 330 条 + 常用词 122 条）。
  * term() 紧凑构造：拼音按空格逐字配对，字数不符启动即抛错（fail-fast，便于挑错）。
  *
  * ## id 契约（⚠️ v17 修订，动手改词库前必读）
  * - `id` 一经发布**永不删除、永不复用**——学习状态（`TermState` / 当日 `counts` / `favorites` /
  *   当日队列）全部按 id 挂靠，改 id 等于丢掉这个词的全部进度与收藏。
  * - v17 起 **`id` 的前缀只表示「首次归属」，不再是当前归属**。跨分区搬迁**只改 `term()` 的
- *   `scene` 参数、不改 id**（2026-09-21 QYJ 拍板方案 B）。故库内存在 106 条「id 前缀 ≠ scene」
- *   的词条 —— **这是预期状态，不是错误**。按 id 前缀过滤或统计一律是 bug，必须按 `term.scene`。
+ *   `scene` 参数、不改 id**（2026-09-21 QYJ 拍板方案 B）。故库内存在 103 条「id 前缀 ≠ scene」
+ *   的词条（v18 时为 106，v21 删 3 条 weather 词后减 3）—— **这是预期状态，不是错误**。按 id 前缀过滤或统计一律是 bug，必须按 `term.scene`。
  * - 校验脚本第 7 项据此改为「前缀 ∈ 当前分区 ∪ 已退役分区」，并另报搬迁条数供审计。
  *
  * ## 分区沿革（历史口径；当前规则以本文档 v17 段与各分区子注释为准）
@@ -110,6 +110,24 @@ package com.knowmo.app.data
  *   馒头 / 快餐 / 炒饭 / 矿泉水 / 饮料 / 排队等位）。**QYJ 2026-09-21 决定原样保留** —— 面馆确实
  *   也卖早餐、也有冰柜饮料，这些词出现在面馆的招牌 / 菜单 / 冰柜上并不违和。
  *   ⇒ **这是有意为之，不是漏改**：后续别把它们当"混进面馆的外来词"清掉。
+ *
+ * ## v21 增删批（按原则圈定，2026-09-22 QYJ 拍板）
+ * 原则复核：覆盖生活中遇到的文字，让中老年人独立生活。
+ * - **删 8 条**（与原则不符，id 成空号、永不复用）：
+ *   - 面馆后厨/行业词 3：`food-61` 健康证、`food-62` 留样、`food-63` 打烊；
+ *   - 低频天气 3：`weather-19` 高温预警、`weather-22` 台风、`weather-23` 大雾；
+ *   - 抽象词 2：`food-91` 招牌、`food-95` 明厨亮灶。
+ * - **加 46 条**（P0 五域 + P1 手机，QYJ 圈定；居家安全与其余 P1/P2 未收）：
+ *   - 药品剂量 → hospital 8：毫克 / 克 / 毫升 / OTC / 非处方药 / 每日一次 / 每日两次 / 空腹；
+ *   - 支付防骗 → phone 6：二维码 / 输入密码 / 请勿透露密码 / 官方客服 / 转账 / 余额；
+ *   - 购物价格 → daily 12：原价 / 现价 / 打折 / 特价 / 买一送一 / 一斤 / 公斤 / 每斤 / 每个 / 会员价 / 现金 / 找零；
+ *   - 日期办事 → daily 5：营业时间 / 休息日 / 节假日 / 有效期至 / 截止日期；
+ *   - 物业缴费 → daily 5：停水通知 / 停电通知 / 物业费 / 水费 / 电费；
+ *   - P1 手机 → phone 10：新建联系人 / 静音模式 / 勿扰模式 / 亮度 / 飞行模式 / 清理垃圾 / 内存不足 / 应用商店 / 下载 / 更新。
+ * - 规模：414 → **452 条**；`daily` 103 → **122 条**（删 3 条 weather 词、加 22 条），超载倍数升至
+ *   **1.5~3.0**（口径 = 词库总量 ÷ 持有量 150~300，与 `StudyRepository.DAILY_POOL_QUOTA`
+ *   容量观测一致）——QYJ「先不动配额、待实机 f30 观测」结论不变。
+ *   ⚠️ 新 id 一律取各前缀当前最大空号之后（daily-56+ / hospital-33+ / phone-42+），不复用本批空号。
  */
 
 private val ICON = SCENES.associate { it.id to it.icon }
@@ -233,15 +251,39 @@ private val DAILY_COMMON = listOf(
     term("weather-14", "daily", "下雨", "xià yǔ", "出门记得带伞"),
     term("weather-15", "daily", "下雪", "xià xuě", "路滑，慢慢走"),
     term("weather-18", "daily", "降温", "jiàng wēn", "要变冷了，添衣服"),
-    term("weather-19", "daily", "高温预警", "gāo wēn yù jǐng", "太热了，少出门"),
     term("weather-20", "daily", "零下", "líng xià", "温度到了零度以下，水会结冰"),
     term("weather-21", "daily", "路滑", "lù huá", "路面结冰打滑，要小步慢走"),
-    term("weather-22", "daily", "台风", "tái fēng", "大风大雨，别出门"),
-    term("weather-23", "daily", "大雾", "dà wù", "看不清，开车慢点"),
     term("weather-29", "daily", "生日", "shēng rì", "出生纪念日"),
     term("weather-30", "daily", "农历", "nóng lì", "老日历上的日子，标着初一、十五"),
     term("weather-31", "daily", "日历", "rì lì", "墙上挂的，看日子"),
     term("weather-32", "daily", "提醒", "tí xǐng", "手机到点会响"),
+    // ---- v21（2026-09-22 按原则圈定）：P0 购物价格 / 日期办事 / 物业缴费 共 22 条 ----
+    // 判据同 v10：只收「招牌 / 价签 / 通知 / 票据上会以文字形式出现」的词。进 daily = 恒入推荐，默认即学。
+    // 购物价格（12）
+    term("daily-56", "daily", "原价", "yuán jià", "打折前的价钱，价签上划掉的那个数"),
+    term("daily-57", "daily", "现价", "xiàn jià", "现在卖的价钱，按这个数收"),
+    term("daily-58", "daily", "打折", "dǎ zhé", "比原价便宜，牌子上的数越小越便宜"),
+    term("daily-59", "daily", "特价", "tè jià", "今天便宜卖的，牌子贴在货架上"),
+    term("daily-60", "daily", "买一送一", "mǎi yī sòng yī", "买一件再给一件，包装上贴着"),
+    term("daily-61", "daily", "一斤", "yī jīn", "菜摊上称重用的单位，等于十两"),
+    term("daily-62", "daily", "公斤", "gōng jīn", "价签上的重量单位，等于两斤"),
+    term("daily-63", "daily", "每斤", "měi jīn", "价签上的字，后面的数是一斤的价钱"),
+    term("daily-64", "daily", "每个", "měi gè", "论个卖的东西，后面的数是一个的价钱"),
+    term("daily-65", "daily", "会员价", "huì yuán jià", "办卡的人才能享受的便宜价"),
+    term("daily-66", "daily", "现金", "xiàn jīn", "手里的钞票，有的收银台只收这个"),
+    term("daily-67", "daily", "找零", "zhǎo líng", "给多了，售货员退回来的零钱"),
+    // 日期办事（5）
+    term("daily-68", "daily", "营业时间", "yíng yè shí jiān", "店门口挂着，几点开门几点关门"),
+    term("daily-69", "daily", "休息日", "xiū xi rì", "这一天不开门、不办公"),
+    term("daily-70", "daily", "节假日", "jié jià rì", "过年过节的日子，办事要先看放不放假"),
+    term("daily-71", "daily", "有效期至", "yǒu xiào qī zhì", "卡上、证上印着，过了这天就不能用了"),
+    term("daily-72", "daily", "截止日期", "jié zhǐ rì qī", "最后一天，过了就办不成了"),
+    // 物业缴费（5）
+    term("daily-73", "daily", "停水通知", "tíng shuǐ tōng zhī", "楼道里贴的，哪天没水用"),
+    term("daily-74", "daily", "停电通知", "tíng diàn tōng zhī", "楼道里贴的，哪天没电用"),
+    term("daily-75", "daily", "物业费", "wù yè fèi", "交给小区管事的钱，单子贴在公告栏"),
+    term("daily-76", "daily", "水费", "shuǐ fèi", "用水的钱，单子塞在门缝里"),
+    term("daily-77", "daily", "电费", "diàn fèi", "用电的钱，电表箱上贴着单子"),
 )
 
 /* ==================== 公交地铁 ==================== */
@@ -357,6 +399,16 @@ private val HOSPITAL = listOf(
     term("medicine-27", "hospital", "漏服", "lòu fú", "忘了吃一顿，别补双份"),
     term("medicine-28", "hospital", "过量", "guò liàng", "吃多了，会出危险"),
     term("medicine-29", "hospital", "摇匀", "yáo yún", "药水喝前晃一晃"),
+    // ---- v21（2026-09-22 按原则圈定）：P0 药品剂量 8 条 ----
+    // 判据：药盒 / 说明书 / 标签上必标的字，老人自己吃药必须认得。
+    term("hospital-33", "hospital", "毫克", "háo kè", "药盒上标的量，数字后面的两个字"),
+    term("hospital-34", "hospital", "克", "kè", "药袋上标的量，比毫克大"),
+    term("hospital-35", "hospital", "毫升", "háo shēng", "药水瓶上标的量，喝多少看它"),
+    term("hospital-36", "hospital", "OTC", "O T C", "药盒角落的三个字母，不用开单就能买"),
+    term("hospital-37", "hospital", "非处方药", "fēi chǔ fāng yào", "药店自己就能买的药，不用开单"),
+    term("hospital-38", "hospital", "每日一次", "měi rì yī cì", "一天只吃一回，说明书上写着"),
+    term("hospital-39", "hospital", "每日两次", "měi rì liǎng cì", "早晚各吃一回"),
+    term("hospital-40", "hospital", "空腹", "kōng fù", "肚子里没东西，饭前吃"),
 )
 
 /* ==================== 面馆（v18 由「吃饭」改名；scene id 仍为 food） ==================== */
@@ -413,9 +465,6 @@ private val FOOD = listOf(
     term("food-57", "food", "出餐", "chū cān", "面煮好了，端出去给客人"),
     term("food-58", "food", "打包盒", "dǎ bāo hé", "带走装面、装抄手的白盒子"),
     term("food-60", "food", "消毒柜", "xiāo dú guì", "洗好的碗筷放里头消毒，烫手别碰"),
-    term("food-61", "food", "健康证", "jiàn kāng zhèng", "在馆子上班要办的证，一年查一回"),
-    term("food-62", "food", "留样", "liú yàng", "每样菜留一小盒放冰箱，备着检查"),
-    term("food-63", "food", "打烊", "dǎ yàng", "就是关店收工，牌子一挂就不接客"),
     term("food-65", "food", "生熟分开", "shēng shú fēn kāi", "切生肉的刀和板，不能碰熟食"),
     // ---- v11 面馆补充词（2026-09-20，判据=该词是否会以文字形式出现）：现余 30 条 ----
     // ⚠️ v17 已迁出 17 条到 daily：原「调料罐 / 包装」整段 12 条（盐糖醋味精鸡精花椒胡椒
@@ -437,11 +486,9 @@ private val FOOD = listOf(
     term("food-89", "food", "红汤", "hóng tāng", "放了辣椒油、红红的那种汤"),
     term("food-90", "food", "原汤", "yuán tāng", "煮面的本汤，不兑水"),
     // 墙面告示与证照
-    term("food-91", "food", "招牌", "zhāo pái", "店门口挂的大牌子，也指最出名那道菜"),
     term("food-92", "food", "价目表", "jià mù biǎo", "墙上或柜台上写的价钱单"),
     term("food-93", "food", "营业中", "yíng yè zhōng", "灯牌亮着这几个字，就是还在卖"),
     term("food-94", "food", "自助调料", "zì zhù tiáo liào", "调料台，自己舀，不要钱"),
-    term("food-95", "food", "明厨亮灶", "míng chú liàng zào", "厨房敞开、贴着这种牌子"),
     term("food-96", "food", "卫生许可证", "wèi shēng xǔ kě zhèng", "墙上挂的证，上头有店名"),
     // 后厨与桌前物件
     term("food-97", "food", "围裙", "wéi qún", "系在腰前的布，防油污"),
@@ -519,6 +566,26 @@ private val PHONE = listOf(
     term("emergency-3", "phone", "急救电话", "jí jiù diàn huà", "人不行了，打120"),
     term("emergency-4", "phone", "火警电话", "huǒ jǐng diàn huà", "着火了，打119"),
     term("emergency-17", "phone", "家人电话", "jiā rén diàn huà", "儿女电话，存手机里"),
+    // ---- v21（2026-09-22 按原则圈定）：P0 支付防骗 6 条 + P1 手机操作 10 条 ----
+    // 判据：手机屏幕 / 银行告示 / 弹窗上会以文字形式出现的词，老人独立用机必须认得。
+    // 支付防骗（6）
+    term("phone-42", "phone", "二维码", "èr wéi mǎ", "小方块的图，手机扫它付钱、加人"),
+    term("phone-43", "phone", "输入密码", "shū rù mì mǎ", "屏幕上让按那几个数字"),
+    term("phone-44", "phone", "请勿透露密码", "qǐng wù tòu lù mì mǎ", "银行贴着，密码谁问都别说"),
+    term("phone-45", "phone", "官方客服", "guān fāng kè fú", "手机弹窗里的真客服，别信外面来的电话"),
+    term("phone-46", "phone", "转账", "zhuǎn zhàng", "把钱打给别人，按之前看清楚"),
+    term("phone-47", "phone", "余额", "yú é", "卡里、微信里还剩多少钱"),
+    // P1 手机操作（10）
+    term("phone-48", "phone", "新建联系人", "xīn jiàn lián xì rén", "把别人的号码存进手机"),
+    term("phone-49", "phone", "静音模式", "jìng yīn mó shì", "开了它，电话来了不响"),
+    term("phone-50", "phone", "勿扰模式", "wù rǎo mó shì", "开了它，夜里不被吵醒"),
+    term("phone-51", "phone", "亮度", "liàng dù", "屏幕的亮暗，太阳底下调亮点"),
+    term("phone-52", "phone", "飞行模式", "fēi xíng mó shì", "开了它不能打电话，坐飞机才用"),
+    term("phone-53", "phone", "清理垃圾", "qīng lǐ lā jī", "手机提示时按它，手机能快点"),
+    term("phone-54", "phone", "内存不足", "nèi cún bù zú", "手机装满了，要删掉些东西"),
+    term("phone-55", "phone", "应用商店", "yìng yòng shāng diàn", "装新软件的地方"),
+    term("phone-56", "phone", "下载", "xià zài", "把东西装进手机里"),
+    term("phone-57", "phone", "更新", "gēng xīn", "软件出新版了，按一下装好"),
 )
 
 /* ==================== 家电 ==================== */
