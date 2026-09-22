@@ -60,7 +60,8 @@ import com.knowmo.app.ui.theme.cardShadow
  *   `padding(end = 56.dp)` 把整个词块推离屏幕中线，是「词不居中」的根因）；
  * - 词 = 唯一视觉主角，垂直 + 水平**真居中**；单字块底色用场景色（替代被删除的大图标块，
  *   保留每张卡的场景色彩身份）；
- * - 字号档 ≤3:64 / 4:52 / 5:42 / ≥6:36 sp，FlowRow 允许换行（多字词不挤压不溢出）；
+ * - 字号档 ≤3:64 / 4:52 / 5:42 / ≥6:36 sp；多字词**显式分排**（v21.2：4 字 2+2 /
+ *   5 字 2+3 / ≥6 字每排 3 字，逐排居中），≤3 字单排；FlowRow 仅作单排超宽兜底。
  * - 干扰项裁剪：删除 104dp 场景图标块、徽标/引导去 emoji、操作提示降为卡片底部小字。
  */
 @OptIn(ExperimentalLayoutApi::class)
@@ -121,14 +122,21 @@ fun TermCard(
                 val blockColor = sceneColor(term.scene)
                 // 字 + 拼音上下成对渲染（v21：原是两个独立 FlowRow，拼音与字块各自均布、
                 // 多字词对不齐——字的读音看起来"漂"在词下方。成对列后拼音恒对正自己的字）。
-                // v21.1（QYJ 2026-09-22 反馈）：四字词按「每排两字」分两排——四字挤一排横向
-                // 过宽、视觉密度不均，两排更接近方块字的均衡观感；其余字数保持单条 FlowRow
-                // 自动排布不变。
+                // v21.2（QYJ 2026-09-22 拍板）：多字词**显式分排**，不再让 FlowRow 按屏宽自动
+                // 换行——自动断点随设备宽度漂移（5 字词 42sp 在 360dp 屏必然溢出，排出 4+1），
+                // 溢出行在 FlowRow 内是 start 对齐，不满足「每排居中」。定档：
+                // 4 字 2+2（v21.1）/ 5 字 2+3 / 6 字以上每排 3 字（末排不足自动居中）/ ≤3 字单排。
+                // 每排仍是独立 FlowRow（超宽兜底），由外层 Column 的 CenterHorizontally 逐排居中。
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    val rows = if (term.chars.size == 4) term.chars.chunked(2) else listOf(term.chars)
+                    val rows = when {
+                        term.chars.size == 4 -> term.chars.chunked(2)
+                        term.chars.size == 5 -> listOf(term.chars.take(2), term.chars.drop(2))
+                        term.chars.size >= 6 -> term.chars.chunked(3)
+                        else -> listOf(term.chars)
+                    }
                     rows.forEach { rowChars ->
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
