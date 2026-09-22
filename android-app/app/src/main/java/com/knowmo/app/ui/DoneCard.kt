@@ -2,19 +2,20 @@ package com.knowmo.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -23,9 +24,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.AppText2
 import com.knowmo.app.ui.theme.BluePrimary
+import com.knowmo.app.ui.theme.CardShapeLarge
 import com.knowmo.app.ui.theme.OrangeDark
+import com.knowmo.app.ui.theme.cardShadow
 
 /**
  * 完成卡（v9 重定义，prd v9 第 1 条）：**不是「滑到底」，是「真做完」**——整个当日队列
@@ -64,15 +68,25 @@ fun DoneCard(words: Int, forgot: Int, inBrowse: Boolean) {
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .shadow(10.dp, RoundedCornerShape(28.dp))
-                .clip(RoundedCornerShape(28.dp))
+                .cardShadow(CardShapeLarge)
+                .clip(CardShapeLarge)
                 .background(Color.White)
                 .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            Text("🎉", fontSize = 84.sp)
-            Spacer(Modifier.height(14.dp))
+            // 🎉 垫暖色圆形底托（v21）：裸 emoji 直接坐在白卡上发"飘"，底托让它成为视觉锚点，
+            // 与 GuideCard 的星标底托同一手法；宽 110dp > 高 96dp——🎉 字形横向略宽，正圆会顶边
+            Box(
+                Modifier
+                    .size(width = 110.dp, height = 96.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(AppSurface),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("🎉", fontSize = 64.sp)
+            }
+            Spacer(Modifier.height(20.dp))
             Text(
                 "今日任务完成！",
                 fontSize = 32.sp,

@@ -6,6 +6,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -36,7 +38,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -44,17 +45,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.knowmo.app.data.Scene
 import com.knowmo.app.data.StudyRepository
+import com.knowmo.app.ui.theme.AppLine
 import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.AppText
 import com.knowmo.app.ui.theme.AppText2
 import com.knowmo.app.ui.theme.BlueBg
 import com.knowmo.app.ui.theme.BlueDark
 import com.knowmo.app.ui.theme.BluePrimary
+import com.knowmo.app.ui.theme.CardShapeLarge
 import com.knowmo.app.ui.theme.GreenBg
 import com.knowmo.app.ui.theme.GreenKnown
 import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
 import com.knowmo.app.ui.theme.StarGold
+import com.knowmo.app.ui.theme.cardShadow
 
 /* ---------- 频道 Tab（参考抖音顶部 tab） ---------- */
 
@@ -106,8 +110,8 @@ fun ChannelBar(
         Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         // 推荐（固定第一；连点 5 次打开设置）——不用图标，实心蓝底即可表达「当前所在」
         ChannelChip(
@@ -168,6 +172,8 @@ fun ChannelBar(
  * 频道 chip（v6 抽出：推荐 / 收藏 / 场景分区三种共用同一渲染）。
  * 选中态用**实心蓝底白字**（对比浅底深字的旧样式，老年用户更容易识别「当前在哪个频道」）；
  * 未选中 = 白色胶囊浮在暖米色页面底上。
+ * v21：未选中胶囊加 1dp 细描边——纯白胶囊贴在暖米底上边缘发"虚"（投影会加重顶部粘连感，
+ * 故用描边收边）；选中态底部加一小条白色指示，与未选中拉开"当前位置"的辨识度。
  */
 @Composable
 private fun ChannelChip(
@@ -177,32 +183,47 @@ private fun ChannelChip(
     onClick: () -> Unit,
     star: Boolean = false,
 ) {
-    Row(
+    Column(
         Modifier
             .clip(RoundedCornerShape(50))
             .background(if (active) BluePrimary else Color.White)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (star) {
-            Icon(
-                Icons.Filled.Star,
-                contentDescription = null,
-                tint = StarGold,
-                modifier = Modifier.size(24.dp),
+            .then(
+                if (active) Modifier
+                else Modifier.border(1.dp, AppLine, RoundedCornerShape(50)),
             )
-            Spacer(Modifier.width(6.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (star) {
+                Icon(
+                    Icons.Filled.Star,
+                    contentDescription = null,
+                    tint = StarGold,
+                    modifier = Modifier.size(24.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+            }
+            Text(
+                label,
+                fontSize = 20.sp,
+                fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
+                color = when {
+                    active -> Color.White
+                    isGraduated -> GreenKnown
+                    else -> AppText2
+                },
+            )
         }
-        Text(
-            label,
-            fontSize = 20.sp,
-            fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
-            color = when {
-                active -> Color.White
-                isGraduated -> GreenKnown
-                else -> AppText2
-            },
+        // 选中态底部指示条：一条短白线，告诉眼睛"停在这里"；未选中保持 0 高度占位防跳动
+        Spacer(Modifier.height(4.dp))
+        Box(
+            Modifier
+                .width(if (active) 22.dp else 0.dp)
+                .height(3.dp)
+                .clip(CircleShape)
+                .background(if (active) Color.White else Color.Transparent),
         )
     }
 }
@@ -365,8 +386,8 @@ fun GuideCard() {
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .shadow(10.dp, RoundedCornerShape(28.dp))
-                .clip(RoundedCornerShape(28.dp))
+                .cardShadow(CardShapeLarge)
+                .clip(CardShapeLarge)
                 .background(Color.White)
                 .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,

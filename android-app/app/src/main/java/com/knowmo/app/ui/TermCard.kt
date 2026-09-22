@@ -38,11 +38,13 @@ import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.AppText
 import com.knowmo.app.ui.theme.AppText2
 import com.knowmo.app.ui.theme.BluePrimary
+import com.knowmo.app.ui.theme.CardShapeLarge
 import com.knowmo.app.ui.theme.GreenBg
 import com.knowmo.app.ui.theme.GreenKnown
 import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
 import com.knowmo.app.ui.theme.RedForgot
+import com.knowmo.app.ui.theme.cardShadow
 
 /**
  * 学习卡（v8 连击 + 全显拼音，design.md §13.2）：形态由调度器运行时计算——
@@ -86,8 +88,8 @@ fun TermCard(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .shadow(10.dp, RoundedCornerShape(28.dp))
-                .clip(RoundedCornerShape(28.dp))
+                .cardShadow(CardShapeLarge)
+                .clip(CardShapeLarge)
                 .background(Color.White)
                 .clickable { onSpeakTerm() }
                 .padding(horizontal = 20.dp, vertical = 16.dp),
@@ -115,31 +117,39 @@ fun TermCard(
                     term.chars.size == 5 -> 42.sp
                     else -> 36.sp
                 }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 字 + 拼音上下成对渲染（v21：原是两个独立 FlowRow，拼音与字块各自均布、
+                // 多字词对不齐——字的读音看起来"漂"在词下方。成对列后拼音恒对正自己的字）
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
                     term.chars.forEach { ch ->
-                        Text(
-                            ch.c,
-                            fontSize = charSize,
-                            fontWeight = FontWeight.Black,
-                            color = AppText,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(sceneColor(term.scene))
-                                .clickable { onSpeakWord(ch.c) }
-                                .padding(horizontal = 6.dp, vertical = 5.dp),
-                        )
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                ch.c,
+                                fontSize = charSize,
+                                fontWeight = FontWeight.Black,
+                                color = AppText,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(sceneColor(term.scene))
+                                    .clickable { onSpeakWord(ch.c) }
+                                    // 字块垂直 padding 上小下大：汉字字形重心偏上，
+                                    // 对称留白在白卡上看起来反而"下沉"，下侧多留 2dp 修正
+                                    .padding(start = 8.dp, end = 8.dp, top = 3.dp, bottom = 7.dp),
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                ch.p,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = BluePrimary,
+                            )
+                        }
                     }
                 }
-                Spacer(Modifier.height(14.dp))
-
-                // 逐字拼音（v8：恒显示——防泄题契约废除，自评模式下无密可泄）
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    term.chars.forEach { ch ->
-                        Text(ch.p, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = BluePrimary)
-                    }
-                }
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(22.dp))
 
                 // 用途提示：暖色块承载，居中短句
                 Text(

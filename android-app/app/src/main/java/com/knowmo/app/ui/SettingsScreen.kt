@@ -32,17 +32,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -55,10 +52,12 @@ import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.AppText
 import com.knowmo.app.ui.theme.AppText2
 import com.knowmo.app.ui.theme.BluePrimary
+import com.knowmo.app.ui.theme.CardShapeMedium
 import com.knowmo.app.ui.theme.GreenBg
 import com.knowmo.app.ui.theme.GreenKnown
 import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
+import com.knowmo.app.ui.theme.cardShadow
 import kotlin.math.roundToInt
 
 /** 分区行高：**必须固定** —— 拖动让位是按「行高 × 跨过几行」算位移的，行高不固定算法即失效 */
@@ -146,28 +145,18 @@ fun SettingsScreen(
             /* ---------- ⓪ 学习统计（只读：总览 + 今日战果 + f30） ---------- */
             SettingsCard {
                 Text("学习统计", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
+                Spacer(Modifier.height(14.dp))
+                // v21 指标格重排：原是一大段行内数字墙（一行里蓝绿蓝三色数字连排，扫读时
+                // 不知道哪个数字配哪个词），改为三格"数字在上、标签在下"的指标块，
+                // 竖分隔线分隔——先扫大数字、再看它叫什么，信息层级清楚
+                Row(Modifier.fillMaxWidth()) {
+                    StatCell("已学", "${stats.learned}", "/ ${stats.totalWords}", BluePrimary, Modifier.weight(1f))
+                    StatDivider()
+                    StatCell("学完", "${stats.graduated}", "词", GreenKnown, Modifier.weight(1f))
+                    StatDivider()
+                    StatCell("收藏", "${stats.favorites}", "个", BluePrimary, Modifier.weight(1f))
+                }
                 Spacer(Modifier.height(12.dp))
-                // 总览：数字放大着色（先扫数字再读文字，与完成卡战果同语言）
-                Text(
-                    buildAnnotatedString {
-                        append("已学 ")
-                        withStyle(SpanStyle(color = BluePrimary, fontSize = 26.sp, fontWeight = FontWeight.Black)) {
-                            append("${stats.learned}")
-                        }
-                        append(" / ${stats.totalWords} 词 · 学完 ")
-                        withStyle(SpanStyle(color = GreenKnown, fontSize = 26.sp, fontWeight = FontWeight.Black)) {
-                            append("${stats.graduated}")
-                        }
-                        append(" 词 · 收藏 ")
-                        withStyle(SpanStyle(color = BluePrimary, fontSize = 26.sp, fontWeight = FontWeight.Black)) {
-                            append("${stats.favorites}")
-                        }
-                        append(" 个")
-                    },
-                    fontSize = 20.sp,
-                    color = AppText,
-                )
-                Spacer(Modifier.height(6.dp))
                 // 分母口径说明（v16）：不是全词库条数，而是「当前开启的分区 + 常用词」——
                 // 不写清楚的话，用户隐藏一个分区、看见分母变小时会以为数据丢了。
                 Text(
@@ -176,27 +165,18 @@ fun SettingsScreen(
                     fontSize = 17.sp,
                     color = AppText2,
                 )
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    buildAnnotatedString {
-                        append("今日认识 ")
-                        withStyle(SpanStyle(color = BluePrimary, fontSize = 24.sp, fontWeight = FontWeight.Black)) {
-                            append("${stats.todayKnownWords}")
-                        }
-                        append(" 个词 · 忘了 ")
-                        withStyle(SpanStyle(color = OrangeDark, fontSize = 24.sp, fontWeight = FontWeight.Black)) {
-                            append("${stats.todayForgot}")
-                        }
-                        append(" 次 · 连续学习 ")
-                        withStyle(SpanStyle(color = GreenKnown, fontSize = 24.sp, fontWeight = FontWeight.Black)) {
-                            append("${stats.streak}")
-                        }
-                        append(" 天")
-                    },
-                    fontSize = 20.sp,
-                    color = AppText,
-                )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = AppLine, thickness = 1.dp)
+                Spacer(Modifier.height(14.dp))
+                // 今日战果：同样三格指标，与总览同语言
+                Row(Modifier.fillMaxWidth()) {
+                    StatCell("今日认识", "${stats.todayKnownWords}", "个词", BluePrimary, Modifier.weight(1f))
+                    StatDivider()
+                    StatCell("忘了", "${stats.todayForgot}", "次", OrangeDark, Modifier.weight(1f))
+                    StatDivider()
+                    StatCell("连续学习", "${stats.streak}", "天", GreenKnown, Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(14.dp))
                 Text(
                     // f30 观测（调参用，QYJ 看的小字）：忘了率取整百分比，总作答为 0 时省略
                     "30天词观测：作答 ${stats.f30Total} · 忘了 ${stats.f30Fail}" +
@@ -297,17 +277,52 @@ fun SettingsScreen(
     }
 }
 
-/** 设置页分组卡：白卡 + 轻投影浮在暖米色页底上（与 feed 词条卡同语言，投影更轻一档） */
+/** 设置页分组卡：白卡 + 轻投影浮在暖米色页底上（与 feed 词条卡同语言，用次级圆角） */
 @Composable
 private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
-            .shadow(6.dp, RoundedCornerShape(24.dp))
-            .clip(RoundedCornerShape(24.dp))
+            .cardShadow(CardShapeMedium, elevated = true)
+            .clip(CardShapeMedium)
             .background(Color.White)
             .padding(horizontal = 20.dp, vertical = 18.dp),
         content = content,
+    )
+}
+
+/** 统计指标格（v21）：数字在上、标签在下，一行三格。数字 30sp 大字号先被扫到，
+ *  标签用次级文字色退后；单位用小一号字贴在数字基线旁，不与标签抢层级。 */
+@Composable
+private fun StatCell(
+    label: String,
+    value: String,
+    unit: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(value, fontSize = 30.sp, fontWeight = FontWeight.Black, color = color)
+            if (unit.isNotEmpty()) {
+                Spacer(Modifier.width(3.dp))
+                Text(unit, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = AppText2)
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(label, fontSize = 16.sp, color = AppText2)
+    }
+}
+
+/** 指标格之间的竖分隔线：高度只到数字行（约 40dp），顶天立地会切碎卡片 */
+@Composable
+private fun StatDivider(height: Dp = 40.dp) {
+    Box(
+        Modifier
+            .padding(top = 4.dp)
+            .width(1.dp)
+            .height(height)
+            .background(AppLine),
     )
 }
 
