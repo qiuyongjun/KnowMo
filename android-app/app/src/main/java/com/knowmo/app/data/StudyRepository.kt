@@ -333,7 +333,10 @@ class StudyRepository(
         // （AppRoot.insertRepeatCard）按 insertBeforeCardId 的 cardId 定位，不依赖固定偏移。
         if (!known || count < DAILY_COMBO_TARGET) {
             val earliest = index + 1 + MIN_GAP
-            val insertAt = if (earliest < q.queue.size) (earliest..q.queue.size - 1).random() else q.queue.size
+            // CI 修复（d1299c3 失败教训）：IntRange.random() 扩展在 kotlin.random 包——该包**不在**
+            // Kotlin 默认导入清单，须显式 import；此处改用本文件已 import 的 Random.nextInt(from, until)
+            //（左闭右开，取 [earliest, size-1]；earliest < size 由上方分支保证，满足 from < until 前置条件）。
+            val insertAt = if (earliest < q.queue.size) Random.nextInt(earliest, q.queue.size) else q.queue.size
             val newRepeatCardId = newCardId()
             repeatCardId = newRepeatCardId
             insertBeforeCardId = q.cardIds.getOrNull(insertAt)
