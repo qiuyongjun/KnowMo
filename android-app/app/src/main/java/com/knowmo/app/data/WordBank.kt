@@ -1,7 +1,7 @@
 package com.knowmo.app.data
 
 /**
- * 词库 v21：6 个有词的分区 452 词条（5 个场景分区 330 条 + 常用词 122 条）。
+ * 词库 v22：5 个有词的分区 364 词条（4 个场景分区 242 条 + 常用词 122 条）。
  * term() 紧凑构造：拼音按空格逐字配对，字数不符启动即抛错（fail-fast，便于挑错）。
  *
  * ## id 契约（⚠️ v17 修订，动手改词库前必读）
@@ -128,6 +128,18 @@ package com.knowmo.app.data
  *   **1.5~3.0**（口径 = 词库总量 ÷ 持有量 150~300，与 `StudyRepository.DAILY_POOL_QUOTA`
  *   容量观测一致）——QYJ「先不动配额、待实机 f30 观测」结论不变。
  *   ⚠️ 新 id 一律取各前缀当前最大空号之后（daily-56+ / hospital-33+ / phone-42+），不复用本批空号。
+ *
+ * ## v22 面馆分区退役（开源口径收缩，2026-09-22 QYJ 拍板）
+ * - **整区删除 `food` 88 条**——面馆是 QYJ 妈妈的私有定制，不进开源仓库。删除前已由
+ *   `restructure_v22.py` 导出标准自定义词库 JSON（`.workbuddy/private/wordbank_food_v22.json`，
+ *   git 忽略不提交）：配合同批落地的**自定义词库导入机制**（设置页 SAF 导入，见 `CustomBank.kt`），
+ *   私有设备导入该文件即原样恢复。
+ * - 导出文件的库 id 刻意**沿用退役 id `food`**（迁移通道）：老设备上 `food-*` 的学习状态与
+ *   显隐选择原样保留，导入后进度、收藏、频道开关全部自动恢复，无需任何迁移代码。
+ * - `SCENES` 同批删项（StudyData.kt）；校验脚本 RETIRED 表加 `food`；
+ *   词库 452 → **364** 条（4 个场景分区 242 + 常用词 122），超载 1.2~2.4。
+ * - ⚠️ 本仓库不再新增 `food-*` 词条（id 成空号、永不复用）；退役 id 允许被**自定义词库**复用，
+ *   校验脚本只扫本文件，不受自定义库影响。
  */
 
 private val ICON = SCENES.associate { it.id to it.icon }
@@ -411,112 +423,6 @@ private val HOSPITAL = listOf(
     term("hospital-40", "hospital", "空腹", "kōng fù", "肚子里没东西，饭前吃"),
 )
 
-/* ==================== 面馆（v18 由「吃饭」改名；scene id 仍为 food） ==================== */
-
-private val FOOD = listOf(
-    term("food-1", "food", "牛肉面", "niú ròu miàn", "最常见的一碗面"),
-    term("food-2", "food", "微辣", "wēi là", "只有一点点辣"),
-    term("food-4", "food", "买单", "mǎi dān", "吃完饭结账，就说这两个字"),
-    term("food-5", "food", "小票", "xiǎo piào", "结账后的小纸条，留着对账"),
-    term("food-6", "food", "菜单", "cài dān", "写着所有菜和价格的本子"),
-    term("food-8", "food", "服务员", "fú wù yuán", "餐馆里端菜倒水的人"),
-    term("food-10", "food", "米饭", "mǐ fàn", "一碗一碗的白饭"),
-    term("food-11", "food", "饺子", "jiǎo zi", "皮包馅，过年常吃"),
-    term("food-12", "food", "包子", "bāo zi", "早上蒸的一笼一笼"),
-    term("food-13", "food", "馒头", "mán tou", "白白软软的蒸面"),
-    term("food-14", "food", "稀饭", "xī fàn", "米熬的稀粥"),
-    term("food-15", "food", "例汤", "lì tāng", "一碗一碗盛好的汤"),
-    term("food-16", "food", "不辣", "bù là", "一点辣椒都不要"),
-    term("food-18", "food", "清淡", "qīng dàn", "不油不咸的口味"),
-    term("food-19", "food", "荤菜", "hūn cài", "有肉的菜"),
-    term("food-20", "food", "素菜", "sù cài", "全是蔬菜的菜"),
-    term("food-21", "food", "打包", "dǎ bāo", "吃不完，装起来带走"),
-    term("food-22", "food", "堂食", "táng shí", "在店里坐着吃"),
-    term("food-23", "food", "结账", "jié zhàng", "吃完去算总账"),
-    term("food-24", "food", "发票", "fā piào", "报销要用的正式票据"),
-    term("food-26", "food", "大碗", "dà wǎn", "分量大的那种碗，饭量大的点这个"),
-    term("food-27", "food", "免费茶水", "miǎn fèi chá shuǐ", "不要钱的茶，自己倒"),
-    term("food-28", "food", "加饭", "jiā fàn", "饭不够，再添一碗"),
-    term("food-29", "food", "排队等位", "pái duì děng wèi", "人多，先拿号坐着等"),
-    term("food-30", "food", "干净", "gān jìng", "桌子碗筷没油污"),
-    // ---- 以下 33 条原为独立「面馆」分区（2026-09-20 同日并入本分区）----
-    term("food-33", "food", "炸酱面", "zhá jiàng miàn", "肉末炒酱拌的面，有的店写成杂酱面"),
-    term("food-34", "food", "米线", "mǐ xiàn", "大米做的细条，泡在汤里吃，不是面条"),
-    term("food-35", "food", "抄手", "chāo shǒu", "成都人的叫法，皮包肉馅，就是馄饨"),
-    term("food-36", "food", "鸡杂面", "jī zá miàn", "浇炒鸡杂的面，成都面馆常见的浇头"),
-    term("food-37", "food", "排骨面", "pái gǔ miàn", "面上盖一块炖得软和的排骨"),
-    term("food-38", "food", "肥肠面", "féi cháng miàn", "浇红烧肥肠的面，成都人好这一口"),
-    term("food-39", "food", "担担面", "dàn dàn miàn", "干拌的麻辣面，不放汤，成都名小吃"),
-    term("food-40", "food", "甜水面", "tián shuǐ miàn", "粗粗的筷子面，甜中带辣，成都特色"),
-    term("food-41", "food", "酸辣粉", "suān là fěn", "红薯粉做的，又酸又辣，不算面条"),
-    term("food-42", "food", "红油抄手", "hóng yóu chāo shǒu", "泡在红辣椒油里的抄手，很辣"),
-    term("food-43", "food", "清汤抄手", "qīng tāng chāo shǒu", "不放辣椒的抄手，汤是清的"),
-    term("food-44", "food", "卤蛋", "lǔ dàn", "酱油卤过的鸡蛋，点面时常添一个"),
-    term("food-45", "food", "一两", "yī liǎng", "分量最小的一份，吃得少的点这个"),
-    term("food-46", "food", "二两", "èr liǎng", "最常见的分量，一碗刚刚好"),
-    term("food-47", "food", "三两", "sān liǎng", "分量最大的一份，干重活的点这个"),
-    term("food-48", "food", "中辣", "zhōng là", "辣得适中，成都人的家常口味"),
-    term("food-49", "food", "特辣", "tè là", "辣椒放得足，能吃辣的才点"),
-    term("food-51", "food", "免青", "miǎn qīng", "面里不放青菜，青就是青菜"),
-    term("food-52", "food", "加青", "jiā qīng", "青菜多抓一把，碗里绿油油的"),
-    term("food-53", "food", "干拌", "gān bàn", "不要汤，调料直接拌在面里"),
-    term("food-54", "food", "宽汤", "kuān tāng", "汤多舀一点，连汤带面一起喝"),
-    term("food-56", "food", "点单", "diǎn dān", "客人说要吃啥，记在单子上"),
-    term("food-57", "food", "出餐", "chū cān", "面煮好了，端出去给客人"),
-    term("food-58", "food", "打包盒", "dǎ bāo hé", "带走装面、装抄手的白盒子"),
-    term("food-60", "food", "消毒柜", "xiāo dú guì", "洗好的碗筷放里头消毒，烫手别碰"),
-    term("food-65", "food", "生熟分开", "shēng shú fēn kāi", "切生肉的刀和板，不能碰熟食"),
-    // ---- v11 面馆补充词（2026-09-20，判据=该词是否会以文字形式出现）：现余 30 条 ----
-    // ⚠️ v17 已迁出 17 条到 daily：原「调料罐 / 包装」整段 12 条（盐糖醋味精鸡精花椒胡椒
-    //    酱油香油料酒淀粉豆瓣酱）+ 后厨物件 5 条（抹布 / 保鲜膜 / 牙签 / 纸巾 / 筷子）——
-    //    判据同源（出现在瓶身 / 包装 / 标签上，且是家里厨房就会遇到的词，不是面馆专有）。
-    // 菜单/加料栏
-    term("food-78", "food", "香菜", "xiāng cài", "又叫芫荽，一小撮绿叶子"),
-    term("food-79", "food", "葱花", "cōng huā", "切碎的葱，撒在面上"),
-    term("food-80", "food", "泡菜", "pào cài", "免费的小碟腌萝卜，自己拿"),
-    term("food-81", "food", "酸菜", "suān cài", "腌过的青菜，酸酸的"),
-    term("food-82", "food", "煎蛋", "jiān dàn", "油锅里煎的鸡蛋，跟卤蛋不一样"),
-    term("food-83", "food", "冰粉", "bīng fěn", "成都的甜凉粉，夏天吃"),
-    term("food-84", "food", "凉糕", "liáng gāo", "凉凉的米糕，淋红糖水"),
-    // 价目表规格
-    term("food-85", "food", "小碗", "xiǎo wǎn", "分量小的那种碗，饭量小的点这个"),
-    term("food-86", "food", "半份", "bàn fèn", "只要一半的量"),
-    term("food-87", "food", "加面", "jiā miàn", "要加钱的一项，价目表上单列"),
-    term("food-88", "food", "清汤", "qīng tāng", "不放辣椒的汤，汤是清的"),
-    term("food-89", "food", "红汤", "hóng tāng", "放了辣椒油、红红的那种汤"),
-    term("food-90", "food", "原汤", "yuán tāng", "煮面的本汤，不兑水"),
-    // 墙面告示与证照
-    term("food-92", "food", "价目表", "jià mù biǎo", "墙上或柜台上写的价钱单"),
-    term("food-93", "food", "营业中", "yíng yè zhōng", "灯牌亮着这几个字，就是还在卖"),
-    term("food-94", "food", "自助调料", "zì zhù tiáo liào", "调料台，自己舀，不要钱"),
-    term("food-96", "food", "卫生许可证", "wèi shēng xǔ kě zhèng", "墙上挂的证，上头有店名"),
-    // 后厨与桌前物件
-    term("food-97", "food", "围裙", "wéi qún", "系在腰前的布，防油污"),
-    term("food-101", "food", "一次性筷子", "yī cì xìng kuài zi", "用一回就扔的筷子，打包时给"),
-    term("food-105", "food", "早餐", "zǎo cān", "早上吃的那一顿，招牌上写着"),
-    term("food-106", "food", "火锅", "huǒ guō", "围着热锅涮着吃的，店门口大字写着"),
-    term("food-107", "food", "油条", "yóu tiáo", "早上炸的长条面食，早餐摊招牌上写"),
-    term("food-108", "food", "豆浆", "dòu jiāng", "黄豆磨的白色饮品，早餐摊上常见"),
-    term("food-109", "food", "炒饭", "chǎo fàn", "锅里炒的饭，菜单上常见"),
-    term("food-110", "food", "矿泉水", "kuàng quán shuǐ", "瓶装的水，小店冰柜里卖"),
-    term("food-111", "food", "馄饨", "hún tun", "北方叫法，就是抄手，皮包馅带汤吃"),
-    term("food-112", "food", "米粉", "mǐ fěn", "大米做的粉条，泡汤里吃，跟米线一路"),
-    term("food-113", "food", "饮料", "yǐn liào", "瓶装的甜水，冰柜上写着这两个字"),
-    // ---- v15 round5 收推荐档：现余 9 条（v17 删「外卖」1 条 —— 与 express-29 重复）----
-    // 菜单/招牌分栏
-    term("food-114", "food", "凉菜", "liáng cài", "菜单上分栏，不热的那几样"),
-    term("food-115", "food", "热菜", "rè cài", "菜单上分栏，现炒现做的"),
-    term("food-116", "food", "主食", "zhǔ shí", "菜单上分栏，饭和面都归这里"),
-    term("food-117", "food", "小吃", "xiǎo chī", "店招牌上常见，粉面抄手这类"),
-    term("food-118", "food", "快餐", "kuài cān", "招牌上写着，坐下就吃不用等"),
-    term("food-119", "food", "家常菜", "jiā cháng cài", "招牌上写着，平常家里吃的那几样"),
-    // 菜名前两字
-    term("food-121", "food", "红烧", "hóng shāo", "菜名前两个字，酱油烧的，比如红烧肉"),
-    term("food-122", "food", "清蒸", "qīng zhēng", "菜名前两个字，蒸出来的，不辣"),
-    // 点餐与取餐
-    term("food-124", "food", "扫码点餐", "sǎo mǎ diǎn cān", "桌上贴的，用手机扫一下自己点"),
-)
-
 /* ==================== 手机微信 ==================== */
 
 private val PHONE = listOf(
@@ -683,10 +589,18 @@ private val APPLIANCE = listOf(
 )
 
 /**
- * 全库词条（**按 `SCENES` 的固有顺序拼装**）。
+ * 内置词库（不含自定义词库——自定义词库由 [STUDY_TERMS] getter 动态并入，见 `CustomBank.kt`）。
+ * **按 `SCENES` 的内置固有顺序拼装**。
  * ⚠️ v17 起：各列表的成员**不再等同于其 `scene`**（搬迁不改 id、只改 `scene`，见文件头 id 契约）——
  *   这里的拼接顺序只影响「无意义时的遍历序」（新词池会洗牌、池型频道会加权重排），
  *   **归属一律以每条自己的 `scene` 为准**。
+ * v22：改为公开——`CustomBanks.parse` 的「与内置词不重复」校验要读内置词文本集。
  */
-val STUDY_TERMS: List<Term> =
-    DAILY_COMMON + TRANSIT + HOSPITAL + FOOD + PHONE + APPLIANCE
+val BUILTIN_TERMS: List<Term> =
+    DAILY_COMMON + TRANSIT + HOSPITAL + PHONE + APPLIANCE
+
+/**
+ * 全库词条 = 内置词库 + **自定义词库**（v22 动态并入；每帧重算，n ≤ 364 + 自定义部分，开销可忽略）。
+ * 消费方（StudyRepository / AppRoot.termById）无需感知「内置 / 自定义」区别。
+ */
+val STUDY_TERMS: List<Term> get() = BUILTIN_TERMS + CustomBanks.terms

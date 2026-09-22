@@ -1,5 +1,7 @@
 package com.knowmo.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -36,6 +38,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -45,6 +48,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.knowmo.app.data.AppSettings
+import com.knowmo.app.data.CustomBank
+import com.knowmo.app.data.CustomBanks
 import com.knowmo.app.data.Scene
 import com.knowmo.app.data.SceneProgress
 import com.knowmo.app.data.StudyStats
@@ -74,12 +79,14 @@ private val DONE_BAR_SPACE = 104.dp
  * 适老化硬约束：字号 ≥ 20sp（说明性小字 17sp）、可点目标 ≥ 64dp 高；配色沿用主题常量。
  * 视觉语言与 feed 同源：暖米色页底 + 白卡分组（每组一张卡）+ 选中态实心蓝，箭头用矢量图标。
  *
- * 三张卡：
+ * 四张卡：
  * ⓪**学习统计**（v14，只读）：总览（已学/学完/收藏）+ 今日战果 + 连续学习天数 + f30 观测小字。
  *   受众拍板 = 家属/年轻人（QYJ：设置本来就不给老人用），信息密度不受「少而大」约束；
  *   纯展示零写入（进出设置页不改学习状态，池型零写入契约不破坏）。
- * ①每日学习词数量（3/5/10/15/20，缺省 10）②每天学几个新词（1/3/5/10，缺省 5）—— 两组同为配额语义、
+ * ①②每日学习词数量（3/5/10/15/20，缺省 10）+ 每天学几个新词（1/3/5/10，缺省 5）—— 两组同为配额语义、
  *   合一张卡；**当日队列冻结不变、次日生效**（只写 `AppSettings`，不触碰当日队列）。
+ * ②.5 **我的词库**（v22）：SAF 导入 JSON 词库文件 → 一个普通自定义分区（默认隐藏）；
+ *   已装库列表 + 两段确认删除；fail-closed 校验（见 `CustomBank.kt`），不合格整库拒绝并逐条报错。
  * ③④**分区显示与顺序**（v16 合并为一张卡）：每行 = 分区名 + 进度 + 显隐开关，
  *   分「已显示 / 未显示」两段。v17（QYJ 2026-09-21）：
  *   **↑↓ 按钮删除**（点按箭头是拖动之外的第三种重排方式，实测多余——只留拖动）；
@@ -111,15 +118,46 @@ fun SettingsScreen(
     quota: Int,
     quotaNew: Int,
     stats: StudyStats,   // v14 只读快照（AppRoot 在「打开设置页」与「显隐变化」时各重取一次）
+    customBanks: List<CustomBank>,   // v22「我的词库」镜像（AppRoot 在导入/删除回调里重读）
     onSetVisible: (String, Boolean) -> Unit,
     onMoveTo: (String, Int) -> Unit,      // v16 拖动落位：目标分区在 order 里的下标
     onSetQuota: (Int) -> Unit,
     onSetQuotaNew: (Int) -> Unit,
+    onBanksChanged: () -> Unit,           // v22 导入/删除后统一刷新（AppRoot 侧 rescanScenes + 镜像同步）
     onDone: () -> Unit,
 ) {
     val visibleScenes = orderedScenes.filter { it.id !in hiddenIds }
     val hiddenScenes = orderedScenes.filter { it.id in hiddenIds }
     val progressById = stats.scenes.associateBy { it.scene.id }
+
+    // v22「我的词库」会话态：导入结果文案（importOk 区分成功/失败配色）+ 删除的两段确认
+    val context = LocalContext.current
+    var confirmDeleteId by remember { mutableStateOf<String?>(null) }
+    var importMessage by remember { mutableStateOf<String?>(null) }
+    var importOk by remember { mutableStateOf(false) }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val text = runCatching {
+                context.contentResolver.openInputStream(uri)
+                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+            }.getOrNull()
+            if (text == null) {
+                importOk = false
+                importMessage = "读不到文件内容，请重试。"
+            } else {
+                runCatching { CustomBanks.import(context, text) }
+                    .onSuccess { bank ->
+                        importOk = true
+                        importMessage = "已导入「${bank.name}」（${bank.terms.size} 条）。默认隐藏，可在下方分区列表打开显示。"
+                        onBanksChanged()
+                    }
+                    .onFailure { e ->
+                        importOk = false
+                        importMessage = e.message ?: "导入失败，请重试。"
+                    }
+            }
+        }
+    }
 
     Box(
         Modifier
@@ -201,6 +239,80 @@ fun SettingsScreen(
                 Text("新词固定几个，不被复习挤掉。改完明天生效。", fontSize = 17.sp, color = AppText2)
                 Spacer(Modifier.height(10.dp))
                 QuotaSelector(selected = quotaNew, options = AppSettings.NEW_QUOTA_OPTIONS, onSelect = onSetQuotaNew)
+            }
+            Spacer(Modifier.height(14.dp))
+
+            /* ---------- ②.5 我的词库（v22：SAF 导入 JSON 词库文件 → 一个普通自定义分区） ---------- */
+            SettingsCard {
+                Text("我的词库", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
+                Text(
+                    "导入自己做的词库文件，导入后是一个新分区，默认隐藏，到下面「分区显示与顺序」打开显示。",
+                    fontSize = 17.sp,
+                    color = AppText2,
+                )
+                Spacer(Modifier.height(10.dp))
+                if (customBanks.isEmpty()) {
+                    Text("还没有导入的词库。", fontSize = 17.sp, color = AppText2)
+                    Spacer(Modifier.height(8.dp))
+                } else {
+                    customBanks.forEach { bank ->
+                        val confirming = confirmDeleteId == bank.id
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(64.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "${bank.icon} ${bank.name}（${bank.terms.size} 条）",
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AppText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            // 两段确认删除（第一击变「确认删除」，再击才删）——少一层弹窗交互
+                            DeleteBankButton(confirming = confirming) {
+                                if (confirming) {
+                                    CustomBanks.delete(bank.id)
+                                    confirmDeleteId = null
+                                    onBanksChanged()
+                                } else {
+                                    confirmDeleteId = bank.id
+                                }
+                            }
+                        }
+                        if (bank.id != customBanks.last().id) {
+                            HorizontalDivider(color = AppLine, thickness = 1.dp)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(BluePrimary)
+                        .clickable {
+                            confirmDeleteId = null
+                            importLauncher.launch(
+                                arrayOf("application/json", "text/plain", "application/octet-stream"),
+                            )
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("导入词库文件", fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.White)
+                }
+                if (importMessage != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        importMessage,
+                        fontSize = 17.sp,
+                        color = if (importOk) GreenKnown else OrangeDark,
+                    )
+                }
             }
             Spacer(Modifier.height(14.dp))
 
@@ -555,6 +667,30 @@ private fun QuotaSelector(selected: Int, options: List<Int>, onSelect: (Int) -> 
                 )
             }
         }
+    }
+}
+
+/**
+ * v22 删除自定义词库按钮：两段确认（第一击变「确认删除」，再击才删）——不用弹窗，少一层适老交互。
+ * 删除只移除词库本身，学习进度与收藏保留（重导同 id 的 JSON 自动恢复，见 CustomBanks KDoc）。
+ */
+@Composable
+private fun DeleteBankButton(confirming: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(width = 96.dp, height = 56.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (confirming) OrangeDark else OrangeBg)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            if (confirming) "确认删除" else "删除",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Black,
+            color = if (confirming) Color.White else OrangeDark,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 

@@ -6,6 +6,7 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.knowmo.app.data.AppSettings
+import com.knowmo.app.data.CustomBanks
 import com.knowmo.app.data.StudyRepository
 import com.knowmo.app.tts.TTSSpeaker
 import com.knowmo.app.ui.AppRoot
@@ -31,6 +32,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // v22：自定义词库注册表必须先于 settings/repo 的首次访问装载（两者虽是 lazy，但都在
+        // 组合期间首次访问）——allScenes()/STUDY_TERMS 才能包含自定义分区，见 CustomBanks KDoc。
+        CustomBanks.load(this)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(
                 android.graphics.Color.TRANSPARENT,

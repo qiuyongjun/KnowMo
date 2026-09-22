@@ -52,21 +52,36 @@ class AppSettings(context: Context) {
     }
 
     /**
-     * 可管理分区 = SCENES 去掉 rec 与 daily（fav 不在 SCENES，天然不在；两处排除都写上以防将来有人把 fav 加进 SCENES）。
+     * 可管理分区 = **全部分区**（v22 起 [allScenes]：内置 + 自定义词库分区）去掉 rec 与 daily
+     * （fav 不在 SCENES，天然不在；两处排除都写上以防将来有人把 fav 加进 SCENES）。
      * daily（常用词）是推荐的基础内容源特例——不参与显隐管理（设置页无此行、频道栏永不出现、不可开关），
      * 其词由 StudyRepository.scopeIds 的 CHANNEL_COMMON 特例恒入推荐范围。
+     * v22：自定义分区由此获得与内置分区完全同等的显隐管理（默认隐藏口径见 [orderedScenes]）。
      */
-    private fun manageableIds(): List<String> = SCENES
+    private fun manageableIds(): List<String> = allScenes()
         .filter { it.id != StudyRepository.CHANNEL_DAILY && it.id != StudyRepository.CHANNEL_FAV && it.id != StudyRepository.CHANNEL_COMMON }
         .map { it.id }
 
     private fun defaultOrder(): List<String> = manageableIds()
 
-    /** 全部分区（按当前 order，含隐藏的）——设置页行序 */
-    fun orderedScenes(): List<Scene> = order.mapNotNull { id -> SCENES.firstOrNull { it.id == id } }
+    /**
+     * 全部分区（按当前 order，含隐藏的）——设置页行序。
+     * v22：**运行期导入**的自定义分区不在存储 order 里 → 按 [allScenes] 固有顺序补尾
+     * （与 [load] 的「存储后新增分区补尾」同一口径；导入发生在 AppSettings 初始化之后，
+     * load 的补尾覆盖不到它们）。order 里残留的已删自定义 id 在此自然过滤（firstOrNull 为 null）。
+     */
+    fun orderedScenes(): List<Scene> {
+        val mapped = order.mapNotNull { id -> allScenes().firstOrNull { it.id == id } }
+        val missing = allScenes().filter { it.id !in order && it.id in manageableIds() }
+        return mapped + missing
+    }
 
-    /** 可见分区（按 order 过滤 hidden）——频道栏渲染序；rec/fav 由 ChannelBar 固定渲染，不经过这里 */
-    fun visibleScenes(): List<Scene> = orderedScenes().filter { it.id !in hidden }
+    /**
+     * 可见分区（按 order 过滤 hidden）——频道栏渲染序；rec/fav 由 ChannelBar 固定渲染，不经过这里。
+     * v22：`it.id in order` 把「运行期导入、尚未被用户开关过的自定义分区」视同隐藏——
+     * 显隐选择只能由用户在设置页做出，新库不许自己冒出来（与 v12「升级不冒出新分区」同一口径）。
+     */
+    fun visibleScenes(): List<Scene> = orderedScenes().filter { it.id in order && it.id !in hidden }
 
     fun hiddenIds(): Set<String> = hidden.toSet()
 
@@ -127,6 +142,13 @@ class AppSettings(context: Context) {
         quotaValue = if (n in QUOTA_OPTIONS) n else DEFAULT_QUOTA
         persist()
     }
+
+    /**
+     * v22：导入/删除自定义词库后由设置页回调重扫存储（等效重新执行 [load]）——
+     * 让「老设备存储里已有的显隐选择」对新导入的分区**立即生效**（如面馆库在升级前就是可见态，
+     * 重扫后导入即恢复显示，不必等重启）。所有 setter 均即时 persist，存储是权威，重放 load 无失真。
+     */
+    fun rescanScenes() = load()
 
     /* ---------- 持久化（读写对称；旧数据无 "settings" 键 → 全部缺省值，无需迁移） ---------- */
 

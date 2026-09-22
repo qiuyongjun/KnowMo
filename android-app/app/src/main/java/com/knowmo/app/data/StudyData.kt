@@ -23,7 +23,7 @@ data class Term(
 data class Scene(val id: String, val name: String, val icon: String, val color: Color)
 
 /**
- * 场景分区定义。**当前 = 7 项**（推荐 + 常用词 + 5 个场景分区）。
+ * 场景分区定义。**当前 = 6 项**（推荐 + 常用词 + 4 个场景分区）。
  *
  * ## 分区退役史（删除的分区 id **永久退役**）
  * 词条仍可能带这些 id 前缀（id 是"首次归属"，永不改，见 WordBank.kt 文件头 id 契约），
@@ -37,6 +37,10 @@ data class Scene(val id: String, val name: String, val icon: String, val color: 
  *   归入 `daily`；**`market` / `property` 的词条全部删除**（含 v17 刚从 `emergency` 迁入
  *   `property` 的 4 条安全类词 —— QYJ 2026-09-21 明确选择一起删）。
  *   ⇒ 词库 550 → **414** 条。
+ * - **v22**（可管理分区 5 → 4）：整区删除 `food` 88 条，**词条全删、不并入任何分区**——面馆是
+ *   QYJ 妈妈的私有定制，不进开源仓库（已导出标准 JSON，私有设备经自定义词库导入恢复；
+ *   库 id 复用 `food`，学习进度与显隐原样保留）。存储 JSON 残留的 `food` id 由
+ *   `manageableIds()` 自然过滤，无需显隐迁移项。⇒ 词库 452 → **364** 条。
  */
 val SCENES = listOf(
     // 推荐：聚合频道，不是分区——不参与「分区学完」判定（graduatedScenes 显式排除），
@@ -54,17 +58,19 @@ val SCENES = listOf(
     // v17：原「药品说明」分区并入本院区（用药是看病的下游）——名字保持「医院」不变，
     // 以维持 chip 宽度（适老化：4 字 chip 比 2 字显著占宽，见 Common.kt 的「学完」后缀注释）。
     Scene("hospital", "医院", "🏥", Color(0xFFFFEBEE)),
-    // v18：**由「吃饭」改名为「面馆」**（QYJ 2026-09-21）—— 本区实为面馆语境：`food-33`~`food-65`
-    // 原就是独立「面馆」分区（2026-09-20 并入），v11 又专项补了 30 条面馆词（调料罐/加料栏/
-    // 价目表规格/墙面证照/后厨物件）。改名只是 name 字段变化：**scene id 仍是 `food`**（id 永不可变，
-    // 93 条词条的学习状态按 `scene`+`id` 双重挂靠，改 id 或改 scene id 都会造成失联）。
-    // chip 宽度不变（2 字），图标 🍜 本就贴合面馆。
-    Scene("food", "面馆", "🍜", Color(0xFFFFF3E0)),
     Scene("phone", "手机微信", "📱", Color(0xFFE8EAF6)),
     Scene("appliance", "家电", "🔌", Color(0xFFF0F4C3)),
 )
 
-fun sceneColor(id: String): Color = SCENES.firstOrNull { it.id == id }?.color ?: Color(0xFFF5F7FA)
+/**
+ * v22：全部分区 = 内置 [SCENES] + 自定义词库分区（`CustomBanks`）。
+ * AppSettings / StudyRepository / sceneColor / sceneName 一律读本函数——
+ * 自定义分区由此获得与内置分区**完全同等**的待遇（显隐、排序、毕业判定、推荐聚合），
+ * 调度与设置逻辑零改动（延续 v17/v18「分区集合来自 SCENES、本类无硬编码清单」的设计）。
+ */
+fun allScenes(): List<Scene> = SCENES + CustomBanks.scenes
+
+fun sceneColor(id: String): Color = allScenes().firstOrNull { it.id == id }?.color ?: Color(0xFFF5F7FA)
 
 /**
  * v6：收藏频道（`fav`）**不进 SCENES**——否则会被当成可调度场景参与分区毕业判定（design.md §11.1），
@@ -72,4 +78,4 @@ fun sceneColor(id: String): Color = SCENES.firstOrNull { it.id == id }?.color ?:
  */
 fun sceneName(id: String): String =
     if (id == StudyRepository.CHANNEL_FAV) "收藏"
-    else SCENES.firstOrNull { it.id == id }?.name ?: ""
+    else allScenes().firstOrNull { it.id == id }?.name ?: ""

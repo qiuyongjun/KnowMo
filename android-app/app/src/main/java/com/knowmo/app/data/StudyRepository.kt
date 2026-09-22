@@ -210,6 +210,12 @@ data class StudyStats(
  *   （灭火器/安全出口/电梯困人/电梯警铃，v17 刚从解散的 emergency 迁入）经 QYJ 确认**一并删除**；
  * ②词库 550 → **414**（删 136、迁 daily 31）；`daily` 由 72 涨到 **103 条**，成为全库最大分区；
  * ③**本类逻辑仍零改动** —— 分区集合来自 `SCENES`，本文件没有任何硬编码的分区清单。
+ * v22（09-22，QYJ 拍板「纯 B：仅 SAF 导入」）：**自定义词库分区** —— 设置页导入 JSON 词库
+ * （`CustomBank.kt`）即成一个普通场景分区。本类改动仅三处 `SCENES` → `allScenes()`
+ * （recScenesProvider 缺省 / graduatedScenes / studyStats），词条来源 `STUDY_TERMS` 改为
+ * 动态 getter（内置 + 自定义）后**签名与用法不变**——显隐、排序、毕业判定、推荐聚合、
+ * 池型抽取对自定义分区全部按既有机制工作。删除词库只删文件：TermState/收藏按 id 保留
+ * （鬼 id 容忍机制，重导同 id JSON 进度自动恢复）。
  */
 class StudyRepository(
     context: Context,
@@ -414,7 +420,7 @@ class StudyRepository(
      * 每日任务频道（`rec`）是聚合频道，不参与完成判定。
      */
     fun graduatedScenes(): Set<String> =
-        SCENES.map { it.id }.filter { it != CHANNEL_DAILY && isSceneGraduated(it) }.toSet()
+        allScenes().map { it.id }.filter { it != CHANNEL_DAILY && isSceneGraduated(it) }.toSet()
 
     /* ---------- 收藏（v6，design.md §11.1：与学习状态完全独立，只写 favorites） ---------- */
 
@@ -683,8 +689,8 @@ class StudyRepository(
      *   但浏览不写状态、不算学会（未学词走 `poolWeight` 的固定中等权重分支）；
      * - **收藏频道（`fav`，v6）** = 收藏词加权随机（同一套加权逻辑，复用 else 分支）。
      *   ⚠️ 收藏池**可能为空**（没有任何收藏）→ 调用方（AppRoot）拿不到卡时插引导页，场景分区不存在这种情况。
-     * 抽完由调用方重洗（`AppRoot.appendPoolPages`），场景分区池必非空（v18 后最小分区 `transit` 40 词，
-     * 另加固定频道 `daily` 103 词；`fav` 是唯一可能为空的池）。
+     * 抽完由调用方重洗（`AppRoot.appendPoolPages`），场景分区池必非空（v22 后最小分区 `transit` 40 词，
+     * 另加固定频道 `daily` 122 词；`fav` 是唯一可能为空的池）。
      */
     fun poolIds(channel: String): List<String> {
         // 池的构成差异保留（统一的是抽卡**算法**，不是池的范围）：
@@ -695,7 +701,7 @@ class StudyRepository(
     }
 
     /** 加权随机排列（Efraimidis–Spirakis 指数键）：key = -ln(u)/w，升序即无放回加权抽样。
-     *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n ≤ 452）且边界更少。 */
+     *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n ≤ 364）且边界更少。 */
     private fun weightedShuffle(ids: List<String>): List<String> {
         val rnd = Random.Default
         return ids.map { id ->
@@ -944,7 +950,7 @@ class StudyRepository(
          *  历史：v15 549 条 / 1.8~3.7；v16 565 条 / 1.9~3.8（daily 日用洗护净 +16）；v17 550 条 /
          *  1.8~3.7（去重删 15，但 daily 37→72）；v18 414 条 / 1.4~2.8（删 136、daily 72→103）——
          *  总量第一次明显回落，超载已接近「无债运转」的边界（仍需 quota 提到 14~22 才完全不超载）；
-         *  **v21 452 条 / 1.5~3.0（删 8 加 46、daily 103→122）**——超载回升但仍优于 v15~v17。
+         *  **v21 452 条 / 1.5~3.0（删 8 加 46、daily 103→122）**——超载回升但仍优于 v15~v17；**v22 364 条 / 1.2~2.4（面馆分区退役 88 条）**——首度落在无债运转边界以内。
          *  扩库不提配额 → 复习债累积 → 触发 DEBT_THRESHOLD=20 清债模式 → 新词长期学不进去。
          *  暂不动，待实机 f30 观测出现复习债征兆（清债频繁触发、新词多日不进队列）再议。
          *  依据：research/vocab/char_coverage_report.md 容量节（该文件已随 Trellis 卸载删除，

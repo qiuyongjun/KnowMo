@@ -21,6 +21,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import com.knowmo.app.data.AppSettings
 import com.knowmo.app.data.AnswerResult
+import com.knowmo.app.data.CustomBanks
 import com.knowmo.app.data.STUDY_TERMS
 import com.knowmo.app.data.StudyRepository
 import com.knowmo.app.data.Term
@@ -168,6 +169,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // v14 学习统计快照（design.md §16.2）：打开设置页时从 repo 一次性重取（设置页打开期间
     // 无作答发生，静态快照够用，不需要响应式订阅）
     var stats by remember { mutableStateOf(repo.studyStats()) }
+    // v22 自定义词库镜像（设置页「我的词库」导入/删除后经 onBanksChanged 重读触发重组；
+    // 分区/词条本身经 allScenes()/STUDY_TERMS getter 动态并入，无需在此展开）
+    var customBanks by remember { mutableStateOf(CustomBanks.all) }
     val visibleScenes = orderedScenes.filter { it.id !in hiddenIds }   // 频道栏渲染序（rec/fav 固定渲染，不在此列）
     // v6 收藏：收藏集合快照（TermCard 星按钮显色用；toggleFavorite 后整体重读触发重组）
     var favorites by remember { mutableStateOf(repo.favorites().toSet()) }
@@ -749,6 +753,17 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 quota = quota,
                 quotaNew = quotaNew,   // v6 R14 每日新词配额（「写库 → 重读镜像」同下）
                 stats = stats,         // v14 学习统计只读快照（打开设置页时重取，见上方 effect）
+                customBanks = customBanks,   // v22「我的词库」镜像
+                // v22 导入/删除后的统一刷新：rescanScenes 重放 AppSettings.load（存储是权威，
+                // 老设备已有的显隐选择对新导入分区立即生效），再同步全部镜像触发重组。
+                // 若当前频道是被删除的自定义分区，下方 visibleScenes effect 会自动回退推荐频道。
+                onBanksChanged = {
+                    settings.rescanScenes()
+                    customBanks = CustomBanks.all
+                    orderedScenes = settings.orderedScenes()
+                    hiddenIds = settings.hiddenIds()
+                    stats = repo.studyStats()
+                },
                 // 显隐/顺序/配额都是「写 AppSettings → 重读镜像」两步：真源在持久层，镜像只管重组
                 onSetVisible = { id, visible ->
                     settings.setSceneVisible(id, visible)
