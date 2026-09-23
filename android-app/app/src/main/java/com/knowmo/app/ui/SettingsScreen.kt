@@ -123,7 +123,7 @@ fun SettingsScreen(
     onMoveTo: (String, Int) -> Unit,      // v16 拖动落位：目标分区在 order 里的下标
     onSetQuota: (Int) -> Unit,
     onSetQuotaNew: (Int) -> Unit,
-    onBanksChanged: () -> Unit,           // v22 导入/删除后统一刷新（AppRoot 侧 rescanScenes + 镜像同步）
+    onBanksChanged: (String?) -> Unit,    // v22 导入/删除后统一刷新；v23 参数 = 首次导入的库 id（null=无）
     onDone: () -> Unit,
 ) {
     val visibleScenes = orderedScenes.filter { it.id !in hiddenIds }
@@ -153,11 +153,12 @@ fun SettingsScreen(
                     importMessage = "读不到文件内容，请重试。"
                 }
                 else -> runCatching { CustomBanks.import(context, bytes, fileName) }
-                    .onSuccess { bank ->
+                    .onSuccess { outcome ->
                         importOk = true
-                        importMessage = "已导入「${bank.name}」（${bank.terms.size} 条）。默认隐藏，可在下方分区列表打开显示。" +
-                            "若用了自动注音（拼音列留空），多音字的读音建议抽查。"
-                        onBanksChanged()
+                        importMessage = "已导入「${outcome.bank.name}」（${outcome.bank.terms.size} 条）。" +
+                            if (outcome.isNew) "已自动显示，可回学习界面开始。" else "替换更新完成。"
+                        // v23：首次导入的库 id 交给 AppRoot 做默认显示；重导替换不动显隐
+                        onBanksChanged(if (outcome.isNew) outcome.bank.id else null)
                     }
                     .onFailure { e ->
                         importOk = false
@@ -204,10 +205,10 @@ fun SettingsScreen(
                     StatCell("收藏", "${stats.favorites}", "个", BluePrimary, Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(12.dp))
-                // 分母口径说明（v16）：不是全词库条数，而是「当前开启的分区 + 常用词」——
+                // 分母口径说明（v16，v23 起无内置常用词）：不是全词库条数，而是「当前开启的分区」——
                 // 不写清楚的话，用户隐藏一个分区、看见分母变小时会以为数据丢了。
                 Text(
-                    "分母 = 当前可学的词（开启的 ${visibleScenes.size} 个分区 + 常用词）；" +
+                    "分母 = 当前可学的词（开启的 ${visibleScenes.size} 个分区）；" +
                         "关掉的分区不计入，但它们已学的进度仍保留。",
                     fontSize = 17.sp,
                     color = AppText2,
@@ -254,8 +255,8 @@ fun SettingsScreen(
             SettingsCard {
                 Text("我的词库", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
                 Text(
-                    "导入自己做的词库文件，导入后是一个新分区，默认隐藏，到下面「分区显示与顺序」打开显示。" +
-                        "支持 JSON，或用 Excel 填三列（词 / 拼音 / 用途）另存的 CSV，文件名就是词库名；拼音列可以不填，会自动标注。",
+                    "导入词库文件（JSON，或用 Excel 填三列「词 / 拼音 / 用途」另存的 CSV），导入后成为一个新频道并自动显示。" +
+                        "文件名就是词库名；拼音列可以不填，会自动标注（多音字建议核对）。官方词库在仓库 wordbanks 文件夹里，可改后导入。",
                     fontSize = 17.sp,
                     color = AppText2,
                 )
@@ -286,7 +287,7 @@ fun SettingsScreen(
                                 if (confirming) {
                                     CustomBanks.delete(bank.id)
                                     confirmDeleteId = null
-                                    onBanksChanged()
+                                    onBanksChanged(null)
                                 } else {
                                     confirmDeleteId = bank.id
                                 }

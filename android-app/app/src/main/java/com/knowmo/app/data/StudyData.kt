@@ -23,7 +23,7 @@ data class Term(
 data class Scene(val id: String, val name: String, val icon: String, val color: Color)
 
 /**
- * 场景分区定义。**当前 = 6 项**（推荐 + 常用词 + 4 个场景分区）。
+ * 场景分区定义。**当前 = 1 项**（仅推荐聚合频道——v23 起分区全部由自定义词库导入产生）。
  *
  * ## 分区退役史（删除的分区 id **永久退役**）
  * 词条仍可能带这些 id 前缀（id 是"首次归属"，永不改，见 WordBank.kt 文件头 id 契约），
@@ -41,25 +41,17 @@ data class Scene(val id: String, val name: String, val icon: String, val color: 
  *   QYJ 妈妈的私有定制，不进开源仓库（已导出标准 JSON，私有设备经自定义词库导入恢复；
  *   库 id 复用 `food`，学习进度与显隐原样保留）。存储 JSON 残留的 `food` id 由
  *   `manageableIds()` 自然过滤，无需显隐迁移项。⇒ 词库 452 → **364** 条。
+ * - **v23**（词库全面外置）：`daily`（常用词）与 4 个场景分区**全部退役**——App 裸装零词库，
+ *   原 364 条导出为仓库 `wordbanks/*.csv`（官方词库包，拼音全填），用户经设置页导入后以
+ *   自定义分区存在（id 为 CSV 派生 id，与内置历史 id 不互通——内置词进度清零，QYJ 拍板接受）。
+ *   固定频道只剩推荐 / 收藏；`CHANNEL_COMMON` 推荐特例保留但恒为空集（无害）。
+ *   ⇒ 内置词库 364 → **0** 条，`SCENES` 只剩 `rec`。
  */
 val SCENES = listOf(
     // 推荐：聚合频道，不是分区——不参与「分区学完」判定（graduatedScenes 显式排除），
-    // 也没有自己的词条（词来自「可见分区 + 常用词」，见 StudyRepository.scopeIds）。
+    // 也没有自己的词条（词来自「可见分区」，见 StudyRepository.scopeIds）。
+    // v23：唯一内置项——场景分区全部由自定义词库导入产生（零词库时 App 显示导入引导）。
     Scene("rec", "推荐", "⭐", Color(0xFFEDE7F6)),
-    // 常用词（v9 设立；v17 升级为固定频道）：日常生活高频字词 + **跨场景通用词**，
-    // **不是固定某个场景的内容**。在 SCENES 里（参与分区毕业判定），但**不进 AppSettings
-    // 显隐管理**（order/hidden 均不含 daily ⇒ 不可开关、不可移除）。
-    // 两重身份：① 推荐频道的基础内容源（StudyRepository 的 CHANNEL_COMMON 特例，恒入推荐范围）；
-    // ② 频道栏的第三个固定频道（恒显示，渲染在 ui/Common.kt 的 ChannelBar，不经 visibleScenes）。
-    // 规模沿革：v16 37 条 → v17 通用词回流 72 条 → **v18 收纳 weather 与 7 条例外词共 103 条**——
-    // 它现在是全库最大的分区，也是「不设场景限制、什么都能放」的那个兜底分区。
-    Scene("daily", "常用词", "🔤", Color(0xFFE0F7FA)),
-    Scene("transit", "公交地铁", "🚌", Color(0xFFE3F2FD)),
-    // v17：原「药品说明」分区并入本院区（用药是看病的下游）——名字保持「医院」不变，
-    // 以维持 chip 宽度（适老化：4 字 chip 比 2 字显著占宽，见 Common.kt 的「学完」后缀注释）。
-    Scene("hospital", "医院", "🏥", Color(0xFFFFEBEE)),
-    Scene("phone", "手机微信", "📱", Color(0xFFE8EAF6)),
-    Scene("appliance", "家电", "🔌", Color(0xFFF0F4C3)),
 )
 
 /**

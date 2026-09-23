@@ -667,6 +667,19 @@ class StudyRepository(
         persist()
     }
 
+    /**
+     * v23：导入/删除自定义词库后由 AppRoot 调用——若当日队列存在且为**空队列**，作废之，
+     * 下次 ensureQueue 按新词库范围重建。空库首导若不作废，「当日队列冻结」口径会让新词拖到
+     * 明天才出现（用户导入完看到的还是空引导态）。非空队列不动（当日冻结语义不破）。
+     */
+    fun invalidateEmptyQueue() {
+        val q = queues[CHANNEL_DAILY]
+        if (q != null && q.queue.isEmpty()) {
+            queues.remove(CHANNEL_DAILY)
+            persist()
+        }
+    }
+
     /** 断点位置落库（只有每日任务频道；池型频道顺序随机、页码无意义，不落库） */
     fun saveQueuePosition(position: Int) {
         val q = queues[CHANNEL_DAILY] ?: return
@@ -688,9 +701,8 @@ class StudyRepository(
      * - **场景分区** = 该区**全部词**（含未学词）加权随机（D3/D5）——未学词因此也能被浏览，
      *   但浏览不写状态、不算学会（未学词走 `poolWeight` 的固定中等权重分支）；
      * - **收藏频道（`fav`，v6）** = 收藏词加权随机（同一套加权逻辑，复用 else 分支）。
-     *   ⚠️ 收藏池**可能为空**（没有任何收藏）→ 调用方（AppRoot）拿不到卡时插引导页，场景分区不存在这种情况。
-     * 抽完由调用方重洗（`AppRoot.appendPoolPages`），场景分区池必非空（v22 后最小分区 `transit` 40 词，
-     * 另加固定频道 `daily` 122 词；`fav` 是唯一可能为空的池）。
+     *   ⚠️ 收藏池**可能为空**（没有任何收藏）→ 调用方（AppRoot）拿不到卡时插引导页；
+     *   场景分区池必非空（导入校验 ≥1 条/库）；**零词库时全部池型频道都空** → 引导页（v23）。
      */
     fun poolIds(channel: String): List<String> {
         // 池的构成差异保留（统一的是抽卡**算法**，不是池的范围）：
@@ -701,7 +713,7 @@ class StudyRepository(
     }
 
     /** 加权随机排列（Efraimidis–Spirakis 指数键）：key = -ln(u)/w，升序即无放回加权抽样。
-     *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n ≤ 364）且边界更少。 */
+     *  选它而不是「按权重轮盘逐个抽」：一趟 `sortedBy` 完成（O(n log n)，n = 已导入词数）且边界更少。 */
     private fun weightedShuffle(ids: List<String>): List<String> {
         val rnd = Random.Default
         return ids.map { id ->
@@ -950,7 +962,9 @@ class StudyRepository(
          *  历史：v15 549 条 / 1.8~3.7；v16 565 条 / 1.9~3.8（daily 日用洗护净 +16）；v17 550 条 /
          *  1.8~3.7（去重删 15，但 daily 37→72）；v18 414 条 / 1.4~2.8（删 136、daily 72→103）——
          *  总量第一次明显回落，超载已接近「无债运转」的边界（仍需 quota 提到 14~22 才完全不超载）；
-         *  **v21 452 条 / 1.5~3.0（删 8 加 46、daily 103→122）**——超载回升但仍优于 v15~v17；**v22 364 条 / 1.2~2.4（面馆分区退役 88 条）**——首度落在无债运转边界以内。
+         *  **v21 452 条 / 1.5~3.0（删 8 加 46、daily 103→122）**——超载回升但仍优于 v15~v17；**v22 364 条 / 1.2~2.4（面馆分区退役 88 条）**——首度落在无债运转边界以内；
+         *  **v23 内置 0 条（词库全面外置为 wordbanks/*.csv）**——容量口径改由**用户导入量**决定，
+         *  观测记录对零内置形态失去参照意义，仅存历史。
          *  扩库不提配额 → 复习债累积 → 触发 DEBT_THRESHOLD=20 清债模式 → 新词长期学不进去。
          *  暂不动，待实机 f30 观测出现复习债征兆（清债频繁触发、新词多日不进队列）再议。
          *  依据：research/vocab/char_coverage_report.md 容量节（该文件已随 Trellis 卸载删除，

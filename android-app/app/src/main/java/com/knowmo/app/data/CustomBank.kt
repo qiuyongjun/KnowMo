@@ -68,6 +68,9 @@ data class CustomBank(
     val scene: Scene get() = Scene(id, name, icon, CustomBanks.colorFor(id))
 }
 
+/** 一次导入的结果：`isNew` = 该库 id 首次入库（调用方据此做「首次导入默认显示」） */
+data class ImportOutcome(val bank: CustomBank, val isNew: Boolean)
+
 object CustomBanks {
 
     private val banks = linkedMapOf<String, CustomBank>()
@@ -84,8 +87,8 @@ object CustomBanks {
         runCatching { Transliterator.getInstance("Han-Latin") }.getOrNull()
     }
 
-    /** 自定义库数量上限：频道栏与设置页列表的可读性约束（适老化，Tab 不能无限加） */
-    const val MAX_BANKS = 5
+    /** 自定义库数量上限：v23 起官方 5 库也走导入（官方 CSV + 家属自定义），频道栏可读性约束 */
+    const val MAX_BANKS = 10
 
     /** 单库词条上限 */
     const val MAX_TERMS = 200
@@ -124,15 +127,18 @@ object CustomBanks {
      * → 进注册表。**字节入口**（编码探测在 [decode] 做——Excel 老版另存的 CSV 是 GBK，
      * 调用方若先按 UTF-8 解码就救不回来了）。先写文件成功再进注册表（写失败时内存态不得领先
      * 磁盘态）；任一步失败抛 IllegalArgumentException（消息可直接展示），已装库不受影响。
+     * 返回 [ImportOutcome]：`isNew` = 首次导入（AppRoot 借此「首次导入默认显示」——显式导入
+     * = 明确想学，与 v12「升级不冒出新分区」场景不同；重导替换则**不动**用户手动改过的显隐）。
      */
-    fun import(context: Context, bytes: ByteArray, fileName: String): CustomBank {
+    fun import(context: Context, bytes: ByteArray, fileName: String): ImportOutcome {
         val text = decode(bytes)
         val bank = if (fileName.endsWith(".csv", ignoreCase = true)) parseCsv(text, fileName) else parse(text)
         val d = dir ?: File(context.applicationContext.filesDir, DIR_NAME).also { dir = it }
         d.mkdirs()
         File(d, bank.id + ".json").writeText(toJson(bank), Charsets.UTF_8)
+        val isNew = !banks.containsKey(bank.id)
         banks[bank.id] = bank
-        return bank
+        return ImportOutcome(bank, isNew)
     }
 
     /**

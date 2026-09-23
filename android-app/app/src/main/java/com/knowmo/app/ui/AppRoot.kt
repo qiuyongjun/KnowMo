@@ -37,7 +37,8 @@ import kotlinx.coroutines.launch
  *  （同一词的多次出现各自独立作答），池型浏览页与任务页互不干扰，旧数据兼容也更稳。
  *  cardId = 持久化队列中的稳定卡实例 id；重复卡插入后原有卡的身份不变。
  *  池型页（温故流 / 分区浏览）= null（不落库）。
- *  v6：`Guide` = 空收藏引导页（**仅收藏频道空池可达**——场景分区池必非空；大字引导 + 播报同源 FAV_GUIDE_SPEECH，
+ *  v6：`Guide` = 空态引导页（v23 起两种：零词库未导入 → EMPTY_BANK_*；空收藏池 → FAV_GUIDE_*；
+ *  大字引导 + 播报同源，
  *  防 VerticalPager pageCount == 0 白屏）。 */
 sealed interface Page {
     data class TermPage(val t: Term, val mode: CardMode, val seq: Int, val cardId: String?) : Page
@@ -145,6 +146,12 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // 战果数字本身（完成卡 / 播报）**不缓存**，直接读 repo 的持久口径 ——
     // 本地累加或本地镜像都得与 repo 的写入严格同步，任一处漏改就漂移。
     var answerTick by remember { mutableStateOf(0) }
+    // v23：词库增删计数器——导入/删除后 +1，作装载 effect 的 key（当前频道重载以反映新词库；
+    // 导入空库首词后推荐频道从引导态立刻进入学习流，不必等次日重建队列）
+    var bankTick by remember { mutableStateOf(0) }
+    // v23：频道切换播报标记——装载 effect 的 key 加了 bankTick 后，「播不播换频道语」不能再由
+    // 「非首次装载」推断（bankTick 重载不是切频道），改为 onSelect 里显式置位
+    var switchAnnounce by remember { mutableStateOf(false) }
     val revealed = remember { mutableStateMapOf<Int, Boolean>() }      // seq -> 任务卡是否已作答（v8：不再控制拼音显隐——卡片恒全展开，只控制按钮隐藏/结果文案；浏览卡不写这里）
     val results = remember { mutableStateMapOf<Int, String>() }        // seq -> 反馈文案
     var seqGen by remember { mutableStateOf(0) }                       // 页出现序号发生器（只在 effect/回调中递增）
@@ -298,7 +305,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
             "太棒了，今日任务完成！今天学完了${repo.todayTaskWordCount()}个词，" +
                 "忘了${repo.todayForgot()}次。" +
                 "上滑进入推荐模式，随便看看吧。"
-        Page.Guide -> FAV_GUIDE_SPEECH    // v6 空收藏引导（文案与引导卡同源）
+        Page.Guide ->
+            // v6 空收藏引导；v23 区分两种空态：全库无词（零内置 + 未导入）→ 导入引导
+            if (STUDY_TERMS.isEmpty()) EMPTY_BANK_GUIDE_SPEECH else FAV_GUIDE_SPEECH
     }
 
     /** 池型追加（v5 R10 §5.7-2）：从池里顺序取 count 张追加到**尾部**；池空用 `repo.poolIds(channel)`
@@ -346,14 +355,16 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // v9：rec 装载先看 `q.confirmed`——true 直接进浏览模式（**完成卡保留在首位**，回滑可看战果，
     // 上滑进入浏览流；当日重启不重放任务卡）；false 走任务模式（断点恢复按卡实例 answered[i]
     // 还原作答态，仍锁滑）。
-    LaunchedEffect(channel) {
+    LaunchedEffect(channel, bankTick) {
         // v18：App 首次装载（冷启动 / 后台进程被杀后切换回来重建）→ 播与**恢复后状态**匹配的欢迎语。
         // 旧实现是写死的「上滑开始学习」（LaunchedEffect(Unit)）：任务阶段是**锁滑**的（唯一前进方式
         // 是作答，v9），切回来一听「上滑」就是错误指示 —— 欢迎语必须按队列状态分流。
         // 时序：TTSSpeaker 未就绪时 speak 进 pending 队列按序补播，恒先于卡片播报（停稳播报有
         // SETTLE_SPEECH_DELAY + restoreTo 守卫，见下方停稳 effect）。
         val isAppEntry = firstChannelLoad
-        val announce = !firstChannelLoad
+        // v23：播报只在「用户真的切了频道」时播（onSelect 置位）；bankTick 触发的重载不播
+        val announce = switchAnnounce
+        switchAnnounce = false
         firstChannelLoad = false
         spokenKeys.clear()
         lastSettledKey = null               // 去重键复位须同步：旧键留在 spokenKeys 会挡回头重听（v18）
@@ -388,7 +399,13 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         if (q.answered[i]) revealed[seq] = true
                         Page.TermPage(t, mode, seq, q.cardIds[i])
                     }
-                    syncDonePage()                   // 总结卡条件出现：pending == 0 才有收尾页
+                    // v23 零词库空态：队列空且全库无词 → 引导页（导入词库后才可能有任务）；
+                    // 有词而队列空 → 总结卡（既有口径：pool 空 = 合法状态，直接进温故流）
+                    if (pages.isEmpty()) {
+                        if (STUDY_TERMS.isEmpty()) pages = listOf(Page.Guide) else syncDonePage()
+                    } else {
+                        syncDonePage()
+                    }
                     // 断点：frontier = 第一张待处理卡（都做完了则是总结卡）——「在哪儿」=「做到哪儿了」
                     restoreTo = frontierIndex()
                     // 任务阶段锁滑 → 不指引「上滑」，只说继续（作答是唯一前进方式）
@@ -664,6 +681,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                             browseMode = browseMode,
                         )
                         channel = new
+                        switchAnnounce = true   // v23：装载 effect 的 key 含 bankTick 后，播报改由这里显式置位
                     }
                 },
             )
@@ -738,7 +756,13 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         // inBrowse 切换底部引导文案（浏览模式中显示「随便看看吧」）
                         inBrowse = browseMode,
                     )
-                    Page.Guide -> GuideCard()      // v6 空收藏引导（播报在 cardSpeech 分支）
+                    Page.Guide ->
+                        // v23：空态文案二分——全库无词（裸装未导入）引导去导入；否则空收藏引导
+                        if (STUDY_TERMS.isEmpty()) {
+                            GuideCard(EMPTY_BANK_GUIDE_TITLE, EMPTY_BANK_GUIDE_BODY)
+                        } else {
+                            GuideCard(FAV_GUIDE_TITLE, FAV_GUIDE_BODY)
+                        }
                 }
             }
         }
@@ -754,15 +778,19 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 quotaNew = quotaNew,   // v6 R14 每日新词配额（「写库 → 重读镜像」同下）
                 stats = stats,         // v14 学习统计只读快照（打开设置页时重取，见上方 effect）
                 customBanks = customBanks,   // v22「我的词库」镜像
-                // v22 导入/删除后的统一刷新：rescanScenes 重放 AppSettings.load（存储是权威，
-                // 老设备已有的显隐选择对新导入分区立即生效），再同步全部镜像触发重组。
-                // 若当前频道是被删除的自定义分区，下方 visibleScenes effect 会自动回退推荐频道。
-                onBanksChanged = {
+                // v22/v23 导入/删除后的统一刷新：rescanScenes 重放 AppSettings.load（存储是权威）；
+                // 首次导入的库 setSceneVisible(true)（显式导入 = 明确想学，导入即显示；重导替换不动
+                // 用户手动改过的显隐）；空队列作废（否则空库首导当天仍是引导态）；bankTick 触发
+                // 当前频道重载。当前频道若被删除，下方 visibleScenes effect 会自动回退推荐频道。
+                onBanksChanged = { firstImportId ->
                     settings.rescanScenes()
+                    if (firstImportId != null) settings.setSceneVisible(firstImportId, true)
+                    repo.invalidateEmptyQueue()
                     customBanks = CustomBanks.all
                     orderedScenes = settings.orderedScenes()
                     hiddenIds = settings.hiddenIds()
                     stats = repo.studyStats()
+                    bankTick++
                 },
                 // 显隐/顺序/配额都是「写 AppSettings → 重读镜像」两步：真源在持久层，镜像只管重组
                 onSetVisible = { id, visible ->
