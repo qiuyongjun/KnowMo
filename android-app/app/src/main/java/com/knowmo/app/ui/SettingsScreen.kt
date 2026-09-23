@@ -131,24 +131,32 @@ fun SettingsScreen(
     val progressById = stats.scenes.associateBy { it.scene.id }
 
     // v22「我的词库」会话态：导入结果文案（importOk 区分成功/失败配色）+ 删除的两段确认
+    // v22.1：字节入口 + 取 DISPLAY_NAME（CSV 的库名/库 id 都派生自文件名，见 CustomBank.parseCsv）
     val context = LocalContext.current
     var confirmDeleteId by remember { mutableStateOf<String?>(null) }
     var importMessage by remember { mutableStateOf<String?>(null) }
     var importOk by remember { mutableStateOf(false) }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            val text = runCatching {
-                context.contentResolver.openInputStream(uri)
-                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+            val bytes = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             }.getOrNull()
-            if (text == null) {
-                importOk = false
-                importMessage = "读不到文件内容，请重试。"
-            } else {
-                runCatching { CustomBanks.import(context, text) }
+            val fileName = runCatching {
+                context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                    val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+                }
+            }.getOrNull().orEmpty()
+            when {
+                bytes == null -> {
+                    importOk = false
+                    importMessage = "读不到文件内容，请重试。"
+                }
+                else -> runCatching { CustomBanks.import(context, bytes, fileName) }
                     .onSuccess { bank ->
                         importOk = true
-                        importMessage = "已导入「${bank.name}」（${bank.terms.size} 条）。默认隐藏，可在下方分区列表打开显示。"
+                        importMessage = "已导入「${bank.name}」（${bank.terms.size} 条）。默认隐藏，可在下方分区列表打开显示。" +
+                            "若用了自动注音（拼音列留空），多音字的读音建议抽查。"
                         onBanksChanged()
                     }
                     .onFailure { e ->
@@ -246,7 +254,8 @@ fun SettingsScreen(
             SettingsCard {
                 Text("我的词库", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
                 Text(
-                    "导入自己做的词库文件，导入后是一个新分区，默认隐藏，到下面「分区显示与顺序」打开显示。",
+                    "导入自己做的词库文件，导入后是一个新分区，默认隐藏，到下面「分区显示与顺序」打开显示。" +
+                        "支持 JSON，或用 Excel 填三列（词 / 拼音 / 用途）另存的 CSV，文件名就是词库名；拼音列可以不填，会自动标注。",
                     fontSize = 17.sp,
                     color = AppText2,
                 )
@@ -298,7 +307,13 @@ fun SettingsScreen(
                         .clickable {
                             confirmDeleteId = null
                             importLauncher.launch(
-                                arrayOf("application/json", "text/plain", "application/octet-stream"),
+                                arrayOf(
+                                    "application/json",
+                                    "text/csv",
+                                    "text/comma-separated-values",
+                                    "text/plain",
+                                    "application/octet-stream",
+                                ),
                             )
                         },
                     contentAlignment = Alignment.Center,

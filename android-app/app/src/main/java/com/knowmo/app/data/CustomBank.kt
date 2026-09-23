@@ -1,39 +1,58 @@
 package com.knowmo.app.data
 
 import android.content.Context
+import android.icu.text.Transliterator
 import androidx.compose.ui.graphics.Color
 import org.json.JSONObject
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
+import java.util.Locale
 import kotlin.math.abs
 
 /**
- * 自定义词库（v22，QYJ 2026-09-22 拍板「纯 B：仅 SAF 导入」）：
- * 一个 JSON 文件 = 一个分区词库，设置页「我的词库」导入后成为频道栏的一个**普通场景分区**——
+ * 自定义词库（v22，QYJ 2026-09-22 拍板「纯 B：仅 SAF 导入」；v22.1 增 CSV）：
+ * 一个词库文件 = 一个分区词库，设置页「我的词库」导入后成为频道栏的一个**普通场景分区**——
  * 显隐、排序、分区毕业判定、推荐聚合全部复用内置分区的既有机制（见 [allScenes] / [STUDY_TERMS]）。
  *
- * ## 文件格式（词条与内置 `Term` 同构）
+ * ## 文件格式一：JSON（程序友好；v22 面馆导出文件即此格式）
  * ```json
  * {"id": "noodle", "name": "面馆", "icon": "🍜",
  *  "terms": [{"id": "noodle-1", "text": "牛肉面", "pinyin": "niú ròu miàn", "tip": "最常见的一碗面"}]}
  * ```
  * `icon` 可选（缺省「📚」，1~2 字符）；其余字段全部必填。
  *
- * ## fail-closed 校验（[parse] 任一条不合格 → 整库拒绝，逐条报告问题；已装库不受影响）
- * - 库 id：`^[a-z][a-z0-9_]{1,15}$`；**不得与内置在用分区 / 频道 id 冲突**（rec/fav/daily +
- *   [SCENES] 全部在用 id）。⚠️ **已退役分区 id 允许复用**——这是有意的迁移通道：
+ * ## 文件格式二：CSV（v22.1，家属友好——用 Excel 填好「另存为 CSV」即可）
+ * - **三列：词 / 拼音 / 用途**；首行表头可选（首格为「词 / 词语 / text」即识别为表头跳过）；
+ * - **文件名即库名**（去扩展名，超 8 字自动截断）；库 id 由库名派生（[bankIdForName]）——
+ *   ⚠️ **导入后别改文件名**，改名 = 新库 id = 旧进度失联（term id 挂在库 id 下）；
+ * - 词条 id 自动生成且**可复算**：`库id + "-" + hash(词+拼音)`——改用途说明不变 id（进度保留），
+ *   改词或改拼音 = 新词（本来就该重学），删除/插入行不影响其他词的 id；
+ * - **拼音列可空** → [HAN_TO_PINYIN]（android ICU Han-Latin，API 24+）自动注音；填了以填的为准。
+ *   ⚠️ 自动注音对**多音字**可能取错音（适老产品教错音是真伤害）——导入成功文案与文档都提示抽查；
+ * - 编码自动探测：UTF-8 BOM → 严格 UTF-8 → GBK（兜住老版 Excel「另存 CSV」的默认编码）；
+ * - 同名文件重导 = 同库 id = **替换更新**（家族自己迭代词库的方式）。
+ *
+ * ## fail-closed 校验（JSON / CSV 共用 [checkAndBuildTerm]；任一条不合格 → 整库拒绝、逐条报告、已装库不受影响）
+ * - 库 id：JSON 显式给出，`^[a-z][a-z0-9_]{1,15}$`，**不得与内置在用分区 / 频道 id 冲突**
+ *   （rec/fav/daily + [SCENES] 全部在用 id）。⚠️ **已退役分区 id 允许复用**——这是有意的迁移通道：
  *   v22 面馆导出文件就用 `food`（老设备上 `food-*` 的学习状态与显隐选择原样保留，导入后
  *   进度、收藏、频道开关自动恢复）。代价：将来若内置重新启用同名分区，会与已装自定义库冲突
- *   （导入时拒绝，需先删旧库）；
- * - 与**已装自定义库同 id 重导 = 替换更新**（家族自己迭代词库的方式；term id 稳定则进度保留）；
- * - 库名 1~8 字（频道 chip 适老宽度）；单库 1~200 条；自定义库总数 ≤ [MAX_BANKS]（频道栏可读性）；
- * - 词条 id 必须 `<库id>-` 前缀、全库唯一；词文本 1~8 字、库内不重复、**不与内置词库及
- *   其他自定义库重复**（「一个词只留一份」契约，v17 口径）；
+ *   （导入时拒绝，需先删旧库）；CSV 的库 id 由库名派生（`c` + 8 位十六进制），不会撞上；
+ * - 库名 1~8 字（频道 chip 适老宽度）；单库 1~[MAX_TERMS] 条；自定义库总数 ≤ [MAX_BANKS]（频道栏可读性）；
+ * - 词条 id 全库唯一；词文本 1~8 字、库内不重复、**不与内置词库及其他自定义库重复**
+ *   （「一个词只留一份」契约，v17 口径）；
  * - 拼音空格逐字配对（与内置 `term()` 的启动 require 同一条件）；tip 1~30 字。
  *
  * ## 与学习状态的关系（对设计提案的有意偏离，先读再改）
  * **删除词库只删文件与注册表条目，TermState / 收藏一律保留**——与「id 永不复用」契约同源：
- * 残留鬼 id 已被统计口径容忍（`studyStats` 按 [STUDY_TERMS] 剔除），重导同 id 的 JSON
+ * 残留鬼 id 已被统计口径容忍（`studyStats` 按 [STUDY_TERMS] 剔除），重导同 id 的文件
  * 学习进度自动恢复。不做「删库连带删记录」级联，少一套破坏性写入路径。
+ *
+ * ## 存储规范化
+ * CSV 导入后**统一转成 JSON** 存 `filesDir/custom_banks/<id>.json`（[toJson]）——磁盘上只有
+ * 一种权威格式，装载路径（[load]）不需要感知来源格式。
  *
  * ## 装载时序（改 MainActivity 前必读）
  * [load] 在 `MainActivity.onCreate` **先于** `setContent` 执行——AppSettings / StudyRepository
@@ -59,6 +78,11 @@ object CustomBanks {
         Color(0xFFE8F5E9), Color(0xFFFFF8E1), Color(0xFFE0F2F1),
         Color(0xFFF3E5F5), Color(0xFFE1F5FE),
     )
+
+    /** 汉字→带调拼音（android ICU，API 24+；minSdk 26 覆盖）。**多音字取常用音，可能错**——拼音列留空才启用。 */
+    private val HAN_TO_PINYIN: Transliterator? by lazy {
+        runCatching { Transliterator.getInstance("Han-Latin") }.getOrNull()
+    }
 
     /** 自定义库数量上限：频道栏与设置页列表的可读性约束（适老化，Tab 不能无限加） */
     const val MAX_BANKS = 5
@@ -96,12 +120,14 @@ object CustomBanks {
     }
 
     /**
-     * 从设置页 SAF 导入：[parse] 校验 → 写入 `filesDir/custom_banks/<id>.json` → 进注册表。
-     * 先写文件成功再进注册表（写失败时内存态不得领先磁盘态）；任一步失败抛
-     * IllegalArgumentException（消息可直接展示给导入者），已装库不受影响。
+     * 从设置页 SAF 导入：按扩展名分派 JSON / CSV 解析 → 写入 `filesDir/custom_banks/<id>.json`
+     * → 进注册表。**字节入口**（编码探测在 [decode] 做——Excel 老版另存的 CSV 是 GBK，
+     * 调用方若先按 UTF-8 解码就救不回来了）。先写文件成功再进注册表（写失败时内存态不得领先
+     * 磁盘态）；任一步失败抛 IllegalArgumentException（消息可直接展示），已装库不受影响。
      */
-    fun import(context: Context, text: String): CustomBank {
-        val bank = parse(text)
+    fun import(context: Context, bytes: ByteArray, fileName: String): CustomBank {
+        val text = decode(bytes)
+        val bank = if (fileName.endsWith(".csv", ignoreCase = true)) parseCsv(text, fileName) else parse(text)
         val d = dir ?: File(context.applicationContext.filesDir, DIR_NAME).also { dir = it }
         d.mkdirs()
         File(d, bank.id + ".json").writeText(toJson(bank), Charsets.UTF_8)
@@ -111,7 +137,7 @@ object CustomBanks {
 
     /**
      * 删除词库：移除文件与注册表条目。**刻意不删** TermState / 收藏（见类 KDoc「与学习状态的关系」）——
-     * 重导同 id 的 JSON 学习进度自动恢复。
+     * 重导同 id 的文件学习进度自动恢复。
      */
     fun delete(id: String) {
         banks.remove(id)
@@ -163,6 +189,8 @@ object CustomBanks {
             banks.values.filter { it.id != id }.flatMap { bank -> bank.terms.map { it.text } }.toSet()
 
         if (arr != null) {
+            // 库 id 本身非法时不再按它派生正则（防正则注入），词条级 id 检查跳过（库级错误已致命）
+            val termIdRegex = if (Regex("^[a-z][a-z0-9_]{1,15}$").matches(id)) Regex("^$id-[A-Za-z0-9_]{1,16}$") else null
             for (i in 0 until arr.length()) {
                 val t = arr.optJSONObject(i)
                 if (t == null) {
@@ -174,44 +202,15 @@ object CustomBanks {
                 val pinyin = t.optString("pinyin").trim()
                 val tip = t.optString("tip").trim()
                 val label = "terms[$i]「$text2」"
-
-                if (termIdRegex == null || !termIdRegex.matches(tid)) {
+                if (termIdRegex == null || termIdRegex.matches(tid)) {
+                    checkAndBuildTerm(errs, seenIds, seenTexts, existingTexts, parsed, id, icon, label, tid, text2, pinyin, tip)
+                } else {
                     errs.add("$label 词条 id「$tid」不合法：须为「$id-」开头的 1~16 位字母/数字/下划线")
-                } else if (!seenIds.add(tid)) {
-                    errs.add("$label 词条 id「$tid」在库内重复")
-                }
-                if (text2.isEmpty() || text2.length > 8) errs.add("$label 词文本须为 1~8 个字")
-                else if (!seenTexts.add(text2)) errs.add("$label 与本库其他词条重复")
-                else if (text2 in existingTexts) errs.add("$label 与词库已有词重复——一个词只学一份")
-
-                val syllables = pinyin.split(" ")
-                if (pinyin.isEmpty() || syllables.any { it.isEmpty() }) {
-                    errs.add("$label 拼音为空或含连续空格")
-                } else if (syllables.size != text2.length) {
-                    errs.add("$label 拼音音节数（${syllables.size}）与字数（${text2.length}）不符")
-                }
-                if (tip.isEmpty() || tip.length > 30) errs.add("$label 用途说明须为 1~30 个字")
-
-                // 仅在配对成立时构造（配对不符已报错，最终必抛；此处守卫防 syllables 越界抢在报错前崩掉）
-                if (tid.isNotEmpty() && text2.isNotEmpty() && tip.isNotEmpty() &&
-                    syllables.size == text2.length && syllables.all { it.isNotEmpty() }
-                ) {
-                    parsed.add(
-                        Term(
-                            id = tid, scene = id, icon = icon, text = text2,
-                            chars = List(text2.length) { k -> TermChar(text2[k].toString(), syllables[k]) },
-                            tip = tip,
-                        ),
-                    )
                 }
             }
         }
 
-        if (errs.isNotEmpty()) {
-            val shown = errs.take(6).joinToString("\n") { "· $it" }
-            val more = if (errs.size > 6) "\n·……另有 ${errs.size - 6} 个问题" else ""
-            throw IllegalArgumentException("词库未通过检查，未做任何改动：\n$shown$more")
-        }
+        abortIfErrors(errs)
         return CustomBank(
             id = id,
             name = name,
@@ -219,6 +218,195 @@ object CustomBanks {
             terms = parsed,
         )
     }
+
+    /**
+     * 校验并解析一份 CSV 词库（v22.1）。格式约定见类 KDoc「文件格式二」：
+     * 三列（词 / 拼音 / 用途）、文件名即库名、词条 id 由内容派生、拼音可空自动注音。
+     */
+    fun parseCsv(text: String, fileName: String): CustomBank {
+        val errs = mutableListOf<String>()
+
+        val base = fileName.substringBeforeLast('.').trim()
+        if (base.isEmpty()) errs.add("文件名是空的：文件名会用作库名，请起个名字")
+        // 超 8 字自动截断（文件名是随手起的，截断比报错友好；类 KDoc 已注明）
+        val name = base.take(8)
+        val id = bankIdForName(name)
+        if (id in forbiddenBankIds()) errs.add("库名「$name」派生的库 id 与内置分区冲突，请改个文件名")
+        if (!banks.containsKey(id) && banks.size >= MAX_BANKS) {
+            errs.add("自定义词库最多 $MAX_BANKS 个（已装 ${banks.size} 个），请先删除不用的再导入")
+        }
+
+        val dataRows = parseCsvRows(text).filter { row -> row.any { it.isNotBlank() } }
+        if (dataRows.isEmpty()) {
+            errs.add("表格是空的：至少要有一行词")
+        } else if (dataRows.size > MAX_TERMS + 1) {
+            // +1 给表头留量：表头不计入条数；正文真超限由下方截掉表头后精确报
+            errs.add("共 ${dataRows.size} 行，超过单库上限 $MAX_TERMS")
+        }
+
+        // 表头识别：首格为「词 / 词语 / text」即整行视为表头跳过
+        val body = if (dataRows.isNotEmpty()) {
+            val h0 = dataRows[0].getOrNull(0)?.trim()
+            if (h0 == "词" || h0 == "词语" || h0.equals("text", ignoreCase = true)) dataRows.drop(1) else dataRows
+        } else dataRows
+        if (body.size > MAX_TERMS) errs.add("词条 ${body.size} 条超过单库上限 $MAX_TERMS")
+
+        val parsed = mutableListOf<Term>()
+        val seenIds = mutableSetOf<String>()
+        val seenTexts = mutableSetOf<String>()
+        val existingTexts = BUILTIN_TERMS.map { it.text }.toHashSet() +
+            banks.values.filter { it.id != id }.flatMap { bank -> bank.terms.map { it.text } }.toSet()
+
+        val translit = HAN_TO_PINYIN
+        body.forEachIndexed { idx, row ->
+            val text2 = row.getOrNull(0)?.trim().orEmpty()
+            val pinyinRaw = row.getOrNull(1)?.trim().orEmpty()
+            val tip = row.getOrNull(2)?.trim().orEmpty()
+            val label = "第 ${idx + 1} 行「$text2」"
+            if (text2.isEmpty()) {
+                errs.add("$label：词一列为空")
+                return@forEachIndexed
+            }
+            if (tip.isEmpty()) errs.add("$label：缺「用途」列说明")
+            val pinyin = if (pinyinRaw.isNotEmpty()) {
+                pinyinRaw
+            } else {
+                val auto = translit?.transliterate(text2)?.trim().orEmpty()
+                if (auto.isEmpty() || auto.split(" ").size != text2.length) {
+                    errs.add("$label：自动注音失败（可能含非汉字字符），请手填拼音列")
+                    return@forEachIndexed
+                }
+                auto
+            }
+            // 词条 id 由内容派生（可复算）：改用途说明不变 id；改词/改拼音 = 新词；增删行不影响他人
+            val tid = id + "-" + String.format(Locale.US, "%08x", (text2 + "\u0001" + pinyin).hashCode())
+            checkAndBuildTerm(errs, seenIds, seenTexts, existingTexts, parsed, id, "📚", label, tid, text2, pinyin, tip)
+        }
+
+        abortIfErrors(errs)
+        return CustomBank(id = id, name = name, icon = "📚", terms = parsed)
+    }
+
+    /** 逐条问题清单 → IllegalArgumentException（前 6 条全展示，剩余计数） */
+    private fun abortIfErrors(errs: MutableList<String>) {
+        if (errs.isNotEmpty()) {
+            val shown = errs.take(6).joinToString("\n") { "· $it" }
+            val more = if (errs.size > 6) "\n·……另有 ${errs.size - 6} 个问题" else ""
+            throw IllegalArgumentException("词库未通过检查，未做任何改动：\n$shown$more")
+        }
+    }
+
+    /**
+     * JSON / CSV 共用的词条级校验 + 构造（fail-closed：问题只累积进 [errs]，最终由 [abortIfErrors]
+     * 整库拒绝）。id 格式检查在调用方（JSON 的 `<库id>-` 前缀规则 / CSV 的内容派生 id 恒合法）。
+     */
+    private fun checkAndBuildTerm(
+        errs: MutableList<String>,
+        seenIds: MutableSet<String>,
+        seenTexts: MutableSet<String>,
+        existingTexts: Set<String>,
+        out: MutableList<Term>,
+        sceneId: String,
+        icon: String,
+        label: String,
+        tid: String,
+        text2: String,
+        pinyin: String,
+        tip: String,
+    ) {
+        if (!seenIds.add(tid)) errs.add("$label 词条 id「$tid」在库内重复")
+        if (text2.isEmpty() || text2.length > 8) errs.add("$label 词文本须为 1~8 个字")
+        else if (!seenTexts.add(text2)) errs.add("$label 与本库其他词条重复")
+        else if (text2 in existingTexts) errs.add("$label 与词库已有词重复——一个词只学一份")
+
+        val syllables = pinyin.split(" ")
+        if (pinyin.isEmpty() || syllables.any { it.isEmpty() }) {
+            errs.add("$label 拼音为空或含连续空格")
+        } else if (syllables.size != text2.length) {
+            errs.add("$label 拼音音节数（${syllables.size}）与字数（${text2.length}）不符")
+        }
+        if (tip.isEmpty() || tip.length > 30) errs.add("$label 用途说明须为 1~30 个字")
+
+        // 仅在配对成立时构造（配对不符已报错，最终必抛；此处守卫防 syllables 越界抢在报错前崩掉）
+        if (tid.isNotEmpty() && text2.isNotEmpty() && tip.isNotEmpty() &&
+            syllables.size == text2.length && syllables.all { it.isNotEmpty() }
+        ) {
+            out.add(
+                Term(
+                    id = tid, scene = sceneId, icon = icon, text = text2,
+                    chars = List(text2.length) { k -> TermChar(text2[k].toString(), syllables[k]) },
+                    tip = tip,
+                ),
+            )
+        }
+    }
+
+    /**
+     * 编码探测：UTF-8 BOM → 严格 UTF-8（解码失败不吞错）→ GBK。
+     * GBK 兜底是给老版 Excel「另存为 CSV」的默认编码；带 BOM 时剥掉前 3 字节。
+     */
+    private fun decode(bytes: ByteArray): String {
+        if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {
+            return String(bytes, 3, bytes.size - 3, Charsets.UTF_8)
+        }
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+                .toString()
+        } catch (e: Exception) {
+            String(bytes, Charset.forName("GBK"))
+        }
+    }
+
+    /**
+     * RFC 4180 CSV 状态机（Excel「另存为 CSV」的方言）：双引号包裹的字段可含逗号/换行，
+     * `""` 转义为字面引号；\r\n 与 \n 都按行结束处理。tip 里带逗号是家常便饭，
+     * 逐字符状态机是唯一不出歧义的解析法。
+     */
+    private fun parseCsvRows(text: String): List<List<String>> {
+        val rows = mutableListOf<List<String>>()
+        val field = StringBuilder()
+        val row = mutableListOf<String>()
+        var inQuotes = false
+        var i = 0
+        fun endField() {
+            row.add(field.toString())
+            field.setLength(0)
+        }
+        fun endRow() {
+            endField()
+            rows.add(row.toList())
+            row.clear()
+        }
+        while (i < text.length) {
+            val c = text[i]
+            when {
+                inQuotes -> when {
+                    c == '"' && i + 1 < text.length && text[i + 1] == '"' -> { field.append('"'); i++ }
+                    c == '"' -> inQuotes = false
+                    else -> field.append(c)
+                }
+                c == '"' && field.isEmpty() -> inQuotes = true
+                c == ',' -> endField()
+                c == '\r' -> { if (i + 1 < text.length && text[i + 1] == '\n') i++; endRow() }
+                c == '\n' -> endRow()
+                else -> field.append(c)
+            }
+            i++
+        }
+        if (field.isNotEmpty() || row.isNotEmpty()) endRow()
+        return rows
+    }
+
+    /**
+     * CSV 库 id 派生：`"c" + 库名 hashCode 的 8 位十六进制`。
+     * `String.hashCode` 算法是 Java 语言规范定义的（跨设备/跨版本稳定），故**可复算**——
+     * 同名文件重导得到同 id（替换更新、进度保留）；改名 = 新 id = 视为新库（类 KDoc 已警示）。
+     */
+    private fun bankIdForName(name: String): String =
+        "c" + String.format(Locale.US, "%08x", name.hashCode())
 
     /** 注册表 → 持久化 JSON（与 [parse] 读写对称；字段顺序稳定，便于人工比对） */
     private fun toJson(bank: CustomBank): String {
