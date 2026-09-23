@@ -20,6 +20,9 @@ node_modules/
 # --- WorkBuddy 本机会话数据（个人文件，不入库） ---
 .workbuddy/
 
+# --- Trae IDE ---
+.trae/
+
 # --- OS ---
 Thumbs.db
 Desktop.ini
