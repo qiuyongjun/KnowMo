@@ -216,7 +216,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     }
 
     // v6：设置显隐改动**即时生效**——当前频道被隐藏（非 rec/fav 且不在可见分区）→ 回退推荐频道。
-    // 回退由既有的 LaunchedEffect(channel) 装载分支自然接管（重建队列 / 重建池型页）。
+    // 回退由既有的 LaunchedEffect(channel, bankTick) 装载分支自然接管（重建队列 / 重建池型页）。
     LaunchedEffect(visibleScenes) {
         // ⚠️ v17：固定频道有三个（推荐 / 收藏 / 常用词），三者都**不来自 visibleScenes**，
         // 必须全部放行。漏掉 CHANNEL_COMMON 的后果：点「常用词」频道的那一瞬就被本 effect

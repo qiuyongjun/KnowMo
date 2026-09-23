@@ -12,18 +12,13 @@ import java.util.Locale
 import kotlin.math.abs
 
 /**
- * 自定义词库（v22，QYJ 2026-09-22 拍板「纯 B：仅 SAF 导入」；v22.1 增 CSV）：
- * 一个词库文件 = 一个分区词库，设置页「我的词库」导入后成为频道栏的一个**普通场景分区**——
- * 显隐、排序、分区毕业判定、推荐聚合全部复用内置分区的既有机制（见 [allScenes] / [STUDY_TERMS]）。
+ * 自定义词库（v22→v23.1，QYJ 拍板）：**用户导入格式只有 CSV**——一个词库文件 = 一个分区词库，
+ * 设置页「我的词库」导入后成为频道栏的一个**普通场景分区**，显隐、排序、分区毕业判定、推荐聚合
+ * 全部复用内置分区的既有机制（见 [allScenes] / [STUDY_TERMS]）。
+ * v23.1 起 JSON **不再作为导入格式**（QYJ：家属用 Excel 即可，JSON 多一层门槛）——JSON 退为
+ * **App 内部存储格式**（[toJson] 写、[parse] 读，用户不可见）。
  *
- * ## 文件格式一：JSON（程序友好；v22 面馆导出文件即此格式）
- * ```json
- * {"id": "noodle", "name": "面馆", "icon": "🍜",
- *  "terms": [{"id": "noodle-1", "text": "牛肉面", "pinyin": "niú ròu miàn", "tip": "最常见的一碗面"}]}
- * ```
- * `icon` 可选（缺省「📚」，1~2 字符）；其余字段全部必填。
- *
- * ## 文件格式二：CSV（v22.1，家属友好——用 Excel 填好「另存为 CSV」即可）
+ * ## 用户导入格式：CSV（用 Excel 填好「另存为 CSV」即可）
  * - **三列：词 / 拼音 / 用途**；首行表头可选（首格为「词 / 词语 / text」即识别为表头跳过）；
  * - **文件名即库名**（去扩展名，超 8 字自动截断）；库 id 由库名派生（[bankIdForName]）——
  *   ⚠️ **导入后别改文件名**，改名 = 新库 id = 旧进度失联（term id 挂在库 id 下）；
@@ -34,16 +29,14 @@ import kotlin.math.abs
  * - 编码自动探测：UTF-8 BOM → 严格 UTF-8 → GBK（兜住老版 Excel「另存 CSV」的默认编码）；
  * - 同名文件重导 = 同库 id = **替换更新**（家族自己迭代词库的方式）。
  *
- * ## fail-closed 校验（JSON / CSV 共用 [checkAndBuildTerm]；任一条不合格 → 整库拒绝、逐条报告、已装库不受影响）
- * - 库 id：JSON 显式给出，`^[a-z][a-z0-9_]{1,15}$`，**不得与内置在用分区 / 频道 id 冲突**
- *   （rec/fav/daily + [SCENES] 全部在用 id）。⚠️ **已退役分区 id 允许复用**——这是有意的迁移通道：
- *   v22 面馆导出文件就用 `food`（老设备上 `food-*` 的学习状态与显隐选择原样保留，导入后
- *   进度、收藏、频道开关自动恢复）。代价：将来若内置重新启用同名分区，会与已装自定义库冲突
- *   （导入时拒绝，需先删旧库）；CSV 的库 id 由库名派生（`c` + 8 位十六进制），不会撞上；
+ * ## fail-closed 校验（任一条不合格 → 整库拒绝、逐条报告、已装库不受影响）
+ * - 库 id 由文件名派生（`c` + 库名 hashCode 的 8 位十六进制，跨设备可复算）；派生形态天然
+ *   撞不上内置分区 id，`forbiddenBankIds` 检查仅作防御；
  * - 库名 1~8 字（频道 chip 适老宽度）；单库 1~[MAX_TERMS] 条；自定义库总数 ≤ [MAX_BANKS]（频道栏可读性）；
- * - 词条 id 全库唯一；词文本 1~8 字、库内不重复、**不与内置词库及其他自定义库重复**
- *   （「一个词只留一份」契约，v17 口径）；
- * - 拼音空格逐字配对（与内置 `term()` 的启动 require 同一条件）；tip 1~30 字。
+ * - 词条 id 全库唯一；词文本 1~8 字、库内不重复、**不与其他库已装词重复**
+ *   （「一个词只留一份」契约，v17 口径；v23 起内置词库为空，此项只在自定义库之间生效）；
+ * - 拼音空格逐字配对（自动注音产物同样过这道校验）；tip 1~30 字。
+ * - 存储规范化 JSON（[toJson] 产物）在装载时走同一套 [parse] 校验兜底（防文件被手改坏）。
  *
  * ## 与学习状态的关系（对设计提案的有意偏离，先读再改）
  * **删除词库只删文件与注册表条目，TermState / 收藏一律保留**——与「id 永不复用」契约同源：
@@ -123,16 +116,19 @@ object CustomBanks {
     }
 
     /**
-     * 从设置页 SAF 导入：按扩展名分派 JSON / CSV 解析 → 写入 `filesDir/custom_banks/<id>.json`
-     * → 进注册表。**字节入口**（编码探测在 [decode] 做——Excel 老版另存的 CSV 是 GBK，
+     * 从设置页 SAF 导入：**只收 CSV**（v23.1 起；非 .csv 扩展名直接拒绝并提示格式）→
+     * 写入 `filesDir/custom_banks/<id>.json`（存储规范化，见类 KDoc）→ 进注册表。
+     * **字节入口**（编码探测在 [decode] 做——Excel 老版另存的 CSV 是 GBK，
      * 调用方若先按 UTF-8 解码就救不回来了）。先写文件成功再进注册表（写失败时内存态不得领先
      * 磁盘态）；任一步失败抛 IllegalArgumentException（消息可直接展示），已装库不受影响。
      * 返回 [ImportOutcome]：`isNew` = 首次导入（AppRoot 借此「首次导入默认显示」——显式导入
-     * = 明确想学，与 v12「升级不冒出新分区」场景不同；重导替换则**不动**用户手动改过的显隐）。
+     * = 明确想学；重导替换则**不动**用户手动改过的显隐）。
      */
     fun import(context: Context, bytes: ByteArray, fileName: String): ImportOutcome {
-        val text = decode(bytes)
-        val bank = if (fileName.endsWith(".csv", ignoreCase = true)) parseCsv(text, fileName) else parse(text)
+        if (!fileName.endsWith(".csv", ignoreCase = true)) {
+            throw IllegalArgumentException("仅支持 CSV 词库文件：用 Excel 填三列（词 / 拼音 / 用途），另存为 CSV 即可")
+        }
+        val bank = parseCsv(decode(bytes), fileName)
         val d = dir ?: File(context.applicationContext.filesDir, DIR_NAME).also { dir = it }
         d.mkdirs()
         File(d, bank.id + ".json").writeText(toJson(bank), Charsets.UTF_8)
@@ -151,10 +147,11 @@ object CustomBanks {
     }
 
     /**
-     * 校验并解析一份自定义词库 JSON。任何问题抛 IllegalArgumentException，消息为**逐条问题清单**
-     * （中文、可直接展示；导入者按提示改文件重导）。
+     * 内部装载器：解析 [load] 发现的规范化 JSON（[toJson] 产物，App 自己写自己读）。
+     * **不作为用户导入格式**（v23.1 起用户导入只收 CSV）；校验与 CSV 同一套，兜住被手改坏的
+     * 存储文件。任何问题抛 IllegalArgumentException，消息为逐条问题清单。
      */
-    fun parse(text: String): CustomBank {
+    private fun parse(text: String): CustomBank {
         val obj = try {
             JSONObject(text)
         } catch (e: Exception) {

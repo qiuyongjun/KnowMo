@@ -255,7 +255,7 @@ fun SettingsScreen(
             SettingsCard {
                 Text("我的词库", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
                 Text(
-                    "导入词库文件（JSON，或用 Excel 填三列「词 / 拼音 / 用途」另存的 CSV），导入后成为一个新频道并自动显示。" +
+                    "导入词库文件：用 Excel 填三列「词 / 拼音 / 用途」另存为 CSV，导入后成为一个新频道并自动显示。" +
                         "文件名就是词库名；拼音列可以不填，会自动标注（多音字建议核对）。官方词库在仓库 wordbanks 文件夹里，可改后导入。",
                     fontSize = 17.sp,
                     color = AppText2,
@@ -309,7 +309,6 @@ fun SettingsScreen(
                             confirmDeleteId = null
                             importLauncher.launch(
                                 arrayOf(
-                                    "application/json",
                                     "text/csv",
                                     "text/comma-separated-values",
                                     "text/plain",

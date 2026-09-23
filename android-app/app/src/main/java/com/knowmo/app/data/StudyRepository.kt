@@ -224,7 +224,7 @@ class StudyRepository(
     // v9 推荐范围注入（prd 第 3 条）：**可见分区** id 集合（MainActivity 传 settings.visibleScenes()）。
     // 推荐频道（每日任务 + 温故流）只抽这些分区的词；常用词分区（CHANNEL_COMMON）由 scopeIds
     // 特例恒入、不受本集合影响。与配额同语义：只在重建队列 / 重洗池时读，当日队列冻结不变。
-    private val recScenesProvider: () -> Set<String> = { SCENES.map { it.id }.toSet() },
+    private val recScenesProvider: () -> Set<String> = { allScenes().map { it.id }.toSet() },
 ) {
 
     private val prefs = context.applicationContext
@@ -500,7 +500,7 @@ class StudyRepository(
         // 当前可学范围（与 buildQueue / poolIds 的推荐范围同源，口径不会漂）
         val currentIds = scopeIds(CHANNEL_DAILY)
         val learnedIds = currentIds.filter { termStates.containsKey(it) }
-        val scenes = SCENES
+        val scenes = allScenes()
             .filter { it.id != CHANNEL_DAILY && it.id != CHANNEL_FAV && it.id != CHANNEL_COMMON }
             .map { scene ->
                 val ids = STUDY_TERMS.filter { it.scene == scene.id }
