@@ -69,13 +69,31 @@ jobs:
           echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "version_code=$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
 
+      # 从 Secret 解码 keystore。⚠️ 2026-09-23 复审修复（#5）：先校验四个 Secret 齐全，
+      # 缺任一个立即失败并给出明确指引——不再无条件设置 KEYSTORE_FILE（旧写法会让 gradle
+      # 恒走 release 签名分支、拿空 keystore 直接构建失败，且不触发 debug 回退）。
+      # 刻意不回退 debug 签名：发布正式 APK 用 debug 签名无法覆盖升级，宁可失败。
       - name: Decode release keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > $HOME/release.keystore
+          missing=()
+          [ -z "$RELEASE_KEYSTORE_BASE64" ] && missing+=("RELEASE_KEYSTORE_BASE64")
+          [ -z "$KEYSTORE_PASSWORD" ] && missing+=("KEYSTORE_PASSWORD")
+          [ -z "$KEY_ALIAS" ] && missing+=("KEY_ALIAS")
+          [ -z "$KEY_PASSWORD" ] && missing+=("KEY_PASSWORD")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Release 签名 Secret 未配置：${missing[*]}。请在仓库 Settings > Secrets and variables > Actions 配置后重打 tag。"
+            exit 1
+          fi
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > $HOME/release.keystore
           echo "KEYSTORE_FILE=$HOME/release.keystore" >> "$GITHUB_ENV"
-          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
-          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
-          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Build release APK
         working-directory: android-app

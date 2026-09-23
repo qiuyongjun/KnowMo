@@ -539,6 +539,14 @@ class StudyRepository(
         }
 
     /**
+     * 推荐范围当前是否为空（2026-09-23 复审修复 #2）——**可见范围**口径，供空态判别：
+     * 全部分区隐藏时 `STUDY_TERMS` 仍非空，但 rec 一张卡都抽不到，空态判据若用
+     * `STUDY_TERMS.isEmpty()` 会落到总结卡「今日任务完成 0 个词」。内部走 `scopeIds`
+     * 的同一套特例（CHANNEL_COMMON 恒入），口径与 buildQueue 完全一致。
+     */
+    fun recScopeEmpty(): Boolean = scopeIds(CHANNEL_DAILY).isEmpty()
+
+    /**
      * 每日任务频道当日队列生成（design.md §9.3；R10 后**只有队列型频道**需要队列）：
      * - learned = 全部已学词，双键排序：lapses 降序优先（忘词先见）→ 到期日升序（先清旧债）；
      * - due     = learned 中到期的词（isDue）；
@@ -641,7 +649,9 @@ class StudyRepository(
      */
     fun ensureQueue(): DailyQueue {
         val existing = queues[CHANNEL_DAILY]
-        if (existing != null && existing.date == today()) {
+        // 2026-09-23 复审修复（#1）：复用前校验词条仍然存在——删除词库 / 升级清空内置词库后，
+        // 鬼 id 留在非空队列里会被装载时的 termById 静默丢弃（全丢则误显完成卡），须整体重建
+        if (existing != null && existing.date == today() && !queueHasGhostIds(existing)) {
             val normalized = normalizeQueue(existing)
             if (normalized != existing) {
                 queues[CHANNEL_DAILY] = normalized
@@ -653,6 +663,16 @@ class StudyRepository(
         queues[CHANNEL_DAILY] = fresh
         persist()
         return fresh
+    }
+
+    /**
+     * 队列里的鬼 id（2026-09-23 复审修复 #1）：任一词条 id 不在当前 `STUDY_TERMS` 里。
+     * 刻意只查**存在性**、不查显隐——分区被隐藏时当日队列照常冻结（与配额同语义，
+     * 只在重建时读 recScenesProvider），但词都没了的 id 不可复用。
+     */
+    private fun queueHasGhostIds(q: DailyQueue): Boolean {
+        val known = STUDY_TERMS.map { it.id }.toHashSet()
+        return q.queue.any { it !in known }
     }
 
     /**
@@ -668,13 +688,18 @@ class StudyRepository(
     }
 
     /**
-     * v23：导入/删除自定义词库后由 AppRoot 调用——若当日队列存在且为**空队列**，作废之，
-     * 下次 ensureQueue 按新词库范围重建。空库首导若不作废，「当日队列冻结」口径会让新词拖到
-     * 明天才出现（用户导入完看到的还是空引导态）。非空队列不动（当日冻结语义不破）。
+     * v23：导入/删除自定义词库后由 AppRoot 调用——作废**不再合法**的当日队列，下次 ensureQueue
+     * 按新词库范围重建。两类失效（2026-09-23 复审修复 #1 收窄了原「只作废空队列」的口径）：
+     * - 空队列：空库首导若不作废，「当日队列冻结」口径会让新词拖到明天才出现（用户导入完
+     *   看到的还是空引导态）；
+     * - 含鬼 id 的队列：词条已不在当前 `STUDY_TERMS`（删除词库 / 升级清空内置词库后的残留），
+     *   装载时会被 termById 丢弃——全丢则误显完成卡，部分丢则当天任务悄悄缩水，故发现即整队
+     *   作废（词库已变，旧队列本就不可续）。
+     * 非空且全部有效 → 不动（当日冻结语义不破）。
      */
-    fun invalidateEmptyQueue() {
-        val q = queues[CHANNEL_DAILY]
-        if (q != null && q.queue.isEmpty()) {
+    fun invalidateStaleQueue() {
+        val q = queues[CHANNEL_DAILY] ?: return
+        if (q.queue.isEmpty() || queueHasGhostIds(q)) {
             queues.remove(CHANNEL_DAILY)
             persist()
         }

@@ -235,6 +235,14 @@ object CustomBanks {
         val name = base.take(8)
         val id = bankIdForName(name)
         if (id in forbiddenBankIds()) errs.add("库名「$name」派生的库 id 与内置分区冲突，请改个文件名")
+        // 2026-09-23 复审修复（#4）：库 id 派生自 32 位 hashCode，存在碰撞（如「Aa」与「BB」同值）
+        // ——不同文件名撞出同 id 时，继续导入会按「重导替换」覆盖掉另一个库，且跨库重词检查
+        // 对同 id 库不生效、防线不触发。fail-closed：要求改文件名。
+        banks[id]?.let { existing ->
+            if (existing.name != name) {
+                errs.add("文件名「$name」与已装词库「${existing.name}」派生出相同的库 id（碰撞），请改个文件名")
+            }
+        }
         if (!banks.containsKey(id) && banks.size >= MAX_BANKS) {
             errs.add("自定义词库最多 $MAX_BANKS 个（已装 ${banks.size} 个），请先删除不用的再导入")
         }

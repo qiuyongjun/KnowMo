@@ -77,6 +77,12 @@ const val EMPTY_BANK_GUIDE_TITLE = "这里还没有内容"
 const val EMPTY_BANK_GUIDE_BODY = "请家人打开设置，导入词库文件（wordbanks 文件夹里的 CSV）。"
 val EMPTY_BANK_GUIDE_SPEECH = "$EMPTY_BANK_GUIDE_TITLE。$EMPTY_BANK_GUIDE_BODY。"
 
+/** 2026-09-23 复审修复 #2：词库在但推荐可见范围为空（全部分区被隐藏）的推荐频道空态。
+ *  勿与零词库混淆（词库存在，引导去**开启**分区而非导入）；文案与播报同源。 */
+const val HIDDEN_ALL_GUIDE_TITLE = "还没有可学的词"
+const val HIDDEN_ALL_GUIDE_BODY = "词库都在设置里隐藏了，请家人打开设置，开启要学的分区。"
+val HIDDEN_ALL_GUIDE_SPEECH = "$HIDDEN_ALL_GUIDE_TITLE。$HIDDEN_ALL_GUIDE_BODY。"
+
 /**
  * 频道 Tab（参考抖音顶部 tab）。
  * 渲染顺序：**推荐（固定第一）→ 收藏（固定第二）→ 可见场景分区**

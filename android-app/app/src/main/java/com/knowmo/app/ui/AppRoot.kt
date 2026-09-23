@@ -306,8 +306,14 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 "忘了${repo.todayForgot()}次。" +
                 "上滑进入推荐模式，随便看看吧。"
         Page.Guide ->
-            // v6 空收藏引导；v23 区分两种空态：全库无词（零内置 + 未导入）→ 导入引导
-            if (STUDY_TERMS.isEmpty()) EMPTY_BANK_GUIDE_SPEECH else FAV_GUIDE_SPEECH
+            // v6 空收藏引导；v23 区分零词库（全库无词 → 导入引导）。
+            // 2026-09-23 复审修复（#2）：第三种空态——推荐频道上词库在、但可见范围为空
+            // （分区全隐藏），旧判据会把它当「空收藏」念出与现场无关的话术。
+            when {
+                STUDY_TERMS.isEmpty() -> EMPTY_BANK_GUIDE_SPEECH
+                channel == StudyRepository.CHANNEL_DAILY -> HIDDEN_ALL_GUIDE_SPEECH
+                else -> FAV_GUIDE_SPEECH
+            }
     }
 
     /** 池型追加（v5 R10 §5.7-2）：从池里顺序取 count 张追加到**尾部**；池空用 `repo.poolIds(channel)`
@@ -399,10 +405,11 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         if (q.answered[i]) revealed[seq] = true
                         Page.TermPage(t, mode, seq, q.cardIds[i])
                     }
-                    // v23 零词库空态：队列空且全库无词 → 引导页（导入词库后才可能有任务）；
-                    // 有词而队列空 → 总结卡（既有口径：pool 空 = 合法状态，直接进温故流）
+                    // 空态判据（2026-09-23 复审修复 #2）：用**当前可见学习范围**而非全局
+                    // STUDY_TERMS——全部分区隐藏时全局仍有词、rec 却抽不到任何卡，旧判据
+                    // 会落到总结卡「今日任务完成 0 个词」。recScopeEmpty 与 buildQueue 同口径。
                     if (pages.isEmpty()) {
-                        if (STUDY_TERMS.isEmpty()) pages = listOf(Page.Guide) else syncDonePage()
+                        if (repo.recScopeEmpty()) pages = listOf(Page.Guide) else syncDonePage()
                     } else {
                         syncDonePage()
                     }
@@ -757,9 +764,12 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         inBrowse = browseMode,
                     )
                     Page.Guide ->
-                        // v23：空态文案二分——全库无词（裸装未导入）引导去导入；否则空收藏引导
+                        // 空态文案三分（2026-09-23 复审修复 #2，与 cardSpeech 同一判据）：
+                        // 全库无词 → 导入引导；推荐频道 + 有词 → 分区全隐藏引导；否则空收藏引导
                         if (STUDY_TERMS.isEmpty()) {
                             GuideCard(EMPTY_BANK_GUIDE_TITLE, EMPTY_BANK_GUIDE_BODY)
+                        } else if (channel == StudyRepository.CHANNEL_DAILY) {
+                            GuideCard(HIDDEN_ALL_GUIDE_TITLE, HIDDEN_ALL_GUIDE_BODY)
                         } else {
                             GuideCard(FAV_GUIDE_TITLE, FAV_GUIDE_BODY)
                         }
@@ -785,7 +795,13 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 onBanksChanged = { firstImportId ->
                     settings.rescanScenes()
                     if (firstImportId != null) settings.setSceneVisible(firstImportId, true)
-                    repo.invalidateEmptyQueue()
+                    // 2026-09-23 复审修复（#3）：词库已变，会话快照里的 Term 对象可能是旧库内容
+                    // （删除/替换后切回该频道会恢复出已删除的词或旧用途说明）——全部作废，
+                    // 切回时走完整装载重新取词。
+                    channelSnapshots.clear()
+                    // 2026-09-23 复审修复（#1）：原 invalidateEmptyQueue 只作废空队列，
+                    // 现同时作废含鬼 id 的队列（见 StudyRepository.invalidateStaleQueue）
+                    repo.invalidateStaleQueue()
                     customBanks = CustomBanks.all
                     orderedScenes = settings.orderedScenes()
                     hiddenIds = settings.hiddenIds()
