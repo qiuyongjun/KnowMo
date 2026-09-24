@@ -1,13 +1,20 @@
 package com.knowmo.app.ui
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
@@ -36,9 +44,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.knowmo.app.data.Scene
@@ -49,11 +67,14 @@ import com.knowmo.app.ui.theme.AppText2
 import com.knowmo.app.ui.theme.BlueBg
 import com.knowmo.app.ui.theme.BlueDark
 import com.knowmo.app.ui.theme.BluePrimary
+import com.knowmo.app.ui.theme.ButtonShape
 import com.knowmo.app.ui.theme.CardShapeLarge
+import com.knowmo.app.ui.theme.ControlShape
 import com.knowmo.app.ui.theme.GreenBg
 import com.knowmo.app.ui.theme.GreenKnown
 import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
+import com.knowmo.app.ui.theme.PageGutter
 import com.knowmo.app.ui.theme.StarGold
 import com.knowmo.app.ui.theme.cardShadow
 
@@ -72,9 +93,11 @@ const val FAV_GUIDE_TITLE = "还没有收藏的词"
 const val FAV_GUIDE_BODY = "学习时点卡片右上角的星星，就能把词收进来。"
 val FAV_GUIDE_SPEECH = "$FAV_GUIDE_TITLE。$FAV_GUIDE_BODY。"
 
-/** v23 零词库空态（裸装未导入任何词库时的推荐频道/空频道引导；文案与播报同源） */
+/** v23 零词库空态（裸装未导入任何词库时的推荐频道/空频道引导；文案与播报同源）
+ *  2026-09-23 修复 #1：官方词库已随 APK 分发，空态卡上直接给「一键导入」按钮，
+ *  文案从「去设置导文件」改为引导点按钮——对够不着 GitHub 的家属是决定性的一步。 */
 const val EMPTY_BANK_GUIDE_TITLE = "这里还没有内容"
-const val EMPTY_BANK_GUIDE_BODY = "请家人打开设置，导入词库文件（wordbanks 文件夹里的 CSV）。"
+const val EMPTY_BANK_GUIDE_BODY = "点下面的按钮，先把官方词库装进来。家人也可以在设置里导入自己做的词库。"
 val EMPTY_BANK_GUIDE_SPEECH = "$EMPTY_BANK_GUIDE_TITLE。$EMPTY_BANK_GUIDE_BODY。"
 
 /** 2026-09-23 复审修复 #2：词库在但推荐可见范围为空（全部分区被隐藏）的推荐频道空态。
@@ -112,11 +135,14 @@ fun ChannelBar(
     // 连点检测：计数 + 上次点击时间戳放在 remember 里（组件内私有会话态，不进任何持久层）
     var recTaps by remember { mutableStateOf(0) }
     var lastTapAt by remember { mutableStateOf(0L) }
+    val scroll = rememberScrollState()
 
     Row(
         Modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
+            // edgeFade 必须排在 horizontalScroll 之前：此处的绘制尺寸 = 可视窗口，渐隐贴在屏幕两端而非内容两端
+            .edgeFade(scroll)
+            .horizontalScroll(scroll)
             .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -165,12 +191,42 @@ fun ChannelBar(
     }
 }
 
+/** 频道栏两端渐隐宽度 */
+private val EDGE_FADE = 28.dp
+
+/**
+ * 横滑频道栏两端渐隐：分区多到一屏放不下时，被裁切的 chip 渐隐进页底，提示「这边还能滑」——
+ * 生硬的裁切边对老年用户不构成可滑暗示。只在该方向**确实还能滑**时才画，滑到头即消失。
+ */
+private fun Modifier.edgeFade(state: ScrollState): Modifier = drawWithContent {
+    drawContent()
+    val w = EDGE_FADE.toPx()
+    if (state.canScrollBackward) {
+        drawRect(
+            Brush.horizontalGradient(listOf(AppSurface, Color.Transparent), startX = 0f, endX = w),
+            size = Size(w, size.height),
+        )
+    }
+    if (state.canScrollForward) {
+        drawRect(
+            Brush.horizontalGradient(
+                listOf(Color.Transparent, AppSurface),
+                startX = size.width - w,
+                endX = size.width,
+            ),
+            topLeft = Offset(size.width - w, 0f),
+            size = Size(w, size.height),
+        )
+    }
+}
+
 /**
  * 频道 chip（v6 抽出：推荐 / 收藏 / 场景分区三种共用同一渲染）。
  * 选中态用**实心蓝底白字**（对比浅底深字的旧样式，老年用户更容易识别「当前在哪个频道」）；
  * 未选中 = 白色胶囊浮在暖米色页面底上。
  * v21.1：QYJ 反馈恢复 v21 之前的样式——撤销 v21 的未选中 1dp 描边与选中态底部白色指示条
  * （指示条连带把胶囊从 Row 撑成了 Column、内边距 12→10、间距 8→10，一并回退）。
+ * 静态外观保持 v21.1 定稿，只给选中切换加底色/字色过渡，避免蓝块"瞬移"。
  */
 @Composable
 private fun ChannelChip(
@@ -180,10 +236,19 @@ private fun ChannelChip(
     onClick: () -> Unit,
     star: Boolean = false,
 ) {
+    val bg by animateColorAsState(if (active) BluePrimary else Color.White, label = "chipBg")
+    val fg by animateColorAsState(
+        when {
+            active -> Color.White
+            isGraduated -> GreenKnown
+            else -> AppText2
+        },
+        label = "chipFg",
+    )
     Row(
         Modifier
             .clip(RoundedCornerShape(50))
-            .background(if (active) BluePrimary else Color.White)
+            .background(bg)
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -201,16 +266,68 @@ private fun ChannelChip(
             label,
             fontSize = 20.sp,
             fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
-            color = when {
-                active -> Color.White
-                isGraduated -> GreenKnown
-                else -> AppText2
-            },
+            color = fg,
         )
     }
 }
 
 /* ---------- 共享小组件 ---------- */
+
+/** 按下时的缩放比例：幅度小到不影响点准，但足以让手指感到「按下去了」 */
+private const val PRESSED_SCALE = 0.96f
+
+/**
+ * 按压回弹：按下微缩、松手弹回。老年用户点按常犹豫「到底按到没有」，
+ * 涟漪在深色实心按钮上几乎看不见，缩放是更直接的触感反馈。
+ * 须与 `clickable(interactionSource = source, ...)` 共用同一个 source，并排在 shadow/clip 之前（投影随按钮一起缩）。
+ */
+@Composable
+fun Modifier.pressScale(source: InteractionSource): Modifier {
+    val pressed by source.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) PRESSED_SCALE else 1f, label = "pressScale")
+    return this.graphicsLayer {
+        scaleX = scale
+        scaleY = scale
+    }
+}
+
+/**
+ * 实心大按钮（作答「认识/忘了」、设置页「导入 / 完成」共用）：白字 + 可选图标 + 按压回弹。
+ * 投影取按钮自身的颜色而非黑色：暖米底上的黑影发灰发脏，同色光晕更通透。
+ * 图标不设 contentDescription：同排文字已表达同一语义，重复朗读只是噪声。
+ */
+@Composable
+fun SolidButton(
+    label: String,
+    container: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    height: Dp = 64.dp,
+    fontSize: TextUnit = 22.sp,
+    iconSize: Dp = 28.dp,
+    shape: Shape = ButtonShape,
+) {
+    val source = remember { MutableInteractionSource() }
+    Row(
+        modifier
+            .fillMaxWidth()
+            .height(height)
+            .pressScale(source)
+            .shadow(6.dp, shape, spotColor = container, ambientColor = container)
+            .clip(shape)
+            .background(container)
+            .clickable(interactionSource = source, indication = LocalIndication.current, onClick = onClick),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(iconSize))
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(label, fontSize = fontSize, fontWeight = FontWeight.Black, color = Color.White)
+    }
+}
 
 /**
  * 卡片形态（v4 运行时计算，不再是静态数据字段）：
@@ -354,14 +471,26 @@ fun SwipeHint() {
  * v6 空态引导卡；v23 起文案参数化（title/body 由调用方按空态类型选择）：
  * - 空收藏池（fav）→ FAV_GUIDE_*（原口径，仅收藏频道可达）；
  * - **零词库**（裸装未导入任何词库，推荐/其他频道空池可达）→ EMPTY_BANK_GUIDE_*（引导去导入）。
- * 视觉与词条卡/完成卡同语言（白卡 + 投影）；星标保持「米色底 + 金星」。
+ * 视觉与词条卡/完成卡同语言（白卡 + 投影）。图标按空态类型传入：空收藏 = 米底金星（缺省）；
+ * 需要去设置/导入处理的空态用蓝系图标，与主按钮同色，暗示「从这里操作」。
+ * 2026-09-23 修复 #1：新增可选动作按钮（零词库空态的「一键导入官方词库」）——
+ * 蓝底白字大按钮与设置页同语言，≥64dp 适老触摸目标。
+ * ⚠️ 图标参数必须排在 onAction **之前**：调用点用尾随 lambda 传 onAction。
  */
 @Composable
-fun GuideCard(title: String, body: String) {
+fun GuideCard(
+    title: String,
+    body: String,
+    actionLabel: String? = null,
+    icon: ImageVector = Icons.Filled.Star,
+    iconTint: Color = StarGold,
+    haloColor: Color = AppSurface,
+    onAction: (() -> Unit)? = null,
+) {
     Column(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = PageGutter, vertical = 14.dp),
     ) {
         Column(
             Modifier
@@ -378,13 +507,13 @@ fun GuideCard(title: String, body: String) {
                 Modifier
                     .size(88.dp)
                     .clip(RoundedCornerShape(50))
-                    .background(AppSurface),
+                    .background(haloColor),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    Icons.Filled.Star,
+                    icon,
                     contentDescription = null,
-                    tint = StarGold,
+                    tint = iconTint,
                     modifier = Modifier.size(44.dp),
                 )
             }
@@ -400,12 +529,62 @@ fun GuideCard(title: String, body: String) {
             Text(
                 body,
                 fontSize = 24.sp,
+                lineHeight = 36.sp,
                 fontWeight = FontWeight.Bold,
                 color = AppText2,
                 textAlign = TextAlign.Center,
             )
+            if (actionLabel != null && onAction != null) {
+                Spacer(Modifier.height(28.dp))
+                SolidButton(
+                    label = actionLabel,
+                    container = BluePrimary,
+                    onClick = onAction,
+                    icon = Icons.Filled.Add,
+                    height = 72.dp,
+                    fontSize = 24.sp,
+                    shape = ControlShape,
+                )
+            }
         }
         // ⚠️ 不渲染 SwipeHint（「上滑看下一个」）：空收藏池时引导卡是 feed 里唯一的页，
         // 引导上滑会误导（spec/frontend/component-guidelines.md 的方向语义约束）。
+    }
+}
+
+/**
+ * 顶部提醒横幅（2026-09-23 修复 #3）：TTS 引擎缺中文（App 全程无声）与媒体音量为 0
+ * 这类「无声故障」的适老大字提示。橙底暖色（与「显示」按钮同系的警示色）+ 右侧动作按钮。
+ * 独占一行、位于频道栏上方；一次只显示一条（缺中文优先——那个问题更致命）。
+ */
+@Composable
+fun NoticeBanner(text: String, actionLabel: String, onAction: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(OrangeBg)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = OrangeDark,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(12.dp))
+        Box(
+            Modifier
+                .height(56.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(BluePrimary)
+                .clickable(onClick = onAction)
+                .padding(horizontal = 18.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(actionLabel, fontSize = 19.sp, fontWeight = FontWeight.Black, color = Color.White)
+        }
     }
 }

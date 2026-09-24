@@ -2,10 +2,11 @@ package com.knowmo.app.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,7 +25,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -34,12 +42,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -59,10 +68,12 @@ import com.knowmo.app.ui.theme.AppText
 import com.knowmo.app.ui.theme.AppText2
 import com.knowmo.app.ui.theme.BluePrimary
 import com.knowmo.app.ui.theme.CardShapeMedium
+import com.knowmo.app.ui.theme.ControlShape
 import com.knowmo.app.ui.theme.GreenBg
 import com.knowmo.app.ui.theme.GreenKnown
 import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
+import com.knowmo.app.ui.theme.PageGutter
 import com.knowmo.app.ui.theme.cardShadow
 import kotlin.math.roundToInt
 
@@ -80,7 +91,7 @@ private val DONE_BAR_SPACE = 104.dp
  * 视觉语言与 feed 同源：暖米色页底 + 白卡分组（每组一张卡）+ 选中态实心蓝，箭头用矢量图标。
  *
  * 四张卡：
- * ⓪**学习统计**（v14，只读）：总览（已学/学完/收藏）+ 今日战果 + 连续学习天数 + f30 观测小字。
+ * ⓪**学习统计**（v14，只读）：总览（已学/学完/收藏）+ 今日战果 + 连续学习天数 + 分档复习记住率小字（v28，ReviewLog）。
  *   受众拍板 = 家属/年轻人（QYJ：设置本来就不给老人用），信息密度不受「少而大」约束；
  *   纯展示零写入（进出设置页不改学习状态，池型零写入契约不破坏）。
  * ①②每日学习词数量（3/5/10/15/20，缺省 10）+ 每天学几个新词（1/3/5/10，缺省 5）—— 两组同为配额语义、
@@ -123,7 +134,7 @@ fun SettingsScreen(
     onMoveTo: (String, Int) -> Unit,      // v16 拖动落位：目标分区在 order 里的下标
     onSetQuota: (Int) -> Unit,
     onSetQuotaNew: (Int) -> Unit,
-    onBanksChanged: (String?) -> Unit,    // v22 导入/删除后统一刷新；v23 参数 = 首次导入的库 id（null=无）
+    onBanksChanged: (List<String>) -> Unit,  // 导入/删除后统一刷新；参数 = 首次入库的库 id 列表
     onDone: () -> Unit,
 ) {
     val visibleScenes = orderedScenes.filter { it.id !in hiddenIds }
@@ -131,11 +142,16 @@ fun SettingsScreen(
     val progressById = stats.scenes.associateBy { it.scene.id }
 
     // v22「我的词库」会话态：导入结果文案（importOk 区分成功/失败配色）+ 删除的两段确认
-    // v22.1：字节入口 + 取 DISPLAY_NAME（CSV 的库名/库 id 都派生自文件名，见 CustomBank.parseCsv）
+    // v22.1：字节入口 + 取 DISPLAY_NAME；v24（QYJ 2026-09-23）起 DISPLAY_NAME 只用于
+    // 生成命名对话框的预填建议——库名 = 库身份，由用户命名决定（见 CustomBanks KDoc）
     val context = LocalContext.current
     var confirmDeleteId by remember { mutableStateOf<String?>(null) }
+    // 更新官方词库的两段确认（2026-09-24 修复 #3）：更新会覆盖已装的同名库（含家属自己
+    // 导入的同名 CSV），必须第二击确认，不做成一按就覆盖。
+    var confirmUpdateOfficial by remember { mutableStateOf(false) }
     var importMessage by remember { mutableStateOf<String?>(null) }
     var importOk by remember { mutableStateOf(false) }
+    var pendingImport by remember { mutableStateOf<PendingImport?>(null) }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val bytes = runCatching {
@@ -152,18 +168,14 @@ fun SettingsScreen(
                     importOk = false
                     importMessage = "读不到文件内容，请重试。"
                 }
-                else -> runCatching { CustomBanks.import(context, bytes, fileName) }
-                    .onSuccess { outcome ->
-                        importOk = true
-                        importMessage = "已导入「${outcome.bank.name}」（${outcome.bank.terms.size} 条）。" +
-                            if (outcome.isNew) "已自动显示，可回学习界面开始。" else "替换更新完成。"
-                        // v23：首次导入的库 id 交给 AppRoot 做默认显示；重导替换不动显隐
-                        onBanksChanged(if (outcome.isNew) outcome.bank.id else null)
-                    }
-                    .onFailure { e ->
-                        importOk = false
-                        importMessage = e.message ?: "导入失败，请重试。"
-                    }
+                // .csv 扩展名兜底（MIME 白名单里 octet-stream 仍可能选到别的文件）：
+                // 库 id 不再依赖文件名，格式校验留在选文件这一步（原在 CustomBanks.import）
+                !fileName.endsWith(".csv", ignoreCase = true) -> {
+                    importOk = false
+                    importMessage = "仅支持 CSV 词库文件：用 Excel 填三列（词 / 拼音 / 用途），另存为 CSV 即可"
+                }
+                // v24：选好文件先暂存，弹命名对话框——确认库名后才入库
+                else -> pendingImport = PendingImport(bytes, CustomBanks.suggestBankName(fileName))
             }
         }
     }
@@ -184,15 +196,15 @@ fun SettingsScreen(
                 // 与末尾的 DONE_BAR_SPACE 合起来正好等于常驻「完成」条的实际占位
                 //（104dp + 导航栏高度）—— 滚到底时最后一行不会被按钮压住。
                 .navigationBarsPadding()
-                .padding(horizontal = 18.dp),
+                .padding(horizontal = PageGutter),
         ) {
             Spacer(Modifier.height(18.dp))
             Text("设置", fontSize = 32.sp, fontWeight = FontWeight.Black, color = AppText)
             Spacer(Modifier.height(16.dp))
 
-            /* ---------- ⓪ 学习统计（只读：总览 + 今日战果 + f30） ---------- */
+            /* ---------- ⓪ 学习统计（只读：总览 + 今日战果 + 分档复习记住率） ---------- */
             SettingsCard {
-                Text("学习统计", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
+                CardTitle("学习统计")
                 Spacer(Modifier.height(14.dp))
                 // v21 指标格重排：原是一大段行内数字墙（一行里蓝绿蓝三色数字连排，扫读时
                 // 不知道哪个数字配哪个词），改为三格"数字在上、标签在下"的指标块，
@@ -225,10 +237,18 @@ fun SettingsScreen(
                     StatCell("连续学习", "${stats.streak}", "天", GreenKnown, Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(14.dp))
+                // v28 分档复习记住率（调参用，QYJ 看的小字，来自 ReviewLog 作答日志）：
+                // 只统计隔天后的复习检验（elapsed ≥ 1），按作答时的实际间隔分档；
+                // 没有任何隔天复习记录时给占位文案，不显示一排 0%
                 Text(
-                    // f30 观测（调参用，QYJ 看的小字）：忘了率取整百分比，总作答为 0 时省略
-                    "30天词观测：作答 ${stats.f30Total} · 忘了 ${stats.f30Fail}" +
-                        if (stats.f30Total > 0) "（忘了率 ${stats.f30Fail * 100 / stats.f30Total}%）" else "",
+                    run {
+                        val line = stats.retention.filter { it.tests > 0 }
+                            .joinToString("；") {
+                                "${it.label}：${it.known * 100 / it.tests}%（${it.known}/${it.tests}）"
+                            }
+                        if (line.isEmpty()) "复习记住率：学几天后，这里会按间隔分档显示真实记住率。"
+                        else "复习记住率（按间隔）：$line"
+                    },
                     fontSize = 17.sp,
                     color = AppText2,
                 )
@@ -237,14 +257,14 @@ fun SettingsScreen(
 
             /* ---------- ①② 每日学习量（总量 + 新词，同为配额语义合一张卡） ---------- */
             SettingsCard {
-                Text("每日学习词数量", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
+                CardTitle("每日学习词数量")
                 Text("改完明天生效，今天学的不变。", fontSize = 17.sp, color = AppText2)
                 Spacer(Modifier.height(10.dp))
                 QuotaSelector(selected = quota, options = AppSettings.QUOTA_OPTIONS, onSelect = onSetQuota)
                 Spacer(Modifier.height(18.dp))
                 HorizontalDivider(color = AppLine, thickness = 1.dp)
                 Spacer(Modifier.height(18.dp))
-                Text("每天学几个新词", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
+                CardTitle("每天学几个新词")
                 Text("新词固定几个，不被复习挤掉。改完明天生效。", fontSize = 17.sp, color = AppText2)
                 Spacer(Modifier.height(10.dp))
                 QuotaSelector(selected = quotaNew, options = AppSettings.NEW_QUOTA_OPTIONS, onSelect = onSetQuotaNew)
@@ -253,10 +273,12 @@ fun SettingsScreen(
 
             /* ---------- ②.5 我的词库（v22：SAF 导入 JSON 词库文件 → 一个普通自定义分区） ---------- */
             SettingsCard {
-                Text("我的词库", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
+                CardTitle("我的词库")
                 Text(
-                    "导入词库文件：用 Excel 填三列「词 / 拼音 / 用途」另存为 CSV，导入后成为一个新频道并自动显示。" +
-                        "文件名就是词库名；拼音列可以不填，会自动标注（多音字建议核对）。官方词库在仓库 wordbanks 文件夹里，可改后导入。",
+                    "「一键导入官方词库」只装还没装的库，不会覆盖改过的库；要刷新官方词库用下面的「更新官方词库」。" +
+                        "自己做的库用 Excel 填三列「词 / 拼音 / 用途」另存为 CSV，点「导入词库文件」起个名字就成。" +
+                        "想更新自己装的库，导入时用同一个名字（会提示将替换哪个库）。" +
+                        "拼音列可以不填，会自动标注（多音字建议核对）。",
                     fontSize = 17.sp,
                     color = AppText2,
                 )
@@ -273,21 +295,24 @@ fun SettingsScreen(
                                 .height(64.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(
-                                "${bank.icon} ${bank.name}（${bank.terms.size} 条）",
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = AppText,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
+                            // 库名与条数分两行：条数降为次级小字，库名不再被括号挤到截断
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "${bank.icon} ${bank.name}",
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AppText,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text("${bank.terms.size} 条", fontSize = 16.sp, color = AppText2)
+                            }
                             // 两段确认删除（第一击变「确认删除」，再击才删）——少一层弹窗交互
                             DeleteBankButton(confirming = confirming) {
                                 if (confirming) {
                                     CustomBanks.delete(bank.id)
                                     confirmDeleteId = null
-                                    onBanksChanged(null)
+                                    onBanksChanged(emptyList())
                                 } else {
                                     confirmDeleteId = bank.id
                                 }
@@ -299,41 +324,118 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(8.dp))
                 }
+                Spacer(Modifier.height(10.dp))
+                // 一键导入官方词库（2026-09-23 修复 #1）：官方 CSV 已随 APK assets 分发。
+                // 2026-09-24 修复 #3：**只装还没装的库**（skipInstalled）——家属可能用与官方库
+                // 相同的名字导过自己的 CSV（设置页文案就是这么教更新方式的），一键导入若照旧
+                // 无条件入库，会把家属改过的库用官方版悄悄覆盖。更新走下面的「更新官方词库」。
+                SolidButton(
+                    label = "一键导入官方词库",
+                    container = BluePrimary,
+                    icon = Icons.Filled.Add,
+                    shape = ControlShape,
+                    onClick = {
+                        confirmDeleteId = null
+                        confirmUpdateOfficial = false
+                        val result = CustomBanks.importOfficial(context, skipInstalled = true)
+                        val termCount = result.imported.sumOf { it.bank.terms.size }
+                        // 跨库重词跳过总数（2026-09-24 修复 #8）：与手动导入同口径，不再静默丢词
+                        val skippedRepeatCount = result.imported.sumOf { it.skippedRepeats }
+                        importOk = result.imported.isNotEmpty() || result.skippedExisting > 0
+                        importMessage = when {
+                            result.imported.isEmpty() && result.skippedExisting == 0 && result.failed.isEmpty() ->
+                                "没有找到官方词库文件。"
+                            result.imported.isEmpty() && result.skippedExisting == 0 ->
+                                "官方词库导入失败：" + result.failed.joinToString("；")
+                            result.imported.isEmpty() ->
+                                "官方词库都已装过了，没有要新装的。"
+                            else ->
+                                "新装了 ${result.imported.size} 个官方词库，共 $termCount 条词。" +
+                                    (if (skippedRepeatCount > 0) "另有 $skippedRepeatCount 条与已装词库重复，已跳过。" else "") +
+                                    (if (result.skippedExisting > 0) "已装的 ${result.skippedExisting} 个保持原样。" else "") +
+                                    (if (result.failed.isNotEmpty()) "另有 ${result.failed.size} 个失败：${result.failed.joinToString("；")}" else "")
+                        }
+                        onBanksChanged(result.imported.filter { it.isNew }.map { it.bank.id })
+                    },
+                )
+                Spacer(Modifier.height(10.dp))
+                // 更新官方词库（2026-09-24 修复 #3）：显式替换更新入口（skipInstalled = false，
+                // 已装的同 id 库走替换更新、进度保留），两段确认防误触覆盖家属自己导入的同名库
                 Box(
                     Modifier
                         .fillMaxWidth()
                         .height(64.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(BluePrimary)
+                        .clip(ControlShape)
+                        .background(if (confirmUpdateOfficial) OrangeBg else AppSurface)
                         .clickable {
                             confirmDeleteId = null
+                            if (confirmUpdateOfficial) {
+                                val result = CustomBanks.importOfficial(context)
+                                val termCount = result.imported.sumOf { it.bank.terms.size }
+                                val skippedRepeatCount = result.imported.sumOf { it.skippedRepeats }
+                                confirmUpdateOfficial = false
+                                importOk = result.imported.isNotEmpty()
+                                importMessage = when {
+                                    result.imported.isEmpty() && result.failed.isEmpty() ->
+                                        "没有找到官方词库文件。"
+                                    result.imported.isEmpty() ->
+                                        "官方词库更新失败：" + result.failed.joinToString("；")
+                                    else ->
+                                        "官方词库已更新 ${result.imported.size} 个，共 $termCount 条词。" +
+                                            (if (skippedRepeatCount > 0) "另有 $skippedRepeatCount 条与已装词库重复，已跳过。" else "") +
+                                            (if (result.failed.isNotEmpty()) "另有 ${result.failed.size} 个失败：${result.failed.joinToString("；")}" else "")
+                                }
+                                onBanksChanged(result.imported.filter { it.isNew }.map { it.bank.id })
+                            } else {
+                                confirmUpdateOfficial = true
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (confirmUpdateOfficial) "再点一次，确认更新官方词库" else "更新官方词库",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Black,
+                        color = if (confirmUpdateOfficial) OrangeDark else AppText2,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .clip(ControlShape)
+                        .background(AppSurface)
+                        .clickable {
+                            confirmDeleteId = null
+                            confirmUpdateOfficial = false
+                            // 白名单要兜住各应用给 CSV 标的 MIME：微信常见 text/x-csv 与
+                            // application/vnd.ms-excel，缺了会在文件选择器里显示灰色不可选
                             importLauncher.launch(
                                 arrayOf(
                                     "text/csv",
                                     "text/comma-separated-values",
+                                    "text/x-csv",
                                     "text/plain",
                                     "application/octet-stream",
+                                    "application/vnd.ms-excel",
                                 ),
                             )
                         },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("导入词库文件", fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.White)
+                    Text("导入词库文件", fontSize = 22.sp, fontWeight = FontWeight.Black, color = AppText2)
                 }
-                if (importMessage != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        importMessage,
-                        fontSize = 17.sp,
-                        color = if (importOk) GreenKnown else OrangeDark,
-                    )
+                importMessage?.let { msg ->
+                    Spacer(Modifier.height(10.dp))
+                    ImportResultNote(msg, importOk)
                 }
             }
             Spacer(Modifier.height(14.dp))
 
             /* ---------- ③④ 分区显示与顺序（v16：进度 + 显隐 + 排序合并成一张卡，分两段） ---------- */
             SettingsCard {
-                Text("分区显示与顺序", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
+                CardTitle("分区显示与顺序")
                 Text(
                     "长按上面已显示的分区可以拖动排序；未显示的不能拖。点右边的按钮决定它显不显示。",
                     fontSize = 17.sp,
@@ -385,22 +487,55 @@ fun SettingsScreen(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(AppSurface)      // 与页底同色：滚动内容从下方穿过时被遮住，不显脏
+                // 顶端一小段由透明渐变到页底色：滚动内容从下方穿过时柔和淡出，而不是被一条硬边齐刀切断
+                .background(
+                    Brush.verticalGradient(
+                        0f to AppSurface.copy(alpha = 0f),
+                        0.2f to AppSurface,
+                        1f to AppSurface,
+                    ),
+                )
                 .navigationBarsPadding()
-                .padding(horizontal = 18.dp, vertical = 12.dp),
+                .padding(horizontal = PageGutter, vertical = 12.dp),
         ) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(80.dp)
-                    .shadow(4.dp, RoundedCornerShape(24.dp))
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(BluePrimary)
-                    .clickable(onClick = onDone),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("完成", fontSize = 26.sp, fontWeight = FontWeight.Black, color = Color.White)
-            }
+            SolidButton(
+                label = "完成",
+                container = BluePrimary,
+                onClick = onDone,
+                height = 80.dp,
+                fontSize = 26.sp,
+            )
+        }
+
+        /* ---------- v24 命名导入对话框：库名 = 库身份，入库前必须由家属命名 ---------- */
+        pendingImport?.let { pending ->
+            BankNameDialog(
+                suggestedName = pending.suggestedName,
+                // 2026-09-24 修复 #4：输入的名字撞上已装库时明确提示「将替换」——10 词的小库
+                // 整库替换掉 70 条的官方库而界面只说「替换更新完成」，是静默覆盖
+                replaceTarget = { typedName ->
+                    customBanks.firstOrNull { it.name == typedName.trim() }
+                        ?.let { "「${it.name}」（${it.terms.size} 条）" }
+                },
+                onConfirm = { title ->
+                    runCatching { CustomBanks.import(context, pending.bytes, title) }
+                        .onSuccess { outcome ->
+                            importOk = true
+                            importMessage = "已导入「${outcome.bank.name}」（${outcome.bank.terms.size} 条）。" +
+                                // 跨库重词跳过提示：面馆私有库与官方常用字词库有交集属常态，家属需要知道没全收
+                                (if (outcome.skippedRepeats > 0) "另有 ${outcome.skippedRepeats} 条与已装词库重复，已跳过。" else "") +
+                                (if (outcome.isNew) "已自动显示，可回学习界面开始。" else "替换更新完成。")
+                            // 首次入库的库 id 交给 AppRoot 做默认显示；重导替换不动显隐
+                            onBanksChanged(if (outcome.isNew) listOf(outcome.bank.id) else emptyList())
+                        }
+                        .onFailure { e ->
+                            importOk = false
+                            importMessage = e.message ?: "导入失败，请重试。"
+                        }
+                    pendingImport = null
+                },
+                onDismiss = { pendingImport = null },
+            )
         }
     }
 }
@@ -417,6 +552,45 @@ private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
             .padding(horizontal = 20.dp, vertical = 18.dp),
         content = content,
     )
+}
+
+/** 分组标题：左侧蓝色短竖条作锚点，长页滚动时一眼找到每张卡的起点 */
+@Composable
+private fun CardTitle(text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .size(width = 5.dp, height = 22.dp)
+                .clip(RoundedCornerShape(50))
+                .background(BluePrimary),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(text, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppText)
+    }
+}
+
+/**
+ * 导入结果提示条：导入顺利 = 浅绿底，失败 = 浅橙底，配对应图标。正文用深色 AppText 而非绿/橙字——
+ * 17sp 小字在浅色底上用彩色字达不到 7:1，颜色语义交给底色与图标承担。
+ */
+@Composable
+private fun ImportResultNote(message: String, ok: Boolean) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(ControlShape)
+            .background(if (ok) GreenBg else OrangeBg)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Icon(
+            if (ok) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+            contentDescription = null,
+            tint = if (ok) GreenKnown else OrangeDark,
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(message, fontSize = 17.sp, lineHeight = 25.sp, color = AppText)
+    }
 }
 
 /** 统计指标格（v21）：数字在上、标签在下，一行三格。数字 30sp 大字号先被扫到，
@@ -654,31 +828,35 @@ private fun SceneRow(
 }
 
 /**
- * v6 R14 抽出：配额单选组（①每日总量/②每日新词两组同构）——64dp 高档位块、横向滚动。
+ * v6 R14 抽出：配额单选组（①每日总量/②每日新词两组同构）——64dp 高档位块。
  * 选中 = 实心蓝底白字（与频道 chip 同语言），未选中 = 米色块浮在白卡上，不用描边。
+ * 档位**等宽铺满整行**而非横向滚动：旧版 5 档在常见屏宽下末档被裁半截，老人看不出还能滑；
+ * 档位数 ≤5、数字 ≤2 位，360dp 屏上每档仍有约 50dp 宽。
  */
 @Composable
 private fun QuotaSelector(selected: Int, options: List<Int>, onSelect: (Int) -> Unit) {
     Row(
-        Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         options.forEach { n ->
             val isSelected = n == selected
+            val bg by animateColorAsState(if (isSelected) BluePrimary else AppSurface, label = "quotaBg")
+            val fg by animateColorAsState(if (isSelected) Color.White else AppText2, label = "quotaFg")
             Box(
                 Modifier
+                    .weight(1f)
                     .height(64.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (isSelected) BluePrimary else AppSurface)
-                    .clickable { onSelect(n) }
-                    .padding(horizontal = 24.dp),
+                    .clip(ControlShape)
+                    .background(bg)
+                    .clickable { onSelect(n) },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     "$n",
                     fontSize = 26.sp,
                     fontWeight = FontWeight.Black,
-                    color = if (isSelected) Color.White else AppText2,
+                    color = fg,
                 )
             }
         }
@@ -691,11 +869,14 @@ private fun QuotaSelector(selected: Int, options: List<Int>, onSelect: (Int) -> 
  */
 @Composable
 private fun DeleteBankButton(confirming: Boolean, onClick: () -> Unit) {
+    // 进入「确认删除」态时颜色渐变加深：比瞬间跳色更容易被察觉到「按钮变了，要再点一次」
+    val bg by animateColorAsState(if (confirming) OrangeDark else OrangeBg, label = "deleteBg")
+    val fg by animateColorAsState(if (confirming) Color.White else OrangeDark, label = "deleteFg")
     Box(
         Modifier
             .size(width = 96.dp, height = 56.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(if (confirming) OrangeDark else OrangeBg)
+            .background(bg)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -703,7 +884,7 @@ private fun DeleteBankButton(confirming: Boolean, onClick: () -> Unit) {
             if (confirming) "确认删除" else "删除",
             fontSize = 18.sp,
             fontWeight = FontWeight.Black,
-            color = if (confirming) Color.White else OrangeDark,
+            color = fg,
             textAlign = TextAlign.Center,
         )
     }
@@ -734,5 +915,107 @@ private fun ShowHideButton(isHidden: Boolean, onClick: () -> Unit) {
             color = if (isHidden) OrangeDark else GreenKnown,
             textAlign = TextAlign.Center,
         )
+    }
+}
+
+/** v24 命名导入的暂存体：SAF 读到的字节 + 由文件名生成的预填建议名（确认后才入库） */
+private data class PendingImport(val bytes: ByteArray, val suggestedName: String)
+
+/**
+ * v24 命名导入对话框（QYJ 2026-09-23 拍板：库名由用户命名，不再取文件名）。
+ * - 预填建议来自文件名（[CustomBanks.suggestBankName]，已剥「(1)/- 副本」后缀）——重导
+ *   同一文件时预填稳定，直接确认即替换更新；
+ * - **重导更新要用同一个库名**（换名 = 新库 id，旧进度失联）——说明文字必须写清，
+ *   这是新契约里家属最容易踩的坑；
+ * - 输入限 8 字（库显示名上限，输入即所见）；空名置灰导入按钮；
+ * - [replaceTarget] = 输入名命中已装库时返回其展示片段（名字 + 条数），非空则在确认按钮
+ *   上方标出「将替换已装的 X」——同名 = 整库替换，不能只靠结果文案事后告知（2026-09-24 修复 #4）。
+ */
+@Composable
+private fun BankNameDialog(
+    suggestedName: String,
+    replaceTarget: (String) -> String? = { null },
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember { mutableStateOf(suggestedName) }
+    val valid = name.isNotBlank()
+    val replaceWarning = replaceTarget(name.trim())
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.4f))
+            .imePadding()   // 软键盘弹出时对话框整体上移，输入框不被键盘盖住
+            .clickable(onClick = onDismiss),   // 点遮罩 = 取消
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .padding(horizontal = 24.dp)
+                .fillMaxWidth()
+                .cardShadow(CardShapeMedium, elevated = true)
+                .clip(CardShapeMedium)
+                .background(Color.White)
+                .padding(horizontal = 22.dp, vertical = 24.dp)
+                // 消费卡内点击，防穿透到遮罩的「点外关闭」
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) {},
+        ) {
+            Text("给词库起个名字", fontSize = 26.sp, fontWeight = FontWeight.Black, color = AppText)
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "想更新已装的库，就用和当时一样的名字（换名字会当成新的库）。",
+                fontSize = 17.sp,
+                color = AppText2,
+            )
+            Spacer(Modifier.height(16.dp))
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it.take(8) },
+                singleLine = true,
+                textStyle = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (replaceWarning != null) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "将替换已装的$replaceWarning，学习进度保留。",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = OrangeDark,
+                )
+            }
+            Spacer(Modifier.height(18.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(64.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (valid) BluePrimary else AppLine)
+                    .clickable(enabled = valid) { onConfirm(name.trim()) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "导入",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Black,
+                    color = if (valid) Color.White else AppText2,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(AppSurface)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("取消", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = AppText2)
+            }
+        }
     }
 }

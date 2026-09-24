@@ -28,7 +28,9 @@ android {
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
             } else {
-                // 本地无 release keystore：借用 debug 签名，便于本地验证 release 构建
+                // 本地无 release keystore：借用 debug 签名便于本地验证——但产物不可覆盖安装正式版
+                // APK，静默回退会让人误装，构建时显式警告
+                logger.lifecycle("WARNING: KEYSTORE_FILE 未配置，release 构建使用 debug 签名，产物无法覆盖安装正式版 APK")
                 storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
                 storePassword = "android"
                 keyAlias = "androiddebugkey"
@@ -52,6 +54,15 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+
+    // 官方词库打进 APK assets（2026-09-23 修复 #1：首次使用门槛）：wordbanks/ 仍是唯一数据源，
+    // 构建/CI 校验照旧在仓库根的 CSV 上做；App 端「一键导入官方词库」从 assets 读同一批文件
+    //（见 CustomBanks.importOfficial），家属不再需要去 GitHub 下载再传到手机。
+    sourceSets {
+        getByName("main") {
+            assets.srcDirs("../../wordbanks")
+        }
     }
 }
 

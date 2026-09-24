@@ -34,6 +34,13 @@ val StarGold = Color(0xFFF9A825)   // v6 收藏星按钮（藏 = 金色实心 �
 val CardShapeLarge: Shape = RoundedCornerShape(28.dp)
 val CardShapeMedium: Shape = RoundedCornerShape(24.dp)
 
+/** 大按钮圆角（作答按钮 / 作答结果条 / 设置页「完成」）；控件圆角（档位块 / 导入按钮 / 提示条），低一档 */
+val ButtonShape: Shape = RoundedCornerShape(24.dp)
+val ControlShape: Shape = RoundedCornerShape(16.dp)
+
+/** 页面左右版心：feed 三种卡与设置页共用，切换页面时卡片左右边缘不跳 */
+val PageGutter = 18.dp
+
 /**
  * 卡片投影：单层大 blur 阴影在浅色底上是"脏色块"，这里拆成**环境层（大而淡）+ 接触层（小而深）**
  * 两层叠加，接近真实纸张浮起的光感。spotColor 用暖深灰而非纯黑——页面底是暖米色，
@@ -56,10 +63,15 @@ fun KnowMoTheme(content: @Composable () -> Unit) {
             primary = BluePrimary,
             onPrimary = Color.White,
             secondary = OrangeAccent,
-            background = Color.White,
+            // background 与页底同色：Material 组件取主题底色时不再露出冷白
+            background = AppSurface,
             surface = Color.White,
+            surfaceVariant = AppSurface,
             onBackground = AppText,
             onSurface = AppText,
+            onSurfaceVariant = AppText2,
+            outline = AppLine,
+            error = RedForgot,
         ),
     ) {
         content()

@@ -1,8 +1,11 @@
 package com.knowmo.app.ui
 
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -11,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,13 +25,13 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.TextUnit
@@ -40,13 +44,18 @@ import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.AppText
 import com.knowmo.app.ui.theme.AppText2
 import com.knowmo.app.ui.theme.BluePrimary
+import com.knowmo.app.ui.theme.ButtonShape
 import com.knowmo.app.ui.theme.CardShapeLarge
 import com.knowmo.app.ui.theme.GreenBg
 import com.knowmo.app.ui.theme.GreenKnown
 import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
+import com.knowmo.app.ui.theme.PageGutter
 import com.knowmo.app.ui.theme.RedForgot
 import com.knowmo.app.ui.theme.cardShadow
+
+/** 作答区固定高度：按钮与作答结果条同高，作答前后词块不因底部区高度变化而上下跳动 */
+private val ANSWER_ZONE_H = 96.dp
 
 /**
  * 学习卡（v8 连击 + 全显拼音，design.md §13.2）：形态由调度器运行时计算——
@@ -83,10 +92,12 @@ fun TermCard(
     Column(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = PageGutter, vertical = 14.dp),
     ) {
         // 卡片主体：白卡 + 柔和投影浮在暖米色页底上（替代描边，层次更柔和）；
-        // 点任意处重听「词 + 用途」，点单字读整词（v7）
+        // 点任意处重听「词 + 用途」，点单字读整词（v7）。
+        // 涟漪改淡蓝：整卡是一个大点击区，默认灰涟漪会把整张白卡刷成脏灰（实机截图可见），
+        // 淡蓝与拼音同色系，读作「正在朗读」而不是「卡片变灰了」
         Column(
             Modifier
                 .weight(1f)
@@ -94,7 +105,11 @@ fun TermCard(
                 .cardShadow(CardShapeLarge)
                 .clip(CardShapeLarge)
                 .background(Color.White)
-                .clickable { onSpeakTerm() }
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = ripple(color = BluePrimary),
+                    onClick = onSpeakTerm,
+                )
                 .padding(horizontal = 20.dp, vertical = 16.dp),
         ) {
             // 卡头：徽标居左、收藏按钮居右（按钮挪出词块区 → 词块可整幅居中）
@@ -193,63 +208,96 @@ fun TermCard(
 
         Spacer(Modifier.height(14.dp))
 
-        // 底部动作区：任务卡未作答 → 认识/忘了大按钮；已作答 → 结果文案；
+        // 底部动作区：任务卡未作答 → 认识/忘了大按钮；已作答 → 结果条（同高位置淡入替换）；
         // 浏览卡（FREE）→ 无 resultText，只渲染上滑引导
-        if (isExam && !revealed) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                FeedbackButton(
-                    icon = Icons.Filled.Close, label = "忘了",
-                    container = RedForgot,
-                    onClick = { onAnswer(false) },
-                    modifier = Modifier.weight(1f),
-                )
-                FeedbackButton(
-                    icon = Icons.Filled.Check, label = "认识",
-                    container = GreenKnown,
-                    onClick = { onAnswer(true) },
-                    modifier = Modifier.weight(1f),
-                )
+        if (isExam) {
+            Crossfade(
+                targetState = revealed,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = ANSWER_ZONE_H),
+                label = "answerZone",
+            ) { answered ->
+                if (!answered) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        SolidButton(
+                            label = "忘了",
+                            container = RedForgot,
+                            onClick = { onAnswer(false) },
+                            modifier = Modifier.weight(1f),
+                            icon = Icons.Filled.Close,
+                            height = ANSWER_ZONE_H,
+                            fontSize = 26.sp,
+                            iconSize = 38.dp,
+                        )
+                        SolidButton(
+                            label = "认识",
+                            container = GreenKnown,
+                            onClick = { onAnswer(true) },
+                            modifier = Modifier.weight(1f),
+                            icon = Icons.Filled.Check,
+                            height = ANSWER_ZONE_H,
+                            fontSize = 26.sp,
+                            iconSize = 38.dp,
+                        )
+                    }
+                } else {
+                    resultText?.let { AnswerResultBar(it) }
+                }
             }
         } else {
-            resultText?.let { msg ->
-                // 展示层去掉 👍/💪 emoji、改矢量图标承载正/误语义（适老化硬约束：
-                // 关键语义不用 emoji 表达）；startsWith 判定保留——AppRoot 话术仍含 emoji 前缀。
-                // FlowRow 居中：短文案单行居中，最长升级文案超宽时自动换行不溢出
-                val known = msg.startsWith("👍")
-                val display = if (known) msg.removePrefix("👍").trim() else msg.removeSuffix("💪").trim()
-                FlowRow(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(if (known) GreenBg else OrangeBg)
-                        .padding(vertical = 14.dp, horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    Icon(
-                        if (known) Icons.Filled.Check else Icons.Filled.Close,
-                        contentDescription = null,
-                        tint = if (known) GreenKnown else OrangeDark,
-                        modifier = Modifier
-                            .padding(top = 3.dp)
-                            .size(24.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        display,
-                        fontSize = 20.sp,
-                        lineHeight = 30.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (known) GreenKnown else OrangeDark,
-                    )
-                }
-                Spacer(Modifier.height(6.dp))
-            }
             // SwipeHint 只在**浏览卡**（FREE）渲染：v7 考试阶段锁滑（userScrollEnabled=false），
             // 考试卡作答后翻页由自动前进接管（v5 R8）——此时提示「上滑看下一个」是误导
             // （与 implement.md v7 步骤 4 从 DoneCard 移除 SwipeHint 的理由同源；check 修复）。
-            // FREE 卡没有 resultText，不受上面分支影响，恒显示上滑引导。
-            if (!isExam) SwipeHint()
+            SwipeHint()
         }
+    }
+}
+
+/**
+ * 作答结果条：展示层去掉 👍/💪 emoji、改矢量图标承载正/误语义（适老化硬约束：
+ * 关键语义不用 emoji 表达）；startsWith 判定保留——AppRoot 话术仍含 emoji 前缀。
+ * 与作答按钮同高同圆角，在原位置替换按钮；超长升级文案自动换行（Text 用非填充 weight 收窄）。
+ */
+@Composable
+private fun AnswerResultBar(msg: String) {
+    val known = msg.startsWith("👍")
+    val display = if (known) msg.removePrefix("👍").trim() else msg.removeSuffix("💪").trim()
+    val fg = if (known) GreenKnown else OrangeDark
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = ANSWER_ZONE_H)
+            .clip(ButtonShape)
+            .background(if (known) GreenBg else OrangeBg)
+            .padding(vertical = 12.dp, horizontal = 16.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // 图标垫白色圆底：浅绿/浅橙底上的细线图标偏弱，圆底让对错一眼可辨
+        Box(
+            Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                if (known) Icons.Filled.Check else Icons.Filled.Close,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(28.dp),
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            display,
+            fontSize = 22.sp,
+            lineHeight = 30.sp,
+            fontWeight = FontWeight.Bold,
+            color = fg,
+            modifier = Modifier.weight(1f, fill = false),
+        )
     }
 }
 
@@ -286,33 +334,5 @@ private fun CharPinyinCell(
             fontWeight = FontWeight.Bold,
             color = BluePrimary,
         )
-    }
-}
-
-/**
- * 复习反馈按钮：矢量 √ / × 图标（Material 核心集，跨设备渲染一致、随字号缩放，
- * 满足适老化硬约束「关键语义不用 emoji 表达」）。
- */
-@Composable
-private fun FeedbackButton(
-    icon: ImageVector,
-    label: String,
-    container: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier
-            .height(96.dp)
-            .shadow(4.dp, RoundedCornerShape(24.dp))
-            .clip(RoundedCornerShape(24.dp))
-            .background(container)
-            .clickable(onClick = onClick),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(38.dp))
-        Spacer(Modifier.width(8.dp))
-        Text(label, fontSize = 26.sp, fontWeight = FontWeight.Black, color = Color.White)
     }
 }

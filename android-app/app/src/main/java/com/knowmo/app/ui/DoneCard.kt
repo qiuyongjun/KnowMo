@@ -1,34 +1,42 @@
 package com.knowmo.app.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.knowmo.app.ui.theme.AppSurface
+import com.knowmo.app.ui.theme.AppText
 import com.knowmo.app.ui.theme.AppText2
+import com.knowmo.app.ui.theme.BlueBg
 import com.knowmo.app.ui.theme.BluePrimary
 import com.knowmo.app.ui.theme.CardShapeLarge
+import com.knowmo.app.ui.theme.OrangeBg
 import com.knowmo.app.ui.theme.OrangeDark
+import com.knowmo.app.ui.theme.PageGutter
 import com.knowmo.app.ui.theme.cardShadow
 
 /**
@@ -59,10 +67,15 @@ import com.knowmo.app.ui.theme.cardShadow
  */
 @Composable
 fun DoneCard(words: Int, forgot: Int, inBrowse: Boolean) {
+    // 庆祝徽章弹入：从 0.5 倍带回弹放大到原尺寸，给「做完了」一个瞬间的仪式感（每次进入本卡重放）
+    val badgeScale = remember { Animatable(0.5f) }
+    LaunchedEffect(Unit) {
+        badgeScale.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow))
+    }
     Column(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = PageGutter, vertical = 14.dp),
     ) {
         Column(
             Modifier
@@ -79,9 +92,13 @@ fun DoneCard(words: Int, forgot: Int, inBrowse: Boolean) {
             // 与 GuideCard 的星标底托同一手法；宽 110dp > 高 96dp——🎉 字形横向略宽，正圆会顶边
             Box(
                 Modifier
+                    .graphicsLayer {
+                        scaleX = badgeScale.value
+                        scaleY = badgeScale.value
+                    }
                     .size(width = 110.dp, height = 96.dp)
                     .clip(RoundedCornerShape(50))
-                    .background(AppSurface),
+                    .background(OrangeBg),
                 contentAlignment = Alignment.Center,
             ) {
                 Text("🎉", fontSize = 64.sp)
@@ -91,28 +108,17 @@ fun DoneCard(words: Int, forgot: Int, inBrowse: Boolean) {
                 "今日任务完成！",
                 fontSize = 32.sp,
                 fontWeight = FontWeight.Black,
+                color = AppText,
                 textAlign = TextAlign.Center,
             )
-            Spacer(Modifier.height(10.dp))
-            // 战果两行呈现 + 数字放大着色：老年用户先扫到大数字、再读文字（成就反馈更直接）
-            Text(
-                buildAnnotatedString {
-                    append("今天学完了 ")
-                    withStyle(SpanStyle(color = BluePrimary, fontSize = 30.sp, fontWeight = FontWeight.Black)) {
-                        append("$words")
-                    }
-                    append(" 个词\n忘了 ")
-                    withStyle(SpanStyle(color = OrangeDark, fontSize = 30.sp, fontWeight = FontWeight.Black)) {
-                        append("$forgot")
-                    }
-                    append(" 次")
-                },
-                fontSize = 22.sp,
-                lineHeight = 40.sp,
-                color = AppText2,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(22.dp))
+            // 战果两格指标块（与设置页统计同语言：大数字在上、标签在下）：老年用户先扫到大数字，
+            // 色块区分「学完」与「忘了」两类信息，不必读完整句才知道哪个数配哪个词
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                DoneStat("$words", "个词", "今天学完", BluePrimary, BlueBg, Modifier.weight(1f))
+                DoneStat("$forgot", "次", "忘了", OrangeDark, OrangeBg, Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(24.dp))
             // v9（prd 第 1 条）：上滑引导取代 v7 确认按钮——到达本卡即转浏览模式，
             // 上滑进入推荐浏览。v21.1（QYJ 反馈）：浏览模式**不再渲染「随便看看吧」**——
             // 底部 SwipeHint（「上滑看下一个」）已承担引导职责，再显示一句是重复。
@@ -127,5 +133,37 @@ fun DoneCard(words: Int, forgot: Int, inBrowse: Boolean) {
             }
         }
         SwipeHint()
+    }
+}
+
+/** 完成卡战果指标块：数字 44sp 着色（大字号，浅底上满足 AAA 大字 4.5:1），单位与标签用正文次级色 */
+@Composable
+private fun DoneStat(
+    value: String,
+    unit: String,
+    label: String,
+    fg: Color,
+    bg: Color,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(bg)
+            .padding(vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(value, fontSize = 44.sp, fontWeight = FontWeight.Black, color = fg)
+            Spacer(Modifier.width(4.dp))
+            Text(
+                unit,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = AppText2,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
+        Text(label, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = AppText2)
     }
 }

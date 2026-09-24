@@ -1,5 +1,8 @@
 package com.knowmo.app.ui
 
+import android.content.Context
+import android.content.Intent
+import android.media.AudioManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,7 +12,11 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -19,6 +26,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.knowmo.app.data.AppSettings
 import com.knowmo.app.data.AnswerResult
 import com.knowmo.app.data.CustomBanks
@@ -26,8 +37,11 @@ import com.knowmo.app.data.STUDY_TERMS
 import com.knowmo.app.data.StudyRepository
 import com.knowmo.app.data.Term
 import com.knowmo.app.data.sceneName
+import com.knowmo.app.tts.ChineseVoiceState
 import com.knowmo.app.tts.TTSSpeaker
 import com.knowmo.app.ui.theme.AppSurface
+import com.knowmo.app.ui.theme.BlueBg
+import com.knowmo.app.ui.theme.BluePrimary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -146,8 +160,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // 战果数字本身（完成卡 / 播报）**不缓存**，直接读 repo 的持久口径 ——
     // 本地累加或本地镜像都得与 repo 的写入严格同步，任一处漏改就漂移。
     var answerTick by remember { mutableStateOf(0) }
-    // v23：词库增删计数器——导入/删除后 +1，作装载 effect 的 key（当前频道重载以反映新词库；
-    // 导入空库首词后推荐频道从引导态立刻进入学习流，不必等次日重建队列）
+    // v23：词库/显隐结构变化计数器——导入/删除词库、显隐开关后 +1，作装载 effect 的 key
+    //（当前频道重载以反映新词库/新范围；空态引导页写着「分区都隐藏了」，开启分区后必须换掉）
     var bankTick by remember { mutableStateOf(0) }
     // v23：频道切换播报标记——装载 effect 的 key 加了 bankTick 后，「播不播换频道语」不能再由
     // 「非首次装载」推断（bankTick 重载不是切频道），改为 onSelect 里显式置位
@@ -193,6 +207,60 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     val channelSnapshots = remember { mutableMapOf<String, ChannelSnapshot>() }
     val uiScope = rememberCoroutineScope()
 
+    // ===== 2026-09-23 修复 #2：跨零点会话卡死 =====
+    // App 开着跨过零点后，repo 的日期已变而 pages 仍是昨日队列——answerCard 对旧日期
+    // 队列返回 null，任务阶段又锁滑（userScrollEnabled=false）：按「认识 / 忘了」毫无
+    // 反应也滑不动，只能切频道或重启。检测两个时机：ON_RESUME（后台跨零点回来）+
+    // 前台每分钟轮询（一直开着跨零点）。跨日动作 = 作废全部会话态并 dayTick++ 触发
+    // 当前频道完整重装载（rec 的 ensureQueue 按新日期重建队列；池型频道按 D6 跨日口径重洗）。
+    var sessionDate by remember { mutableStateOf(repo.today()) }
+    var dayTick by remember { mutableStateOf(0) }
+    fun checkDayRollover() {
+        val today = repo.today()
+        if (today == sessionDate) return
+        sessionDate = today
+        channelSnapshots.clear()   // 快照的 date 判定本会作废，clear 让语义显式
+        revealed.clear()
+        results.clear()
+        dayTick++
+        // 静默换卡会让老人困惑「怎么内容突然变了」；跨日重装载前先播一句
+        tts.speak("新的一天。")
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                checkDayRollover()
+                // 修复 #3：用户按横幅提示装好中文引擎回来 → 免重启恢复朗读
+                tts.recheckLanguage()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000)
+            checkDayRollover()
+        }
+    }
+
+    // ===== 2026-09-23 修复 #3：无声故障（缺中文引擎 / 媒体静音）的适老提示 =====
+    // TTSSpeaker.chineseVoice 与音量都是普通 @Volatile / 系统值，重组不感知——用低频
+    // 轮询（2s，成本可忽略）落到 Compose 状态驱动横幅；静音横幅恢复音量自动消失。
+    val context = LocalContext.current
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    var chineseVoice by remember { mutableStateOf(ChineseVoiceState.INIT) }
+    var mediaMuted by remember { mutableStateOf(false) }
+    var mutedDismissed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            chineseVoice = tts.chineseVoice
+            mediaMuted = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) == 0
+            delay(2_000)
+        }
+    }
+
     // feed 页面：队列型 = 当日队列 + 总结卡（条件存在）+ 温故流追加页；池型（分区）= 池型浏览页（无限流）
     var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
     var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 池型抽取池：顺序抽取，池空重洗（两个频道类型共用）
@@ -230,7 +298,11 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         }
     }
 
-    fun termById(id: String): Term? = STUDY_TERMS.firstOrNull { it.id == id }
+    // 词条 id 索引由 CustomBanks 在导入/删除/装载时重建（2026-09-24 修复 #1），这里直接读。
+    // 不能在界面层 remember(bankTick) 缓存：下方翻页监听（LaunchedEffect(pagerState)）只在
+    // 首次组合启动，闭包捕获的本地缓存跨 bankTick 不更新——空库当天一键导入后，补浏览页
+    // 会一直用旧（空）词表，浏览模式一张卡都出不来。
+    fun termById(id: String): Term? = CustomBanks.termById(id)
 
     fun nextSeq(): Int = ++seqGen
 
@@ -361,7 +433,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // v9：rec 装载先看 `q.confirmed`——true 直接进浏览模式（**完成卡保留在首位**，回滑可看战果，
     // 上滑进入浏览流；当日重启不重放任务卡）；false 走任务模式（断点恢复按卡实例 answered[i]
     // 还原作答态，仍锁滑）。
-    LaunchedEffect(channel, bankTick) {
+    // 2026-09-23 修复 #2：key 增加 dayTick——跨零点由 checkDayRollover 置位，当前频道
+    // 完整重装载（旧 pages 挂在昨日的队列上，answerCard 全部返回 null = 会话卡死）。
+    LaunchedEffect(channel, bankTick, dayTick) {
         // v18：App 首次装载（冷启动 / 后台进程被杀后切换回来重建）→ 播与**恢复后状态**匹配的欢迎语。
         // 旧实现是写死的「上滑开始学习」（LaunchedEffect(Unit)）：任务阶段是**锁滑**的（唯一前进方式
         // 是作答，v9），切回来一听「上滑」就是错误指示 —— 欢迎语必须按队列状态分流。
@@ -540,32 +614,75 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         uiScope.launch { pagerState.scrollToPage(target) }
     }
 
+    /** 词库结构变化后的统一刷新（2026-09-23 抽取：设置页导入/删除与空态一键导入共用，
+     *  原是 SettingsScreen.onBanksChanged 的内联实现）。
+     *  newShownIds = 本次**首次入库**的库 id——「显式导入 = 明确想学」→ 默认显示；
+     *  重导替换不在列表里，不动用户手动改过的显隐。 */
+    fun applyBanksChanged(newShownIds: List<String>) {
+        settings.rescanScenes()
+        newShownIds.forEach { settings.setSceneVisible(it, true) }
+        // 词库已变，会话快照里的 Term 对象可能是旧库内容（删除/替换后切回该频道会恢复出
+        // 已删除的词或旧用途说明）——全部作废，切回时走完整装载重新取词。
+        channelSnapshots.clear()
+        repo.invalidateStaleQueue()
+        customBanks = CustomBanks.all
+        orderedScenes = settings.orderedScenes()
+        hiddenIds = settings.hiddenIds()
+        stats = repo.studyStats()
+        bankTick++
+    }
+
+    /** 一键导入官方词库（2026-09-23 修复 #1）：assets 里的官方 CSV 逐库走与手动导入
+     *  相同的 parseCsv 校验入库，成功后同一套刷新。结果用语音反馈——空态场景下老人
+     *  看着引导页，导入成功后 bankTick 会把 Guide 页换成真正的任务卡。
+     *  skipInstalled = 只补缺不覆盖（2026-09-24 修复 #3）：家属同名导入过的库不被官方版覆盖。 */
+    fun importOfficialBanks() {
+        val result = CustomBanks.importOfficial(context, skipInstalled = true)
+        applyBanksChanged(result.imported.filter { it.isNew }.map { it.bank.id })
+        when {
+            result.imported.isNotEmpty() -> tts.speak("词库装好了，可以开始学习了。")
+            result.skippedExisting > 0 -> tts.speak("词库已经装好了。")
+            else -> tts.speak("词库没有装上，请家人帮忙看看。")
+        }
+    }
+
     /** 作答（认识/忘了）：连击层 + 间隔层双层并存（prd v8 / design.md §13.2）。作答入口只剩
      *  **每日任务卡**（温故流/分区/收藏都是浏览卡，没有 √/×）——战果只在每日任务频道产生，
      *  故完成卡天然只统计每日任务（v16：战果数字不再缓存，完成卡与播报都直接读 repo 的持久口径）。
-     *  - **间隔层**：新词首次认识先建立 {1,今天,0}；已学词完成当日 3 次认识后才推进间隔；首见忘了 →
-     *    {1,今天,lapses+1}。SM-2 动态间隔 + restoreTo 兑现 + 封顶分级，全在 repo.answerCard 内。
-     *  - **连击层**（v8）：answerCard 返回连击计数 count——`count < DAILY_COMBO_TARGET` →
-     *    仓库事务内插入重复卡（同词不连续/紧邻，prd v8 第 1 条）；count == 3 → 移出当日队列。
-     *    忘了 → 连击清零，当日同样打散重现（重新连击 3 次才能移出）。
+     *  - **间隔层**：新词首次认识先建立 {1,今天,0}；复习词（隔天首次作答）答「认识」即推进间隔（v28）；
+     *    新词/当天答错过的词完成当日连击后等下次复习检验再推进；首见忘了只建状态不记遗忘（v28）。
+     *    SM-2 动态间隔 + restoreTo 兑现 + 封顶分级，全在 repo.answerCard 内。
+     *  - **连击层**（v8）：answerCard 返回连击计数 count——`count < result.target` →
+     *    仓库事务内插入重复卡（同词不连续/紧邻，prd v8 第 1 条）；count == target → 移出当日队列
+     *    （v28：复习检验 target=1，新词/当天答错过的词 target=3）。
+     *    忘了 → 连击清零，当日同样打散重现（重新连击到目标才能移出）。
      *  - **播报分级**（v21.1 起）：连击未满 → 随机夸奖（ANSWER_PRAISE，不报剩余次数）；
-     *    满 3 → 学会啦（upgraded 才播天数，闸门挡住不播——沿用 v5 R11 口径）；
+     *    满目标 → 学会啦（upgraded 才播天数，闸门挡住不播——沿用 v5 R11 口径）；
      *    忘了 → 「没关系，再学一遍」（不变）。
      *  展开/文案按 seq（本次出现）记录；作答同时按卡实例落库 answered（断点恢复用，design.md §9.1）。 */
         fun answer(p: Page.TermPage, known: Boolean) {
             val cardId = p.cardId ?: return
             if (revealed[p.seq] == true) return
             val t = p.t
-            val result = repo.answerCard(cardId, known) ?: return
+            val result = repo.answerCard(cardId, known)
+            if (result == null) {
+                // 队列日期不符（App 开着跨零点）返回 null：立即检查跨日并重装载，
+                // 不等最多 60s 的前台轮询——否则这段时间按「认识 / 忘了」毫无反应
+                //（2026-09-24 修复 #5）。
+                checkDayRollover()
+                return
+            }
             revealed[p.seq] = true
             if (known) {
                 val count = result.count
                 val upgraded = result.upgraded
                 val daysAfter = result.daysAfter
-                // 播报（v8 连击分级 + v5 R11 升级口径：满 3 且升级才报天数）
+                // 播报（v8 连击分级 + v5 R11 升级口径：满目标且升级才报天数）
                 // v21.1（QYJ 2026-09-22 三项拍板）：连击未满 → 随机夸奖池（不报次数）；
-                // 满 3 升级 → 保留「N 天后再来复习」（复习计划信息，只在升级那刻说一次）；忘了 → 不动
-                val target = StudyRepository.DAILY_COMBO_TARGET
+                // 满目标升级 → 保留「N 天后再来复习」（复习计划信息，只在升级那刻说一次）；忘了 → 不动
+                // v28：目标连击数从 AnswerResult 读——复习检验 1 次「认识」即过关，
+                // 不能再用固定的 DAILY_COMBO_TARGET(3) 判断，否则复习卡会说成「真棒」而漏报复习计划
+                val target = result.target
                 val (msg, spoken) = when {
                     count < target -> {
                         val praise = ANSWER_PRAISE.random()
@@ -586,7 +703,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
             insertRepeatCard(t, p, result)
             // v16：本次作答一定会改间隔层，徽章可能要重算 —— 计数器无脑 +1（战果数字直接读 repo，不在这里缓存）
             answerTick++
-            // v5 R7 总结卡条件出现：全部任务词连击满 3 移出（无待处理卡）→ 总结卡此时才出现在队尾
+            // v5 R7 总结卡条件出现：全部任务词连击满各自目标移出（无待处理卡）→ 总结卡此时才出现在队尾
             syncDonePage()
             // v5 R8 作答后自动前进（§5.5）：置触发键，由下面 keyed 该 seq 的 effect 等播报念完再翻页
             advanceAfterSpeechSeq = p.seq
@@ -601,6 +718,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage to pagerState.isScrollInProgress }
             .collect { (idx, scrolling) ->
+                // 设置页打开期间不响应停稳事件（2026-09-23 复审修复）：导入/删除词库或显隐变化
+                // 会在设置页背后重载当前频道并跳页，若照常消费停稳事件，会朗读设置页背后的卡片
+                //（设置页是全屏 overlay，期间停稳事件只来自程序跳页，屏蔽无副作用）。
+                if (showSettings) return@collect
                 if (scrolling) {
                     tts.stop()
                     return@collect
@@ -669,6 +790,21 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 .statusBarsPadding()
                 .navigationBarsPadding(),
         ) {
+            // 无声故障横幅（2026-09-23 修复 #3）：缺中文引擎优先于静音提示——前者整个 App
+            // 不出声且必须装引擎才能修，后者通常调一下音量就好。「去设置」跳系统 TTS 设置，
+            // 装好引擎回来 ON_RESUME 自动重检（免重启）。
+            when {
+                chineseVoice == ChineseVoiceState.MISSING -> NoticeBanner(
+                    text = "手机缺少中文朗读，请家人装一个中文语音引擎",
+                    actionLabel = "去设置",
+                ) {
+                    runCatching { context.startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
+                }
+                mediaMuted && !mutedDismissed -> NoticeBanner(
+                    text = "手机静音中，听不到朗读",
+                    actionLabel = "知道了",
+                ) { mutedDismissed = true }   // 本次会话不再提醒；恢复音量横幅也会自动消失
+            }
             // v6：scenes = 设置过滤排序后的可见分区（rec/fav 固定渲染在前列，不参与隐藏/排序）；
             // onOpenSettings 由推荐 tab 连点 5 次触发（检测在 ChannelBar 内部）
             ChannelBar(
@@ -765,11 +901,21 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                     )
                     Page.Guide ->
                         // 空态文案三分（2026-09-23 复审修复 #2，与 cardSpeech 同一判据）：
-                        // 全库无词 → 导入引导；推荐频道 + 有词 → 分区全隐藏引导；否则空收藏引导
+                        // 全库无词 → 导入引导（v23.1 起带「一键导入」按钮，修复 #1：官方词库
+                        // 随 APK 分发，家属不用再去 GitHub 下载 CSV）；推荐频道 + 有词 →
+                        // 分区全隐藏引导；否则空收藏引导
                         if (STUDY_TERMS.isEmpty()) {
-                            GuideCard(EMPTY_BANK_GUIDE_TITLE, EMPTY_BANK_GUIDE_BODY)
+                            GuideCard(
+                                EMPTY_BANK_GUIDE_TITLE, EMPTY_BANK_GUIDE_BODY, "一键导入官方词库",
+                                icon = Icons.Filled.Add, iconTint = BluePrimary, haloColor = BlueBg,
+                            ) {
+                                importOfficialBanks()
+                            }
                         } else if (channel == StudyRepository.CHANNEL_DAILY) {
-                            GuideCard(HIDDEN_ALL_GUIDE_TITLE, HIDDEN_ALL_GUIDE_BODY)
+                            GuideCard(
+                                HIDDEN_ALL_GUIDE_TITLE, HIDDEN_ALL_GUIDE_BODY,
+                                icon = Icons.Filled.Settings, iconTint = BluePrimary, haloColor = BlueBg,
+                            )
                         } else {
                             GuideCard(FAV_GUIDE_TITLE, FAV_GUIDE_BODY)
                         }
@@ -788,26 +934,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 quotaNew = quotaNew,   // v6 R14 每日新词配额（「写库 → 重读镜像」同下）
                 stats = stats,         // v14 学习统计只读快照（打开设置页时重取，见上方 effect）
                 customBanks = customBanks,   // v22「我的词库」镜像
-                // v22/v23 导入/删除后的统一刷新：rescanScenes 重放 AppSettings.load（存储是权威）；
-                // 首次导入的库 setSceneVisible(true)（显式导入 = 明确想学，导入即显示；重导替换不动
-                // 用户手动改过的显隐）；空队列作废（否则空库首导当天仍是引导态）；bankTick 触发
-                // 当前频道重载。当前频道若被删除，下方 visibleScenes effect 会自动回退推荐频道。
-                onBanksChanged = { firstImportId ->
-                    settings.rescanScenes()
-                    if (firstImportId != null) settings.setSceneVisible(firstImportId, true)
-                    // 2026-09-23 复审修复（#3）：词库已变，会话快照里的 Term 对象可能是旧库内容
-                    // （删除/替换后切回该频道会恢复出已删除的词或旧用途说明）——全部作废，
-                    // 切回时走完整装载重新取词。
-                    channelSnapshots.clear()
-                    // 2026-09-23 复审修复（#1）：原 invalidateEmptyQueue 只作废空队列，
-                    // 现同时作废含鬼 id 的队列（见 StudyRepository.invalidateStaleQueue）
-                    repo.invalidateStaleQueue()
-                    customBanks = CustomBanks.all
-                    orderedScenes = settings.orderedScenes()
-                    hiddenIds = settings.hiddenIds()
-                    stats = repo.studyStats()
-                    bankTick++
-                },
+                // v22/v23 导入/删除后的统一刷新（2026-09-23 抽取为 applyBanksChanged，
+                // 与空态引导页的「一键导入官方词库」共用）；参数 = 首次入库的库 id 列表
+                //（设置页单文件导入至多一个元素）
+                onBanksChanged = { firstImportIds -> applyBanksChanged(firstImportIds) },
                 // 显隐/顺序/配额都是「写 AppSettings → 重读镜像」两步：真源在持久层，镜像只管重组
                 onSetVisible = { id, visible ->
                     settings.setSceneVisible(id, visible)
@@ -816,6 +946,21 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                     // v16：总览分母 = 当前可学范围（常用词 + 可见分区），显隐一变口径就变 ——
                     // 必须当场重取快照，否则用户开关分区后上面的「已学 X / N」纹丝不动。
                     stats = repo.studyStats()
+                    // 开启分区当天生效（2026-09-23 复审修复）：全部分区隐藏时 rec 当天生成的是
+                    // 0 词空队列，不作废它「当日冻结」会让新词拖到明天。invalidateStaleQueue 只动
+                    // 空队列 / 未确认的鬼 id 队列，非空已确认队列的冻结语义不破。
+                    repo.invalidateStaleQueue()
+                    // 只有**当前频道的池依赖可见范围**时才需要重载（2026-09-24 修复 #6）：
+                    // rec（聚合范围 = 可见分区 + 常用词）与常用词频道（同为聚合范围）。
+                    // 分区 / 收藏频道的池只含本分区（或收藏集）的词，开关**别的**分区不影响
+                    // 它们——bankTick++ 会把浏览页重新洗牌、丢掉浏览位置，不做。
+                    // 当前分区被关掉的情形不需要这里管：visibleScenes effect 会把频道弹回 rec，
+                    // channel 变化本身就是装载 effect 的 key。
+                    if (channel == StudyRepository.CHANNEL_DAILY ||
+                        channel == StudyRepository.CHANNEL_COMMON
+                    ) {
+                        bankTick++
+                    }
                 },
                 // v16 拖动落位（v17 起仅已显示分区可拖；↑↓ 按钮已删，无 onMove 回调）：
                 // 与 onSetVisible 同一套「写库 → 重读镜像」，落点是目标分区在 order 里的下标

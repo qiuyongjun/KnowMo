@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 Compose 页底 AppSurface 同色：冷启动窗口先画这个底，避免白底闪一下再变米色 -->
+    <color name="app_surface">#F5F1E9</color>
+
+    <style name="Theme.KnowMo" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/app_surface</item>
+    </style>
+</resources>
