@@ -1,7 +1,7 @@
 package com.knowmo.app.data
 
 /**
- * 词库 v23 起零内置词条：官方词库以 CSV 随仓库分发（`wordbanks/*.csv`，内容单一真源，
+ * 词库 v23 起零内置词条：官方词库以 CSV 随仓库分发（仓库 wordbanks 目录，内容单一真源，
  * 校验脚本 `check_wordbank_csv.py`），经设置页导入成为自定义分区（导入与校验见 `CustomBank.kt`）。
  * 「拼音按空格逐字配对，字数不符即拒」的契约由 `CustomBank` 导入校验执行。
  *

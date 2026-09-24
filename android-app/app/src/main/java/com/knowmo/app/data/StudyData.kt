@@ -43,7 +43,7 @@ data class Scene(val id: String, val name: String, val icon: String, val color: 
  *   v23.1 起导入只收 CSV，家属设备经设置页导入恢复；id 体系不互通、进度重计。
  *   存储残留的 `food` id 由 `manageableIds()` 自然过滤，无需显隐迁移项。
  * - **v23**（词库全面外置）：`daily`（常用词）与 4 个场景分区**全部退役**——App 裸装零词库，
- *   原 364 条导出为仓库 `wordbanks/*.csv`（官方词库包，拼音全填），用户经设置页导入后以
+ *   原 364 条导出为仓库 wordbanks 目录的 CSV（官方词库包，拼音全填），用户经设置页导入后以
  *   自定义分区存在（id 为 CSV 派生 id，与内置历史 id 不互通——内置词进度清零，QYJ 拍板接受）。
  *   固定频道只剩推荐 / 收藏；`CHANNEL_COMMON` 推荐特例保留但恒为空集（无害）。
  *   ⇒ 内置词库 364 → **0** 条，`SCENES` 只剩 `rec`。
