@@ -26,7 +26,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.HorizontalDivider
@@ -77,8 +76,8 @@ import com.knowmo.app.ui.theme.PageGutter
 import com.knowmo.app.ui.theme.cardShadow
 import kotlin.math.roundToInt
 
-/** 分区行高：**必须固定** —— 拖动让位是按「行高 × 跨过几行」算位移的，行高不固定算法即失效 */
-private val SCENE_ROW_H = 76.dp
+/** 词库行高：**必须固定** —— 拖动让位是按「行高 × 跨过几行」算位移的，行高不固定算法即失效 */
+private val BANK_ROW_H = 76.dp
 
 /** 底部固定「完成」条的内容高度（12 + 80 + 12）——滚动内容末尾按这个数留白，免得最后一段被盖住。
  *  导航栏那一截由 Column 的 `navigationBarsPadding()` 补上（见下），故此处不含它。 */
@@ -90,55 +89,35 @@ private val DONE_BAR_SPACE = 104.dp
  * 适老化硬约束：字号 ≥ 20sp（说明性小字 17sp）、可点目标 ≥ 64dp 高；配色沿用主题常量。
  * 视觉语言与 feed 同源：暖米色页底 + 白卡分组（每组一张卡）+ 选中态实心蓝，箭头用矢量图标。
  *
- * 四张卡：
+ * 三张卡（v29，QYJ 2026-09-24）：
  * ⓪**学习统计**（v14，只读）：总览（已学/学完/收藏）+ 今日战果 + 连续学习天数 + 分档复习记住率小字（v28，ReviewLog）。
  *   受众拍板 = 家属/年轻人（QYJ：设置本来就不给老人用），信息密度不受「少而大」约束；
  *   纯展示零写入（进出设置页不改学习状态，池型零写入契约不破坏）。
  * ①②每日学习词数量（3/5/10/15/20，缺省 10）+ 每天学几个新词（1/3/5/10，缺省 5）—— 两组同为配额语义、
  *   合一张卡；**当日队列冻结不变、次日生效**（只写 `AppSettings`，不触碰当日队列）。
- * ②.5 **我的词库**（v22）：SAF 导入 JSON 词库文件 → 一个普通自定义分区（默认隐藏）；
- *   已装库列表 + 两段确认删除；fail-closed 校验（见 `CustomBank.kt`），不合格整库拒绝并逐条报错。
- * ③④**分区显示与顺序**（v16 合并为一张卡）：每行 = 分区名 + 进度 + 显隐开关，
- *   分「已显示 / 未显示」两段。v17（QYJ 2026-09-21）：
- *   **↑↓ 按钮删除**（点按箭头是拖动之外的第三种重排方式，实测多余——只留拖动）；
- *   **未显示的分区不挂拖动手势**（隐藏态没有顺序语义，拖了也没意义）；
- *   **新开启显示的分区自动排到「已显示」段末尾**（= 未显示段之前，落位统一在
- *   `AppSettings.setSceneVisible` 里做，UI 不感知）。
+ * ③**我的词库**（v22 → v29 大改）：SAF 导入 CSV 词库文件 → 一个普通场景分区；
+ *   官方词库「导入 / 更新」合一（有就更新、没有就导入，两段确认防覆盖）；
+ *   已装库列表 = **唯一的分区管理入口**——每行 = 库名 + 进度 + 删除按钮，**长按拖动排序**
+ *   （v29 起原「分区显示与顺序」卡废除：分区显隐 = 词库的导入/删除，无独立显隐开关）。
+ *   fail-closed 校验（见 `CustomBank.kt`），不合格整库拒绝并逐条报错。
  *
- * v16 本轮重构（QYJ 2026-09-21）—— 原版实测 ≈ 2530dp ≈ 3.5 屏，其中约七成是**同一批分区被列了两遍**
- * （统计里 14 行进度条 + 管理里 13 行操作行），出口按钮还在第 3.5 屏。逐条修法：
- * 1. **合并两处分区列表**：分区进度不再是统计卡里的一串行，而是分区卡每行的进度部分 ——
- *    省掉一整批重复行，也让「这区学到哪了」和「要不要显示它」在同一处决策。
- * 2. **出口常驻**：底部「完成」改为固定在页面底部（滚动内容末尾留 [DONE_BAR_SPACE] 占位），
- *    中途想退出不必滚到底。
- * 3. **可见分区自动排前面**：渲染顺序 = 可见组（按 order）+ 隐藏组（按 order），
- *    用户不必在「想看的」和「已关掉的」之间翻找。
- * 4. **已显示段内长按拖动重排**：拖动仅在「已显示」段内生效 —— 跨段意味着改变可见性，
- *    那是开关的职责，不做隐式迁移。未显示段不参与拖动（v17，QYJ 拍板）；
- *    开关显隐时的落位（开 → 已显示段末尾；关 → 未显示段开头）由持久层统一处理。
- *
- * ⚠️ 拖动实现的两个前提，改动前务必先读：
- * - **行高固定**（[SCENE_ROW_H]）：让位位移 = ±行高，行高变了算法要跟着改；
- * - **拖动的落点换算成「目标分区在 order 里的下标」再落库**：渲染是分段的、order 是全局的，
- *   但**同组项在 order 中的相对顺序与渲染顺序一致**，所以段内搬下标即可，无需感知分组语义。
+ * ⚠️ 拖动实现的两个前提，改动前务必先读（v16 起沿用，v29 从分区行搬到词库行）：
+ * - **行高固定**（[BANK_ROW_H]）：让位位移 = ±行高，行高变了算法要跟着改；
+ * - **拖动的落点换算成「目标词库在 order 里的下标」再落库**（`onMoveTo` → `moveSceneTo`）。
  */
 @Composable
 fun SettingsScreen(
     orderedScenes: List<Scene>,
-    hiddenIds: Set<String>,
     quota: Int,
     quotaNew: Int,
-    stats: StudyStats,   // v14 只读快照（AppRoot 在「打开设置页」与「显隐变化」时各重取一次）
+    stats: StudyStats,   // v14 只读快照（AppRoot 在「打开设置页」与「词库变化」时各重取一次）
     customBanks: List<CustomBank>,   // v22「我的词库」镜像（AppRoot 在导入/删除回调里重读）
-    onSetVisible: (String, Boolean) -> Unit,
-    onMoveTo: (String, Int) -> Unit,      // v16 拖动落位：目标分区在 order 里的下标
+    onMoveTo: (String, Int) -> Unit,      // v29 拖动落位：目标词库在 order 里的下标
     onSetQuota: (Int) -> Unit,
     onSetQuotaNew: (Int) -> Unit,
-    onBanksChanged: (List<String>) -> Unit,  // 导入/删除后统一刷新；参数 = 首次入库的库 id 列表
+    onBanksChanged: () -> Unit,  // 导入/删除后统一刷新（v29 起无「首次入库默认显示」参数：导入即显示）
     onDone: () -> Unit,
 ) {
-    val visibleScenes = orderedScenes.filter { it.id !in hiddenIds }
-    val hiddenScenes = orderedScenes.filter { it.id in hiddenIds }
     val progressById = stats.scenes.associateBy { it.scene.id }
 
     // v22「我的词库」会话态：导入结果文案（importOk 区分成功/失败配色）+ 删除的两段确认
@@ -146,7 +125,7 @@ fun SettingsScreen(
     // 生成命名对话框的预填建议——库名 = 库身份，由用户命名决定（见 CustomBanks KDoc）
     val context = LocalContext.current
     var confirmDeleteId by remember { mutableStateOf<String?>(null) }
-    // 更新官方词库的两段确认（2026-09-24 修复 #3）：更新会覆盖已装的同名库（含家属自己
+    // 官方词库「导入 / 更新」合一的两段确认（v29）：已装的库会被官方版覆盖（含家属自己
     // 导入的同名 CSV），必须第二击确认，不做成一按就覆盖。
     var confirmUpdateOfficial by remember { mutableStateOf(false) }
     var importMessage by remember { mutableStateOf<String?>(null) }
@@ -220,8 +199,8 @@ fun SettingsScreen(
                 // 分母口径说明（v16，v23 起无内置常用词）：不是全词库条数，而是「当前开启的分区」——
                 // 不写清楚的话，用户隐藏一个分区、看见分母变小时会以为数据丢了。
                 Text(
-                    "分母 = 当前可学的词（开启的 ${visibleScenes.size} 个分区）；" +
-                        "关掉的分区不计入，但它们已学的进度仍保留。",
+                    "分母 = 已导入词库的全部词（${orderedScenes.size} 个词库）；" +
+                        "删除的词库不计入，但那些词已学的进度仍保留。",
                     fontSize = 17.sp,
                     color = AppText2,
                 )
@@ -271,11 +250,11 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(14.dp))
 
-            /* ---------- ②.5 我的词库（v22：SAF 导入 JSON 词库文件 → 一个普通自定义分区） ---------- */
+            /* ---------- ③ 我的词库（v22 导入；v29 起兼管分区顺序——唯一分区管理入口） ---------- */
             SettingsCard {
                 CardTitle("我的词库")
                 Text(
-                    "「一键导入官方词库」只装还没装的库，不会覆盖改过的库；要刷新官方词库用下面的「更新官方词库」。" +
+                    "点下面的按钮装官方词库：没装的会装上，已装的会更新成官方最新版（学习进度保留）。" +
                         "自己做的库用 Excel 填三列「词 / 拼音 / 用途」另存为 CSV，点「导入词库文件」起个名字就成。" +
                         "想更新自己装的库，导入时用同一个名字（会提示将替换哪个库）。" +
                         "拼音列可以不填，会自动标注（多音字建议核对）。",
@@ -287,118 +266,60 @@ fun SettingsScreen(
                     Text("还没有导入的词库。", fontSize = 17.sp, color = AppText2)
                     Spacer(Modifier.height(8.dp))
                 } else {
-                    customBanks.forEach { bank ->
-                        val confirming = confirmDeleteId == bank.id
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .height(64.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            // 库名与条数分两行：条数降为次级小字，库名不再被括号挤到截断
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    "${bank.icon} ${bank.name}",
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = AppText,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Text("${bank.terms.size} 条", fontSize = 16.sp, color = AppText2)
-                            }
-                            // 两段确认删除（第一击变「确认删除」，再击才删）——少一层弹窗交互
-                            DeleteBankButton(confirming = confirming) {
-                                if (confirming) {
-                                    CustomBanks.delete(bank.id)
-                                    confirmDeleteId = null
-                                    onBanksChanged(emptyList())
-                                } else {
-                                    confirmDeleteId = bank.id
-                                }
-                            }
-                        }
-                        if (bank.id != customBanks.last().id) {
-                            HorizontalDivider(color = AppLine, thickness = 1.dp)
-                        }
-                    }
+                    // v29：词库列表 = 分区列表。长按拖动排序（原「分区显示与顺序」卡已废）；
+                    // 显隐不再有开关——导入即显示、删除即隐藏。
+                    BankRows(
+                        orderedScenes = orderedScenes,
+                        progressById = progressById,
+                        confirmDeleteId = confirmDeleteId,
+                        onRequestDelete = { confirmDeleteId = it },
+                        onDelete = { id ->
+                            CustomBanks.delete(id)
+                            confirmDeleteId = null
+                            onBanksChanged()
+                        },
+                        onMoveTo = onMoveTo,
+                    )
                     Spacer(Modifier.height(8.dp))
                 }
                 Spacer(Modifier.height(10.dp))
-                // 一键导入官方词库（2026-09-23 修复 #1）：官方 CSV 已随 APK assets 分发。
-                // 2026-09-24 修复 #3：**只装还没装的库**（skipInstalled）——家属可能用与官方库
-                // 相同的名字导过自己的 CSV（设置页文案就是这么教更新方式的），一键导入若照旧
-                // 无条件入库，会把家属改过的库用官方版悄悄覆盖。更新走下面的「更新官方词库」。
+                // 官方词库「导入 / 更新」合一（v29，QYJ：有就更新、没有就导入）——
+                // importOfficial 不再跳过已装库（skipInstalled=false）：已装的同 id 库走
+                // 替换更新、进度保留。两段确认保留：家属改过的同名库会被官方版覆盖。
                 SolidButton(
-                    label = "一键导入官方词库",
-                    container = BluePrimary,
-                    icon = Icons.Filled.Add,
+                    label = if (confirmUpdateOfficial) "再点一次，确认更新" else "导入 / 更新官方词库",
+                    container = if (confirmUpdateOfficial) OrangeDark else BluePrimary,
                     shape = ControlShape,
                     onClick = {
                         confirmDeleteId = null
-                        confirmUpdateOfficial = false
-                        val result = CustomBanks.importOfficial(context, skipInstalled = true)
-                        val termCount = result.imported.sumOf { it.bank.terms.size }
-                        // 跨库重词跳过总数（2026-09-24 修复 #8）：与手动导入同口径，不再静默丢词
-                        val skippedRepeatCount = result.imported.sumOf { it.skippedRepeats }
-                        importOk = result.imported.isNotEmpty() || result.skippedExisting > 0
-                        importMessage = when {
-                            result.imported.isEmpty() && result.skippedExisting == 0 && result.failed.isEmpty() ->
-                                "没有找到官方词库文件。"
-                            result.imported.isEmpty() && result.skippedExisting == 0 ->
-                                "官方词库导入失败：" + result.failed.joinToString("；")
-                            result.imported.isEmpty() ->
-                                "官方词库都已装过了，没有要新装的。"
-                            else ->
-                                "新装了 ${result.imported.size} 个官方词库，共 $termCount 条词。" +
-                                    (if (skippedRepeatCount > 0) "另有 $skippedRepeatCount 条与已装词库重复，已跳过。" else "") +
-                                    (if (result.skippedExisting > 0) "已装的 ${result.skippedExisting} 个保持原样。" else "") +
-                                    (if (result.failed.isNotEmpty()) "另有 ${result.failed.size} 个失败：${result.failed.joinToString("；")}" else "")
+                        if (!confirmUpdateOfficial) {
+                            confirmUpdateOfficial = true
+                        } else {
+                            confirmUpdateOfficial = false
+                            val result = CustomBanks.importOfficial(context)
+                            val termCount = result.imported.sumOf { it.bank.terms.size }
+                            // 跨库重词跳过总数：与手动导入同口径，不再静默丢词
+                            val skippedRepeatCount = result.imported.sumOf { it.skippedRepeats }
+                            val newCount = result.imported.count { it.isNew }
+                            val updatedCount = result.imported.size - newCount
+                            importOk = result.imported.isNotEmpty()
+                            importMessage = when {
+                                result.imported.isEmpty() && result.failed.isEmpty() ->
+                                    "没有找到官方词库文件。"
+                                result.imported.isEmpty() ->
+                                    "官方词库导入失败：" + result.failed.joinToString("；")
+                                else ->
+                                    "官方词库装好了：" + listOfNotNull(
+                                        if (newCount > 0) "新装 $newCount 个" else null,
+                                        if (updatedCount > 0) "更新 $updatedCount 个" else null,
+                                    ).joinToString("、") + "，共 $termCount 条词。" +
+                                        (if (skippedRepeatCount > 0) "另有 $skippedRepeatCount 条与已装词库重复，已跳过。" else "") +
+                                        (if (result.failed.isNotEmpty()) "另有 ${result.failed.size} 个失败：${result.failed.joinToString("；")}" else "")
+                            }
+                            onBanksChanged()
                         }
-                        onBanksChanged(result.imported.filter { it.isNew }.map { it.bank.id })
                     },
                 )
-                Spacer(Modifier.height(10.dp))
-                // 更新官方词库（2026-09-24 修复 #3）：显式替换更新入口（skipInstalled = false，
-                // 已装的同 id 库走替换更新、进度保留），两段确认防误触覆盖家属自己导入的同名库
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(64.dp)
-                        .clip(ControlShape)
-                        .background(if (confirmUpdateOfficial) OrangeBg else AppSurface)
-                        .clickable {
-                            confirmDeleteId = null
-                            if (confirmUpdateOfficial) {
-                                val result = CustomBanks.importOfficial(context)
-                                val termCount = result.imported.sumOf { it.bank.terms.size }
-                                val skippedRepeatCount = result.imported.sumOf { it.skippedRepeats }
-                                confirmUpdateOfficial = false
-                                importOk = result.imported.isNotEmpty()
-                                importMessage = when {
-                                    result.imported.isEmpty() && result.failed.isEmpty() ->
-                                        "没有找到官方词库文件。"
-                                    result.imported.isEmpty() ->
-                                        "官方词库更新失败：" + result.failed.joinToString("；")
-                                    else ->
-                                        "官方词库已更新 ${result.imported.size} 个，共 $termCount 条词。" +
-                                            (if (skippedRepeatCount > 0) "另有 $skippedRepeatCount 条与已装词库重复，已跳过。" else "") +
-                                            (if (result.failed.isNotEmpty()) "另有 ${result.failed.size} 个失败：${result.failed.joinToString("；")}" else "")
-                                }
-                                onBanksChanged(result.imported.filter { it.isNew }.map { it.bank.id })
-                            } else {
-                                confirmUpdateOfficial = true
-                            }
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        if (confirmUpdateOfficial) "再点一次，确认更新官方词库" else "更新官方词库",
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Black,
-                        color = if (confirmUpdateOfficial) OrangeDark else AppText2,
-                    )
-                }
                 Spacer(Modifier.height(10.dp))
                 Box(
                     Modifier
@@ -433,51 +354,8 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(14.dp))
 
-            /* ---------- ③④ 分区显示与顺序（v16：进度 + 显隐 + 排序合并成一张卡，分两段） ---------- */
-            SettingsCard {
-                CardTitle("分区显示与顺序")
-                Text(
-                    "长按上面已显示的分区可以拖动排序；未显示的不能拖。点右边的按钮决定它显不显示。",
-                    fontSize = 17.sp,
-                    color = AppText2,
-                )
-                Spacer(Modifier.height(16.dp))
-
-                SceneSectionHeader("已显示", visibleScenes.size)
-                if (visibleScenes.isEmpty()) {
-                    Text(
-                        "现在只显示推荐和收藏。点下面「未显示」里的按钮可以打开某个分区。",
-                        fontSize = 17.sp,
-                        color = AppText2,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                } else {
-                    SceneRows(
-                        scenes = visibleScenes,
-                        isHiddenGroup = false,
-                        allOrdered = orderedScenes,
-                        progressById = progressById,
-                        onSetVisible = onSetVisible,
-                        onMoveTo = onMoveTo,
-                    )
-                }
-                Spacer(Modifier.height(16.dp))
-
-                SceneSectionHeader("未显示", hiddenScenes.size)
-                if (hiddenScenes.isEmpty()) {
-                    Text("所有分区都已显示。", fontSize = 17.sp, color = AppText2)
-                    Spacer(Modifier.height(8.dp))
-                } else {
-                    SceneRows(
-                        scenes = hiddenScenes,
-                        isHiddenGroup = true,
-                        allOrdered = orderedScenes,
-                        progressById = progressById,
-                        onSetVisible = onSetVisible,
-                        onMoveTo = onMoveTo,
-                    )
-                }
-            }
+            // v29：原「③④ 分区显示与顺序」卡已废除——分区显隐 = 词库的导入/删除，
+            // 顺序 = 「我的词库」列表内长按拖动，进度条也搬进了词库行（见上方 BankRows）。
 
             Spacer(Modifier.height(DONE_BAR_SPACE))
         }
@@ -525,8 +403,8 @@ fun SettingsScreen(
                                 // 跨库重词跳过提示：面馆私有库与官方常用字词库有交集属常态，家属需要知道没全收
                                 (if (outcome.skippedRepeats > 0) "另有 ${outcome.skippedRepeats} 条与已装词库重复，已跳过。" else "") +
                                 (if (outcome.isNew) "已自动显示，可回学习界面开始。" else "替换更新完成。")
-                            // 首次入库的库 id 交给 AppRoot 做默认显示；重导替换不动显隐
-                            onBanksChanged(if (outcome.isNew) listOf(outcome.bank.id) else emptyList())
+                            // v29：导入即显示，无「首次入库默认显示」的落位逻辑
+                            onBanksChanged()
                         }
                         .onFailure { e ->
                             importOk = false
@@ -628,69 +506,47 @@ private fun StatDivider(height: Dp = 40.dp) {
     )
 }
 
-/** 分段小标题：「已显示 3」——数字即该段项数，让「关掉了几个」一眼可见 */
-@Composable
-private fun SceneSectionHeader(title: String, count: Int) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(title, fontSize = 19.sp, fontWeight = FontWeight.Bold, color = AppText2)
-        Spacer(Modifier.width(8.dp))
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(50))
-                .background(AppSurface)
-                .padding(horizontal = 10.dp, vertical = 2.dp),
-        ) {
-            Text("$count", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = AppText2)
-        }
-    }
-    Spacer(Modifier.height(6.dp))
-}
-
 /**
- * 一段分区行（v17）：**已显示段内**长按拖动重排 + 显隐开关；**未显示段只渲染行，不挂拖动手势**。
+ * 词库行列表（v29，原「分区显示与顺序」卡的行模型整体搬到词库卡）：
+ * **长按拖动重排** + 两段确认删除 + 行内进度。每行 = 库名 +（进度条 + 已学/总数）+ 删除按钮；
+ * 显隐无开关——导入即显示、删除即隐藏（v29，QYJ：隐藏显示直接由词库添加和删除控制）。
  *
- * 拖动模型（前提：行高固定 = [SCENE_ROW_H]，仅 [isHiddenGroup] == false 时启用）：
+ * 拖动模型（前提：行高固定 = [BANK_ROW_H]）：
  * - 拖动中的行按手指位移整体平移（`dragDy`），并抬升（缩放 + 阴影）表明「它被拿起来了」；
  * - 被跨过的行整体让位一格（向上拖则下方行上移、向下拖则上方行下移）—— 位移 = ±行高，可精确算；
- * - 松手时把落点换算成**目标分区在 order 里的下标**交给持久层。
+ * - 松手时把落点换算成**目标词库在 order 里的下标**交给持久层（`onMoveTo` → `moveSceneTo`）。
  *
- * **跨段不生效**：拖到另一段的范围会被钳回本段 —— 跨段等于改变可见性，那是开关的职责，
- * 隐式迁移会让「拖了一下」变成「开关变了」这种难以预期的事。v17 起未显示段干脆不挂手势，
- * 顺序语义只属于已显示的分区。
- *
- * ⚠️ 手势 block 会**被记住不再重建**，所以闭包里不能直接用 `scenes` / `allOrdered` / `onMoveTo`
- * —— 段内重排后列表内容变了，而 `pointerInput` 的 key 仍是同一个 id，读到的会是旧列表。
+ * ⚠️ 手势 block 会**被记住不再重建**，所以闭包里不能直接用 `orderedScenes` / `onMoveTo`
+ * —— 拖动落库后列表内容变了，而 `pointerInput` 的 key 仍是同一个 id，读到的会是旧列表。
  * 一律经 `rememberUpdatedState` 取最新值；起点下标也在 `onDragStart` 里**按 id 现算**，
  * 不用编译期捕获的 `i`。比把列表塞进 `pointerInput` 的 key 更稳（那样重排一发生就重启手势，
  * 正在进行的拖动会被打断）。
  */
 @Composable
-private fun SceneRows(
-    scenes: List<Scene>,
-    isHiddenGroup: Boolean,
-    allOrdered: List<Scene>,
+private fun BankRows(
+    orderedScenes: List<Scene>,
     progressById: Map<String, SceneProgress>,
-    onSetVisible: (String, Boolean) -> Unit,
+    confirmDeleteId: String?,
+    onRequestDelete: (String) -> Unit,
+    onDelete: (String) -> Unit,
     onMoveTo: (String, Int) -> Unit,
 ) {
-    // 拖动会话态（本段私有）：谁在拖、从本段哪个下标起、手指累计移动多少像素。
-    // 未显示段（isHiddenGroup = true）不会开拖动会话，这些状态恒为初值。
+    // 拖动会话态：谁在拖、从哪个下标起、手指累计移动多少像素。
     var draggingId by remember { mutableStateOf<String?>(null) }
     var dragFrom by remember { mutableStateOf(0) }
     var dragDy by remember { mutableStateOf(0f) }
-    val latestScenes by rememberUpdatedState(scenes)
-    val latestOrdered by rememberUpdatedState(allOrdered)
+    val latestOrdered by rememberUpdatedState(orderedScenes)
     val latestOnMoveTo by rememberUpdatedState(onMoveTo)
-    val rowPx = with(LocalDensity.current) { SCENE_ROW_H.toPx() }
+    val rowPx = with(LocalDensity.current) { BANK_ROW_H.toPx() }
 
-    /** 手指位移 → 本段落点下标（钳在本段内，跨段不生效） */
+    /** 手指位移 → 落点下标（钳在列表内） */
     fun landingIndex(from: Int): Int =
         (from + (dragDy / rowPx).roundToInt())
-            .coerceIn(0, (latestScenes.size - 1).coerceAtLeast(0))
+            .coerceIn(0, (latestOrdered.size - 1).coerceAtLeast(0))
 
     val dragTo = if (draggingId == null) -1 else landingIndex(dragFrom)
 
-    scenes.forEachIndexed { i, s ->
+    orderedScenes.forEachIndexed { i, s ->
         val isDragging = s.id == draggingId
         // 让位位移：只有被拖动的区间内的行需要平移，其余保持原位
         val shift = when {
@@ -699,33 +555,32 @@ private fun SceneRows(
             dragTo < dragFrom && i >= dragTo && i < dragFrom -> rowPx
             else -> 0f
         }
-        SceneRow(
+        BankRow(
             scene = s,
-            hidden = isHiddenGroup,
             progress = progressById[s.id],
-            onSetVisible = onSetVisible,
-            modifier = run {
-                val base = Modifier
-                    .zIndex(if (isDragging) 1f else 0f)
-                    .graphicsLayer {
-                        translationY = if (isDragging) dragDy else shift
-                        if (isDragging) {
-                            scaleX = 1.02f
-                            scaleY = 1.02f
-                            shadowElevation = 10f
-                            shape = RoundedCornerShape(12.dp)
-                            clip = true
-                        }
+            confirming = confirmDeleteId == s.id,
+            onDeleteClick = {
+                if (confirmDeleteId == s.id) onDelete(s.id) else onRequestDelete(s.id)
+            },
+            modifier = Modifier
+                .zIndex(if (isDragging) 1f else 0f)
+                .graphicsLayer {
+                    translationY = if (isDragging) dragDy else shift
+                    if (isDragging) {
+                        scaleX = 1.02f
+                        scaleY = 1.02f
+                        shadowElevation = 10f
+                        shape = RoundedCornerShape(12.dp)
+                        clip = true
                     }
-                    .background(if (isDragging) Color.White else Color.Transparent)
-                // v17：未显示段不挂拖动手势 —— 隐藏分区没有顺序语义，不允许拖动位置
-                if (isHiddenGroup) base
-                else base.pointerInput(s.id) {
+                }
+                .background(if (isDragging) Color.White else Color.Transparent)
+                .pointerInput(s.id) {
                     detectDragGesturesAfterLongPress(
                         onDragStart = {
                             draggingId = s.id
                             // 起点下标**现算**：闭包里的 `i` 是手势 block 创建时的值，重排后即失效
-                            dragFrom = latestScenes.indexOfFirst { it.id == s.id }.coerceAtLeast(0)
+                            dragFrom = latestOrdered.indexOfFirst { it.id == s.id }.coerceAtLeast(0)
                             dragDy = 0f
                         },
                         onDrag = { change, amount ->
@@ -733,10 +588,9 @@ private fun SceneRows(
                             dragDy += amount.y
                         },
                         onDragEnd = {
-                            val target = latestScenes.getOrNull(landingIndex(dragFrom))
+                            val target = latestOrdered.getOrNull(landingIndex(dragFrom))
                             if (target != null && target.id != s.id) {
-                                val targetOrderIndex = latestOrdered.indexOf(target)
-                                if (targetOrderIndex >= 0) latestOnMoveTo(s.id, targetOrderIndex)
+                                latestOnMoveTo(s.id, latestOrdered.indexOf(target))
                             }
                             draggingId = null
                             dragDy = 0f
@@ -746,24 +600,22 @@ private fun SceneRows(
                             dragDy = 0f
                         },
                     )
-                }
-            },
+                },
         )
-        if (i < scenes.lastIndex) HorizontalDivider(color = AppLine, thickness = 1.dp)
+        if (i < orderedScenes.lastIndex) HorizontalDivider(color = AppLine, thickness = 1.dp)
     }
 }
 
 /**
- * 分区行（v17）：左侧 = 分区名 +（进度条 + 已学/总数），右侧 = 显隐开关（v17 起 ↑↓ 已删，
- * 操作区只剩开关一项，名称列因此拿到更多宽度）。
- * 隐藏段的分区名用次级文字色（`AppText2`）—— 与「显示」按钮的橙系配色一起表达当前状态。
+ * 词库行：左侧 = 库名 +（进度条 + 已学/总数），右侧 = 两段确认删除按钮。
+ * 行高固定 [BANK_ROW_H]（拖动让位算法的前提，见 [BankRows]）。
  */
 @Composable
-private fun SceneRow(
+private fun BankRow(
     scene: Scene,
-    hidden: Boolean,
     progress: SceneProgress?,
-    onSetVisible: (String, Boolean) -> Unit,
+    confirming: Boolean,
+    onDeleteClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val learned = progress?.learned ?: 0
@@ -773,7 +625,7 @@ private fun SceneRow(
     Row(
         modifier
             .fillMaxWidth()
-            .height(SCENE_ROW_H),
+            .height(BANK_ROW_H),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(
@@ -785,7 +637,7 @@ private fun SceneRow(
                 "${scene.icon} ${scene.name}",
                 fontSize = 21.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (hidden) AppText2 else AppText,
+                color = AppText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -818,12 +670,7 @@ private fun SceneRow(
                 )
             }
         }
-        // ⚠️ v17 修 v16 回归：`onSetVisible` 的第二参数是**目标可见性** = 当前是否隐藏（`hidden`），
-        // 不是「取反」。v16 曾在这里写成 `!hidden` —— 隐藏中点「显示」传 false（往 hidden 里加
-        // 已存在的 id）、可见中点「隐藏」传 true（从 hidden 里删不存在的 id），**两个方向都是
-        // 原样写回、界面毫无反应**。历史教训：v14 原本就是 `isHidden`（对的），v16 重构时误判
-        // 成 bug 才改反 —— 改语义前先核对持久层函数（`setSceneVisible`）的参数定义。
-        ShowHideButton(hidden) { onSetVisible(scene.id, hidden) }
+        DeleteBankButton(confirming = confirming, onClick = onDeleteClick)
     }
 }
 
@@ -885,34 +732,6 @@ private fun DeleteBankButton(confirming: Boolean, onClick: () -> Unit) {
             fontSize = 18.sp,
             fontWeight = FontWeight.Black,
             color = fg,
-            textAlign = TextAlign.Center,
-        )
-    }
-}
-
-/**
- * v6 设置页显示/隐藏开关：**68×64dp** 大按钮。**本组件只渲染「当前态」**
- * （当前隐藏 → 显示「显示」），点击语义是"取反"—— 目标值由调用点算好再交给 `onSetVisible`，
- * 组件自身不持有可见性状态。
- * 隐藏中的分区按钮显示「显示」（橙系，引导恢复），可见分区显示「隐藏」（绿系）——
- * 颜色本身也承担状态说明（不依赖小字识别）。
- * v17：↑↓ 按钮删除后它是行内唯一的操作按钮（宽度维持 68dp 不变）。
- */
-@Composable
-private fun ShowHideButton(isHidden: Boolean, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .size(width = 68.dp, height = 64.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (isHidden) OrangeBg else GreenBg)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            if (isHidden) "显示" else "隐藏",
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Black,
-            color = if (isHidden) OrangeDark else GreenKnown,
             textAlign = TextAlign.Center,
         )
     }

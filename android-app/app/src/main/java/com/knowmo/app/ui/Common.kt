@@ -30,7 +30,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
@@ -123,6 +122,8 @@ val HIDDEN_ALL_GUIDE_SPEECH = "$HIDDEN_ALL_GUIDE_TITLE。$HIDDEN_ALL_GUIDE_BODY�
  * **隐藏设置入口（v6，prd v6 第 1 条）**：在推荐 tab 上**连点 5 次**（每次间隔 ≤ 2s，超时重置）
  * 回调 `onOpenSettings`；每次点击照常 `onSelect(CHANNEL_DAILY)`——第 1 次切到推荐，
  * 后 4 次重复选中推荐 = 无操作（design.md §11.3 已接受的副作用）。
+ * **连点计数只认推荐 chip 自身**（2026-09-24 修复）：点击收藏 / 场景分区 chip 一律清零——
+ * 否则快速来回切频道会被累计成推荐连点，误开设置页。
  */
 @Composable
 fun ChannelBar(
@@ -165,13 +166,18 @@ fun ChannelBar(
                 }
             },
         )
-        // 收藏（固定第二；不参与毕业 / 隐藏 / 排序）——金星图标与「推荐」区分（旧版两个 ⭐ 易混淆）
+        // 收藏（固定第二；不参与毕业 / 排序）——金星图标与「推荐」区分（旧版两个 ⭐ 易混淆）。
+        // 切到非推荐频道即重置连点计数（2026-09-24 修复）：否则「推荐 / 收藏来回快速切」
+        // 也被累计成推荐连点 5 次，误触出设置页。
         ChannelChip(
             label = "收藏",
             active = current == StudyRepository.CHANNEL_FAV,
             isGraduated = false,
             star = true,
-            onClick = { onSelect(StudyRepository.CHANNEL_FAV) },
+            onClick = {
+                recTaps = 0
+                onSelect(StudyRepository.CHANNEL_FAV)
+            },
         )
         // 可见场景分区（设置过滤 + 排序后传入；AppRoot 在当前频道被隐藏时回退推荐）
         // v23：全部为导入的自定义分区（零词库时此列表为空，频道栏只剩推荐/收藏两个固定 chip）
@@ -185,7 +191,10 @@ fun ChannelBar(
                 label = if (s.id in graduated) "${s.name} 学完" else s.name,
                 active = s.id == current,
                 isGraduated = s.id in graduated,
-                onClick = { onSelect(s.id) },
+                onClick = {
+                    recTaps = 0   // 非推荐频道点击重置连点计数（同收藏 chip，防切频道误触设置页）
+                    onSelect(s.id)
+                },
             )
         }
     }
@@ -358,12 +367,13 @@ internal object HeaderPill {
 }
 
 /**
- * 词条角标：三态。
- * 新学=蓝 / 复习=橙 / 浏览=绿（绿色=正面回炉，与「认识」配色同系，不与另两态冲突）。
+ * 词条角标：新学=蓝 / 复习=橙 / 浏览=绿（绿色=正面回炉，与「认识」配色同系，不与另两态冲突）。
  * v5 R10：浏览态文案「温故」→「看看」——同一徽标要同时服务推荐频道的温故流与场景分区，
  * 而分区池含**未学词**，叫「温故」不成立。
  * 徽标只放文字不放 emoji：emoji 在小字号下发虚，老年用户更难辨认。
  * v19：外形数值改取 [HeaderPill]，与收藏按钮锁死同款。
+ * v29（2026-09-24 QYJ）：**FREE 态不再渲染徽标**（TermCard 只在 isExam 时调用）——
+ * 标签只在每日任务里区分新学/复习；FREE 分支保留作 when 穷尽性。
  */
 @Composable
 fun TermBadge(mode: CardMode) {
@@ -536,11 +546,12 @@ fun GuideCard(
             )
             if (actionLabel != null && onAction != null) {
                 Spacer(Modifier.height(28.dp))
+                // v29：动作按钮不再带 + 号图标（与设置页「导入 / 更新官方词库」同口径——
+                // 纯文字大按钮，语义已完整）
                 SolidButton(
                     label = actionLabel,
                     container = BluePrimary,
                     onClick = onAction,
-                    icon = Icons.Filled.Add,
                     height = 72.dp,
                     fontSize = 24.sp,
                     shape = ControlShape,

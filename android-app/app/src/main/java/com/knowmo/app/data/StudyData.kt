@@ -27,8 +27,7 @@ data class Scene(val id: String, val name: String, val icon: String, val color: 
  *
  * ## 分区退役史（删除的分区 id **永久退役**）
  * 词条仍可能带这些 id 前缀（id 是"首次归属"，永不改，见 WordBank.kt 文件头 id 契约），
- * 但**不能再有 `Scene` 项**。`AppSettings.load()` 靠 `MERGED_INTO` 表把「当初被用户打开的
- * 已退役分区」的可见性迁移到接收分区。
+ * 但**不能再有 `Scene` 项**。（v29 起分区显隐废除——可见 = 已导入词库，历史显隐迁移表已删。）
  *
  * - **v17**（可管理分区 13 → 10）：删 `bank`（并入 `gov`）、`medicine`（并入 `hospital`）、
  *   `emergency`（内容分流到 phone / hospital / property / gov）。

@@ -112,9 +112,11 @@ fun TermCard(
                 )
                 .padding(horizontal = 20.dp, vertical = 16.dp),
         ) {
-            // 卡头：徽标居左、收藏按钮居右（按钮挪出词块区 → 词块可整幅居中）
+            // 卡头：徽标居左、收藏按钮居右（按钮挪出词块区 → 词块可整幅居中）。
+            // 徽标只在每日任务卡（NEW/REVIEW）区分「新学 / 复习」；自主学习浏览卡（FREE）
+            // 不再挂「看看」标签（2026-09-24 QYJ：浏览就是浏览，无需告知态）。
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TermBadge(mode)
+                if (isExam) TermBadge(mode)
                 Spacer(Modifier.weight(1f))
                 // v19：收藏按钮改为与左侧徽标**同款小胶囊**（形状/字号/内边距共用 Common.kt
                 // 的 HeaderPill token），触摸目标外扩与配色口径见 FavoriteButton 的 KDoc

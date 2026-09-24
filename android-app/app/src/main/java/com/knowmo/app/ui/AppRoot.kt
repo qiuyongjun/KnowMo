@@ -111,10 +111,10 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    （**完成卡保留在首位**）+ 装载温故流——上滑进入推荐浏览、回滑仍可看完成卡战果，
  *    但任务卡已被移除、**回不去**。当日重启：confirmed == true 直接进浏览模式（完成卡在首位）；
  *    false 走断点恢复（仍锁滑）。
- * 6. **推荐范围收窄**（v9 第 3/4 条）：推荐频道（每日任务 + 温故流）只含**可见分区**的词
- *    （`recScenesProvider` 注入，MainActivity 传 settings.visibleScenes()）+ **常用词分区**
- *    （`CHANNEL_COMMON`，恒入推荐——QYJ 拍板的内容源特例：默认场景分区全隐藏时，推荐仍靠
- *    常用词有内容）。隐藏分区的词两个入口都抽不到。
+ * 6. **推荐范围收窄**（v9 第 3/4 条，v29 修订）：推荐频道（每日任务 + 温故流）只含**已装词库分区**
+ *    的词（`recScenesProvider` 注入，MainActivity 传 settings.visibleScenes()；v29 起可见 = 已导入，
+ *    分区显隐开关已废）+ **常用词分区**（`CHANNEL_COMMON`，恒入推荐——QYJ 拍板的内容源特例）。
+ *    已删除词库的词两个入口都抽不到。
  *    ⚠️ v17：`CHANNEL_COMMON` 同时成了**第三个固定频道**（默认显示、不可移除，见 Common.kt 的
  *    ChannelBar）。它是**池型频道**（channel != CHANNEL_DAILY → 走 appendPoolPages 分支），
  *    浏览零写入；其词仍在推荐范围内，两条入口并存。
@@ -134,10 +134,12 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    的旧值）。池型频道**零写入**：浏览卡没有作答入口 → 不写 `TermState` / `DayState`
  *    （分区里未学词只看不算学，学会它的唯一路径是每日任务——D4 新词入口唯一化）。
  * 10. v6 隐藏设置入口（prd v6 第 1 条 / design.md §11.2）：推荐 tab 连点 5 次（间隔 ≤2s，检测在
- *     ChannelBar 内部）→ `showSettings = true` 打开全屏设置页（**overlay 条件渲染**——不能写成
+ *     ChannelBar 内部；**计数只认推荐 chip，切其他频道即清零**——2026-09-24 修复切频道误触）
+ *     → `showSettings = true` 打开全屏设置页（**overlay 条件渲染**——不能写成
  *     if/else 互换渲染，那会把 pages / seqGen 等会话态全部丢掉）；打开时播报「已打开设置」。
- *     设置改动**即时生效**：orderedScenes / hiddenIds / quota 三个镜像 state 在回调里写 AppSettings
- *     后重读；当前频道被隐藏（非 rec/fav 且不在可见分区）→ 回退推荐频道。配额只影响次日 buildQueue。
+ *     设置改动**即时生效**：orderedScenes / quota 镜像 state 在回调里写 AppSettings 后重读；
+ *     当前频道的词库被删除（非 rec/fav 且不在分区列表）→ 回退推荐频道。配额只影响次日 buildQueue。
+ *     v29：分区显隐开关废除——显隐 = 词库的导入/删除（可见 = 已导入）。
  * 11. v6 收藏分区（prd v6 第 3 条）：`CHANNEL_FAV` 是池型频道，channel != CHANNEL_DAILY 自然落入
  *     池型分支（零改动复用 `appendPoolPages`）；空池插 `Page.Guide` 引导页。星按钮 → `repo.toggleFavorite`
  *     只写 favorites（不碰 TermState / DayState，收藏分区零写入不破坏），favorites 快照整体刷新触发
@@ -184,7 +186,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // v6 设置（design.md §11.2）：AppSettings 是真源，这里只持**镜像**（回调写库后重读触发重组）
     var showSettings by remember { mutableStateOf(false) }             // 全屏设置页显隐（隐藏入口 = 推荐 tab 连点 5 次）
     var orderedScenes by remember { mutableStateOf(settings.orderedScenes()) }
-    var hiddenIds by remember { mutableStateOf(settings.hiddenIds()) }
     var quota by remember { mutableStateOf(settings.quota()) }
     var quotaNew by remember { mutableStateOf(settings.quotaNew()) }   // v6 R14 每日新词配额镜像
     // v14 学习统计快照（design.md §16.2）：打开设置页时从 repo 一次性重取（设置页打开期间
@@ -193,7 +194,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // v22 自定义词库镜像（设置页「我的词库」导入/删除后经 onBanksChanged 重读触发重组；
     // 分区/词条本身经 allScenes()/STUDY_TERMS getter 动态并入，无需在此展开）
     var customBanks by remember { mutableStateOf(CustomBanks.all) }
-    val visibleScenes = orderedScenes.filter { it.id !in hiddenIds }   // 频道栏渲染序（rec/fav 固定渲染，不在此列）
     // v6 收藏：收藏集合快照（TermCard 星按钮显色用；toggleFavorite 后整体重读触发重组）
     var favorites by remember { mutableStateOf(repo.favorites().toSet()) }
 
@@ -275,7 +275,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
 
     // v6：打开设置页播报「已打开设置」（prd v6 第 2 条；keyed showSettings，关闭不播）。
     // v14：打开时重取学习统计快照（覆盖上次打开之后的作答变化——今日战果/streak/分区进度）。
-    // v16：快照的总览分母依赖**可见分区**，所以显隐变化时也要重取 —— 见 onSetVisible 回调。
+    // v16：快照的总览分母随词库增删而变，词库变化时也会重取 —— 见 applyBanksChanged。
     LaunchedEffect(showSettings) {
         if (showSettings) {
             stats = repo.studyStats()
@@ -283,16 +283,15 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         }
     }
 
-    // v6：设置显隐改动**即时生效**——当前频道被隐藏（非 rec/fav 且不在可见分区）→ 回退推荐频道。
-    // 回退由既有的 LaunchedEffect(channel, bankTick) 装载分支自然接管（重建队列 / 重建池型页）。
-    LaunchedEffect(visibleScenes) {
-        // ⚠️ v17：固定频道有三个（推荐 / 收藏 / 常用词），三者都**不来自 visibleScenes**，
-        // 必须全部放行。漏掉 CHANNEL_COMMON 的后果：点「常用词」频道的那一瞬就被本 effect
-        // 判为"当前频道已被隐藏"弹回推荐 —— 表现为该 tab 完全点不动。
+    // v6：当前频道失效自动回退推荐频道——v29 起失效的唯一来源是**删除词库**
+    // （分区显隐开关已废，可见 = 已导入）。回退由既有的 LaunchedEffect(channel, bankTick)
+    // 装载分支自然接管（重建队列 / 重建池型页）。
+    LaunchedEffect(orderedScenes) {
+        // ⚠️ 固定频道推荐 / 收藏不来自词库分区，必须放行；CHANNEL_COMMON 保留判断以防固定频道再加
         if (channel != StudyRepository.CHANNEL_DAILY &&
             channel != StudyRepository.CHANNEL_FAV &&
             channel != StudyRepository.CHANNEL_COMMON &&
-            channel !in visibleScenes.map { it.id }
+            channel !in orderedScenes.map { it.id }
         ) {
             channel = StudyRepository.CHANNEL_DAILY
         }
@@ -452,12 +451,32 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         // v20：本频道会话内来过 → 原样恢复（页面流 / 抽取池 / 落点 / browseMode），不重洗不重排。
         // 只认**当天**的快照：date 不符 = 跨日，队列该重建、池该重洗，走下方完整装载。
         val snap = channelSnapshots.remove(channel)
+        var restored = false
         if (snap != null && snap.date == repo.today()) {
-            browseMode = snap.browseMode
-            pages = snap.pages
-            freePool = snap.pool
-            restoreTo = snap.page.coerceIn(0, maxOf(0, snap.pages.lastIndex))
-        } else {
+            if (channel == StudyRepository.CHANNEL_FAV) {
+                // 2026-09-24 修复（收藏页显示过期空态）：切走收藏频道后可能在别的频道增删收藏，
+                // 快照随之过期——空态引导页还压着新收的词（要上滑才看得到内容）、或卡片还在
+                // 而收藏已清空。恢复前先与当前收藏集合对账：引导态 / 卡片态与「收藏是否为空」
+                // 不一致 = 快照过期 → 丢弃、走下方完整装载；卡片里已取消收藏的词也一并滤掉。
+                val favs = repo.favorites().toSet()
+                val snapGuided = snap.pages.any { it is Page.Guide }
+                val kept = snap.pages.filter { it !is Page.TermPage || it.t.id in favs }
+                if (snapGuided == favs.isEmpty() && kept.isNotEmpty()) {
+                    browseMode = snap.browseMode
+                    pages = kept
+                    freePool = snap.pool.filter { it in favs }
+                    restoreTo = snap.page.coerceIn(0, maxOf(0, kept.lastIndex))
+                    restored = true
+                }
+            } else {
+                browseMode = snap.browseMode
+                pages = snap.pages
+                freePool = snap.pool
+                restoreTo = snap.page.coerceIn(0, maxOf(0, snap.pages.lastIndex))
+                restored = true
+            }
+        }
+        if (!restored) {
             freePool = emptyList()
             if (channel == StudyRepository.CHANNEL_DAILY) {
                 val q = repo.ensureQueue()
@@ -616,18 +635,15 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
 
     /** 词库结构变化后的统一刷新（2026-09-23 抽取：设置页导入/删除与空态一键导入共用，
      *  原是 SettingsScreen.onBanksChanged 的内联实现）。
-     *  newShownIds = 本次**首次入库**的库 id——「显式导入 = 明确想学」→ 默认显示；
-     *  重导替换不在列表里，不动用户手动改过的显隐。 */
-    fun applyBanksChanged(newShownIds: List<String>) {
+     *  v29：显隐 = 词库有无——导入即显示、删除即隐藏，无「首次入库默认显示」的落位逻辑了。 */
+    fun applyBanksChanged() {
         settings.rescanScenes()
-        newShownIds.forEach { settings.setSceneVisible(it, true) }
         // 词库已变，会话快照里的 Term 对象可能是旧库内容（删除/替换后切回该频道会恢复出
         // 已删除的词或旧用途说明）——全部作废，切回时走完整装载重新取词。
         channelSnapshots.clear()
         repo.invalidateStaleQueue()
         customBanks = CustomBanks.all
         orderedScenes = settings.orderedScenes()
-        hiddenIds = settings.hiddenIds()
         stats = repo.studyStats()
         bankTick++
     }
@@ -635,10 +651,11 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     /** 一键导入官方词库（2026-09-23 修复 #1）：assets 里的官方 CSV 逐库走与手动导入
      *  相同的 parseCsv 校验入库，成功后同一套刷新。结果用语音反馈——空态场景下老人
      *  看着引导页，导入成功后 bankTick 会把 Guide 页换成真正的任务卡。
-     *  skipInstalled = 只补缺不覆盖（2026-09-24 修复 #3）：家属同名导入过的库不被官方版覆盖。 */
+     *  skipInstalled = 只补缺不覆盖：本卡只在**零词库**空态出现（没有可覆盖的库），
+     *  防御性保留；设置页的合并入口用 skipInstalled = false（v29：有就更新、没有就导入）。 */
     fun importOfficialBanks() {
         val result = CustomBanks.importOfficial(context, skipInstalled = true)
-        applyBanksChanged(result.imported.filter { it.isNew }.map { it.bank.id })
+        applyBanksChanged()
         when {
             result.imported.isNotEmpty() -> tts.speak("词库装好了，可以开始学习了。")
             result.skippedExisting > 0 -> tts.speak("词库已经装好了。")
@@ -805,12 +822,12 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                     actionLabel = "知道了",
                 ) { mutedDismissed = true }   // 本次会话不再提醒；恢复音量横幅也会自动消失
             }
-            // v6：scenes = 设置过滤排序后的可见分区（rec/fav 固定渲染在前列，不参与隐藏/排序）；
+            // v6：scenes = 设置排序后的词库分区（v29 起全部显示，rec/fav 固定渲染在前列）；
             // onOpenSettings 由推荐 tab 连点 5 次触发（检测在 ChannelBar 内部）
             ChannelBar(
                 current = channel,
                 graduated = graduated,
-                scenes = visibleScenes,
+                scenes = orderedScenes,
                 onOpenSettings = { showSettings = true },
                 onSelect = { new ->
                     // v20：切走前保存当前频道的会话快照（页面流 + 抽取池 + 落点 + browseMode），
@@ -929,41 +946,14 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         if (showSettings) {
             SettingsScreen(
                 orderedScenes = orderedScenes,
-                hiddenIds = hiddenIds,
                 quota = quota,
                 quotaNew = quotaNew,   // v6 R14 每日新词配额（「写库 → 重读镜像」同下）
                 stats = stats,         // v14 学习统计只读快照（打开设置页时重取，见上方 effect）
                 customBanks = customBanks,   // v22「我的词库」镜像
                 // v22/v23 导入/删除后的统一刷新（2026-09-23 抽取为 applyBanksChanged，
-                // 与空态引导页的「一键导入官方词库」共用）；参数 = 首次入库的库 id 列表
-                //（设置页单文件导入至多一个元素）
-                onBanksChanged = { firstImportIds -> applyBanksChanged(firstImportIds) },
-                // 显隐/顺序/配额都是「写 AppSettings → 重读镜像」两步：真源在持久层，镜像只管重组
-                onSetVisible = { id, visible ->
-                    settings.setSceneVisible(id, visible)
-                    hiddenIds = settings.hiddenIds()
-                    orderedScenes = settings.orderedScenes()
-                    // v16：总览分母 = 当前可学范围（常用词 + 可见分区），显隐一变口径就变 ——
-                    // 必须当场重取快照，否则用户开关分区后上面的「已学 X / N」纹丝不动。
-                    stats = repo.studyStats()
-                    // 开启分区当天生效（2026-09-23 复审修复）：全部分区隐藏时 rec 当天生成的是
-                    // 0 词空队列，不作废它「当日冻结」会让新词拖到明天。invalidateStaleQueue 只动
-                    // 空队列 / 未确认的鬼 id 队列，非空已确认队列的冻结语义不破。
-                    repo.invalidateStaleQueue()
-                    // 只有**当前频道的池依赖可见范围**时才需要重载（2026-09-24 修复 #6）：
-                    // rec（聚合范围 = 可见分区 + 常用词）与常用词频道（同为聚合范围）。
-                    // 分区 / 收藏频道的池只含本分区（或收藏集）的词，开关**别的**分区不影响
-                    // 它们——bankTick++ 会把浏览页重新洗牌、丢掉浏览位置，不做。
-                    // 当前分区被关掉的情形不需要这里管：visibleScenes effect 会把频道弹回 rec，
-                    // channel 变化本身就是装载 effect 的 key。
-                    if (channel == StudyRepository.CHANNEL_DAILY ||
-                        channel == StudyRepository.CHANNEL_COMMON
-                    ) {
-                        bankTick++
-                    }
-                },
-                // v16 拖动落位（v17 起仅已显示分区可拖；↑↓ 按钮已删，无 onMove 回调）：
-                // 与 onSetVisible 同一套「写库 → 重读镜像」，落点是目标分区在 order 里的下标
+                // 与空态引导页的「一键导入官方词库」共用）
+                onBanksChanged = { applyBanksChanged() },
+                // v29 拖动落位：写库 → 重读镜像，落点是目标词库在 order 里的下标
                 onMoveTo = { id, targetIndex ->
                     settings.moveSceneTo(id, targetIndex)
                     orderedScenes = settings.orderedScenes()

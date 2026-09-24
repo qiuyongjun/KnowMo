@@ -6,30 +6,22 @@ import org.json.JSONObject
 
 /**
  * v6 设置仓库（design.md §11.1）：独立于 StudyRepository 的 SharedPreferences（`app_settings`）+ 单 JSON：
- * `{"order": [sceneId...], "hidden": [sceneId...], "quota": 10, "quotaNew": 5}`。
- * - order = 场景分区显示顺序（**rec / fav / daily 不进**；存储中出现未知 id 忽略；存储后新增的分区按 SCENES 固有顺序补尾）；
- * - hidden = 隐藏分区 id 集合（**缺省 = 全部分区**——频道栏默认只剩推荐 + 收藏两个固定频道，
- *   prd v9 第 4 条）。**v12 口径（QYJ 2026-09-20，design.md §15）：新装与升级行为一致** ——
- *   存储 JSON 的 `order` 里没有的分区（= 存储后新增的分区）一律按隐藏处理，故任何分区都要进设置页
- *   手动开启才会出现在频道栏；「缺省只对新装机生效」的旧口径作废。
- * - 常用词分区（daily）**不进显隐管理**：不可开关、设置页无此行（v9 第 4 条口径细化，
- *   QYJ 2026-09-20 拍板——原「默认隐藏（设置里可打开）」作废）；它是推荐的基础内容源，
- *   其词由 StudyRepository 特例（CHANNEL_COMMON）恒入推荐范围。
- *   ⚠️ v17：daily 同时成为**频道栏里的固定频道**（恒显示、不可移除）。「不可移除」正是靠
- *   `manageableIds()` 排除它实现的 —— 设置页没有它的行，用户无从关闭。故**本文件的显隐逻辑
- *   一行都不需要为它改动**（见 ui/Common.kt 的 ChannelBar 注释）。
- * - **v17/v18 分区退役**：`SCENES` 先删 `bank` / `medicine` / `emergency`（v17），再删
- *   `market` / `gov` / `express` / `property` / `weather`（v18）。存储 JSON 里残留的这些旧 id
- *   会被 `manageableIds()` 过滤掉；但若用户当初把它们设成了**可见**，其词（若还有存活的）会随之
- *   消失 —— 为此 `load()` 用 [MERGED_INTO] 表做一次性显隐迁移（只登记落点仍是场景分区的那些；
- *   落点为 `daily` 的不需要，daily 永不可隐藏）。
+ * `{"order": [sceneId...], "quota": 10, "quotaNew": 5}`。
+ * - order = 场景分区（词库）显示顺序（**rec / fav / daily 不进**；存储中出现未知 id 忽略；
+ *   存储后新增的分区按固定顺序补尾）。
+ * - **v29（QYJ 2026-09-24）：分区级显隐废除**——不再有 hidden 集合，`visibleScenes()` =
+ *   `orderedScenes()`（全部已导入词库）；**显隐由词库的导入/删除直接控制**（导入即显示、
+ *   删除即隐藏）。旧存储 JSON 里的 `hidden` 键读入即忽略。原 v12「存储后新增分区默认隐藏」、
+ *   v17 MERGED_INTO 显隐迁移随 hidden 一并作废（分区集合自 v23 起已全部来自词库导入）。
+ * - **v17/v18/v23 分区退役**：内置分区已全部退役（v23 起分区集合全部来自词库导入）。
+ *   存储 JSON 里残留的旧分区 id 会被 `manageableIds()` 过滤掉，无需任何迁移。
  * - quota = 每日学习词数量（3/5/10/15/20，缺省 10）。**只被 StudyRepository.buildQueue 在重建队列时读**——
  *   当日队列冻结不变、次日生效（design.md §11.1 的注入语义由 MainActivity 组装 quotaProvider 完成）；
  * - quotaNew = 每天学几个新词（1/3/5/10，缺省 5，v6 R14 新词配额独立：新词速率恒定、不被到期复习
  *   挤占；新词上限同时受 quota 总量约束）。同样只在 buildQueue 重建队列时读（次日生效）。
  *   v9：visibleScenes() 同样被 MainActivity 注入 StudyRepository.recScenesProvider（推荐范围过滤，
  *   prd v9 第 3 条）——只在重建队列 / 重洗池时读。
- * 显隐/顺序改动**即时生效**：UI 回调写库后重读 visibleScenes / orderedScenes 触发重组（AppRoot）。
+ * 顺序改动**即时生效**：UI 回调写库后重读 orderedScenes 触发重组（AppRoot）。
  */
 class AppSettings(context: Context) {
 
@@ -37,13 +29,6 @@ class AppSettings(context: Context) {
         .getSharedPreferences("app_settings", Context.MODE_PRIVATE)
 
     private var order: List<String> = defaultOrder()
-    // 缺省**全部分区隐藏**——频道栏默认只有推荐 + 收藏两个固定频道（prd v9 第 4 条）。
-    // 常用词分区（daily）不进显隐管理（manageableIds 已排除）——设置页无此行、频道栏永不出现，
-    // 其词由 StudyRepository 特例恒入推荐范围。
-    // v12（QYJ 2026-09-20）：**升级路径与缺省口径一致** —— 有存储 JSON 的用户，凡不在该 JSON 的 `order`
-    // 里的分区（= 存储之后才新增的分区）同样按隐藏处理，见 load()。故「默认隐藏」对新装与升级同等成立，
-    // 不再有「只对新装机生效」的限定。
-    private val hidden = linkedSetOf<String>().apply { addAll(manageableIds()) }
     private var quotaValue: Int = DEFAULT_QUOTA
     private var quotaNewValue: Int = DEFAULT_NEW_QUOTA   // v6 R14 每日新词配额
 
@@ -52,11 +37,10 @@ class AppSettings(context: Context) {
     }
 
     /**
-     * 可管理分区 = **全部分区**（v22 起 [allScenes]：内置 + 自定义词库分区）去掉 rec 与 daily
+     * 可管理分区 = **全部分区**（v22 起 [allScenes]：自定义词库分区）去掉 rec 与 daily
      * （fav 不在 SCENES，天然不在；两处排除都写上以防将来有人把 fav 加进 SCENES）。
-     * daily（常用词）是推荐的基础内容源特例——不参与显隐管理（设置页无此行、频道栏永不出现、不可开关），
-     * 其词由 StudyRepository.scopeIds 的 CHANNEL_COMMON 特例恒入推荐范围。
-     * v22：自定义分区由此获得与内置分区完全同等的显隐管理（默认隐藏口径见 [orderedScenes]）。
+     * v29：管理范围只剩**顺序**（显隐已废）；daily 仍被排除——它是推荐的基础内容源特例，
+     * 词由 StudyRepository.scopeIds 的 CHANNEL_COMMON 特例恒入推荐范围。
      */
     private fun manageableIds(): List<String> = allScenes()
         .filter { it.id != StudyRepository.CHANNEL_DAILY && it.id != StudyRepository.CHANNEL_FAV && it.id != StudyRepository.CHANNEL_COMMON }
@@ -77,13 +61,11 @@ class AppSettings(context: Context) {
     }
 
     /**
-     * 可见分区（按 order 过滤 hidden）——频道栏渲染序；rec/fav 由 ChannelBar 固定渲染，不经过这里。
-     * v22：`it.id in order` 把「运行期导入、尚未被用户开关过的自定义分区」视同隐藏——
-     * 显隐选择只能由用户在设置页做出，新库不许自己冒出来（与 v12「升级不冒出新分区」同一口径）。
+     * 可见分区（v29 起 = [orderedScenes]，全部已导入词库）——频道栏渲染序；
+     * rec/fav 由 ChannelBar 固定渲染，不经过这里。显隐不再有独立开关：
+     * 导入词库 = 显示分区，删除词库 = 隐藏分区。
      */
-    fun visibleScenes(): List<Scene> = orderedScenes().filter { it.id in order && it.id !in hidden }
-
-    fun hiddenIds(): Set<String> = hidden.toSet()
+    fun visibleScenes(): List<Scene> = orderedScenes()
 
     fun quota(): Int = quotaValue
 
@@ -96,31 +78,9 @@ class AppSettings(context: Context) {
     }
 
     /**
-     * 设置分区可见性；rec/fav/daily 与未知 id 一律忽略（daily 不可显隐——推荐内容源特例；防御，正常入口来自设置页已排除）。
-     *
-     * v17（QYJ 2026-09-21）：开关显隐后把该分区在 order 里搬到**两组边界**处 ——
-     * 开显示 → 落到「已显示」段**末尾**（= 未显示段之前，QYJ 拍板「开启显示的默认移动到
-     * 未显示的前面」）；关显示 → 落到「未显示」段**开头**（离原位置最近的隐藏位，便于再开回来）。
-     * 同时由此维持 order 的分组不变量：**已显示段整体在前、未显示段整体在后**（与设置页
-     * 的分段渲染一致，拖动落位换算 order 下标的前提也依赖同组相对序与渲染序一致）。
-     * 实现是同一条表达式：`可见组(不含 id) + [id] + 隐藏组(不含 id)`。
-     */
-    fun setSceneVisible(id: String, visible: Boolean) {
-        if (id == StudyRepository.CHANNEL_DAILY || id == StudyRepository.CHANNEL_FAV || id == StudyRepository.CHANNEL_COMMON) return
-        if (id !in manageableIds()) return
-        if (visible) hidden.remove(id) else hidden.add(id)
-        val visibleGroup = order.filter { it != id && it !in hidden }
-        val hiddenGroup = order.filter { it != id && it in hidden }
-        order = visibleGroup + id + hiddenGroup
-        persist()
-    }
-
-    /**
      * v16 拖动重排落位：把 id 移到 order 的 `targetIndex` 处（越界裁剪）。
-     * 设置页的分区列表是**分段渲染**的（可见组 / 隐藏组各按 order 排），段内一次拖动可能
-     * 跨多项；落点由调用方按「目标分区在 order 里的下标」给出（`orderedScenes.indexOf(targetScene)`）。
-     * v17 起只有**已显示段**可拖（未显示段不挂手势），且 `setSceneVisible` 维持
-     * 「可见组在前、隐藏组在后」的 order 不变量，段内拖动天然不会破坏分组边界。
+     * 设置页「我的词库」列表按 order 渲染（v29 起单段、无显隐分组），一次拖动可能跨多项；
+     * 落点由调用方按「目标词库在 order 里的下标」给出（`orderedScenes.indexOf(targetScene)`）。
      * 裁剪上界用 `order.lastIndex`：`removeAt(i)` 后长度恰为 lastIndex，
      * `MutableList.add(lastIndex, …)` 是合法插入点（等价于追加到末尾）。
      */
@@ -145,8 +105,8 @@ class AppSettings(context: Context) {
 
     /**
      * v22：导入/删除自定义词库后由设置页回调重扫存储（等效重新执行 [load]）——
-     * 让「老设备存储里已有的显隐选择」对新导入的分区**立即生效**（如面馆库在升级前就是可见态，
-     * 重扫后导入即恢复显示，不必等重启）。所有 setter 均即时 persist，存储是权威，重放 load 无失真。
+     * 让持久化的 order 对新导入的分区**立即生效**（补尾、过滤已删 id）。
+     * 所有 setter 均即时 persist，存储是权威，重放 load 无失真。
      */
     fun rescanScenes() = load()
 
@@ -156,42 +116,14 @@ class AppSettings(context: Context) {
         val raw = prefs.getString("settings", null) ?: return
         runCatching {
             val obj = JSONObject(raw)
-            // v12：留住这个引用——它的「存在与否」用于区分「本版本写的 JSON」与「更早的 JSON」，
-            // 见下方「存储后新增的分区默认隐藏」的判定条件。
-            val storedOrder = obj.optJSONArray("order")
+            // 未知 id 忽略；存储后新增的分区按固定顺序补到末尾（兼容口径，design.md §11.1）。
+            // v29：存储 JSON 里的 `hidden` 键读入即忽略——分区显隐已废除（可见 = 已导入）。
             val stored = mutableListOf<String>()
-            storedOrder?.let { a ->
+            obj.optJSONArray("order")?.let { a ->
                 for (i in 0 until a.length()) stored.add(a.optString(i))
             }
-            // v17：留住**未经 manageableIds 过滤**的原始 hidden —— 判断「某个已被删除的分区当初
-            // 是否处于可见态」必须看原始集合（过滤后旧 id 就丢了）。见下方显隐迁移。
-            val rawHidden = mutableSetOf<String>()
-            obj.optJSONArray("hidden")?.let { a ->
-                for (i in 0 until a.length()) rawHidden.add(a.optString(i))
-            }
-            // 未知 id 忽略；存储后新增的分区按 SCENES 固有顺序补到末尾（兼容口径，design.md §11.1）。
-            // daily 不在 manageableIds → 旧版本存储里的 "daily" 在此（及下方 hidden 过滤）自然丢弃，无需迁移
             val known = stored.filter { it in manageableIds() }
             order = known + manageableIds().filter { it !in known }
-            hidden.clear()
-            hidden.addAll(rawHidden.filter { it in manageableIds() })
-            // v12（QYJ 2026-09-20，design.md §15）：**存储后新增的分区默认隐藏**。
-            // persist() 写的是完整 order，所以「id 不在存储的 order 里」等价于「写入这份 JSON 时该分区
-            // 还不存在」，其显隐选择无从继承——取隐藏，使升级路径与新装机缺省（全部分区隐藏）口径一致：
-            // 任何分区都要进设置页手动开启才会出现在频道栏，不会因为升级自己冒出来。
-            // 仅在 order 数组确实存在时判定：缺失说明这不是本版本写的 JSON，不做推断以免覆盖用户已有选择。
-            if (storedOrder != null) {
-                hidden.addAll(manageableIds().filter { it !in known })
-                // v17 分区合并的显隐迁移（见 [MERGED_INTO]）：若某个**已被删除**的分区在存储中
-                // 「存在且未被隐藏」（= 用户当初把它打开过），把它的接收分区一并置为可见。
-                // 不迁移的后果：用户把 `bank` 设成可见、`gov` 保持隐藏 → 合并后那 26 条词整体从
-                // 频道栏消失（它们已算 gov，而 gov 是隐藏的），用户完全看不出发生了什么。
-                // 顺序要求：必须在**上一行「补尾 → 置隐藏」之后**执行，否则接收分区会先被移出
-                // hidden 又被加回去。
-                MERGED_INTO.forEach { (removed, target) ->
-                    if (removed in stored && removed !in rawHidden) hidden.remove(target)
-                }
-            }
             val q = obj.optInt("quota", DEFAULT_QUOTA)
             quotaValue = if (q in QUOTA_OPTIONS) q else DEFAULT_QUOTA
             val qn = obj.optInt("quotaNew", DEFAULT_NEW_QUOTA)   // v6 R14：旧数据无键缺省 5
@@ -201,12 +133,10 @@ class AppSettings(context: Context) {
 
     private fun persist() {
         runCatching {
-            // ⚠️ 前提：`order` 必须是**完整**的 `manageableIds()` 全集（见 defaultOrder / load 的补尾）。
-            // load() 的「存储后新增的分区默认隐藏」判定（v12，design.md §15）正是靠
-            // 「id ∉ 存储 order ⇒ 写入时该分区还不存在」这条推理 —— 改这里前先读 §15.1。
+            // ⚠️ 前提：`order` 必须是**完整**的 `manageableIds()` 全集（见 defaultOrder / load 的补尾）——
+            // 补尾与未知 id 过滤都依赖这条不变量。
             val obj = JSONObject()
                 .put("order", JSONArray(order))
-                .put("hidden", JSONArray(hidden.toList()))
                 .put("quota", quotaValue)
                 .put("quotaNew", quotaNewValue)   // v6 R14 每日新词配额
             prefs.edit().putString("settings", obj.toString()).apply()
@@ -214,30 +144,6 @@ class AppSettings(context: Context) {
     }
 
     companion object {
-        /**
-         * 分区合并的**显隐迁移表**：被删除的分区 id → 合并后的**接收分区** id。
-         * 只在 `load()` 里用：存储中某个已被删除的分区若处于「可见」态，说明用户当初主动打开过它，
-         * 此时把接收分区一并置为可见 —— 否则那些词会随分区删除而整体消失在频道栏里。
-         *
-         * 取值规则 = **最大接收分区**（按迁入条数），可复算、不留主观选择。
-         *
-         * - v17：`medicine` 29 条 → `hospital`；`emergency` 17 条拆到 phone 5 / hospital 6 /
-         *   property 4 / gov 1，最大接收方是 `hospital`。当时还有 `bank` 26 条 → `gov`。
-         * - **v18：删掉 `bank` → `gov` 这一条** —— `gov` 整区已被移除，`bank` 的词条也全部删除，
-         *   没有任何内容需要迁移（`load()` 里对已退役 id 会照常丢弃）。同时确认 v18 新退役的
-         *   `market` / `express` / `property` / `weather` **都不需要迁移项**：`weather` 与
-         *   `express`/`gov` 的例外词全部落进 `daily`，而 `daily` 是**恒显示的固定频道**；
-         *   `market` / `property` 的词条已全删，无内容可及。
-         *
-         * ⚠️ 本表只覆盖「落点仍是**场景分区**、且该分区可能处于隐藏态」的情形。落点是 `daily`
-         * 的搬迁一律不需要登记（daily 永不可隐藏）。合并关系若再变，本表与 `StudyData.SCENES`
-         * 的退役项必须同批更新。
-         */
-        private val MERGED_INTO = mapOf(
-            "medicine" to "hospital",
-            "emergency" to "hospital",
-        )
-
         /** 每日学习词数量的可选档位（prd v6 第 2 条：3/5/10/15/20） */
         val QUOTA_OPTIONS = listOf(3, 5, 10, 15, 20)
 
