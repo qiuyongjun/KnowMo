@@ -79,4 +79,7 @@ dependencies {
     // Material 核心图标集（Star/Check/Close/KeyboardArrowUp/Info），显式声明避免依赖传递变化
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.foundation:foundation")
+
+    // JVM 单测（2026-09-28 第 2 批）：CustomBanks 解析纯逻辑的回归防线，CI 跑 testDebugUnitTest
+    testImplementation("junit:junit:4.13.2")
 }

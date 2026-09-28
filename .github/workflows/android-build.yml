@@ -27,6 +27,16 @@ jobs:
         with:
           gradle-version: "8.7"
 
+      # 词库 CSV 门禁（2026-09-28 第 2 批）：官方 5 库的格式校验，规则与 App 导入校验同源，
+      # 退出码非 0 即拦截（此前 CSV 坏了要到用户在 App 里导入时才被拒绝）
+      - name: Validate wordbank CSVs
+        run: python3 tools/check_wordbank_csv.py
+
+      # JVM 单测（2026-09-28 第 2 批）：CustomBanks 解析回归防线
+      - name: Run unit tests
+        working-directory: android-app
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
+
       - name: Build debug APK
         working-directory: android-app
         run: gradle assembleDebug --no-daemon --stacktrace
