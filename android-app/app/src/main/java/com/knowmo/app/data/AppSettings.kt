@@ -38,13 +38,13 @@ class AppSettings(context: Context) {
     }
 
     /**
-     * 可管理分区 = **全部分区**（v22 起 [allScenes]：自定义词库分区）去掉 rec 与 daily
+     * 可管理分区 = **全部分区**（v22 起 [allScenes]：自定义词库分区）去掉 rec 与 fav
      * （fav 不在 SCENES，天然不在；两处排除都写上以防将来有人把 fav 加进 SCENES）。
-     * v29：管理范围只剩**顺序**（显隐已废）；daily 仍被排除——它是推荐的基础内容源特例，
-     * 词由 StudyRepository.scopeIds 的 CHANNEL_COMMON 特例恒入推荐范围。
+     * v29：管理范围只剩**顺序**（显隐已废）。v9 的 daily（CHANNEL_COMMON）排除随
+     * 2026-09-28 恒空特例删除——分区 id 派生自带「c」前缀，本就撞不上退役 id。
      */
     private fun manageableIds(): List<String> = allScenes()
-        .filter { it.id != StudyRepository.CHANNEL_DAILY && it.id != StudyRepository.CHANNEL_FAV && it.id != StudyRepository.CHANNEL_COMMON }
+        .filter { it.id != StudyRepository.CHANNEL_DAILY && it.id != StudyRepository.CHANNEL_FAV }
         .map { it.id }
 
     private fun defaultOrder(): List<String> = manageableIds()

@@ -4,9 +4,9 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.math.ln
 import kotlin.random.Random
@@ -26,19 +26,17 @@ data class TermState(val days: Int, val lastSeen: String, val lapses: Int = 0, v
  * counts = 每词当日**连击计数**（认识 +1、忘了清零；达到该词当天的过关次数即移出当日队列——
  *          复习词 [StudyRepository.REVIEW_COMBO_TARGET] 次，新词与当天答错过的词
  *          [StudyRepository.DAILY_COMBO_TARGET] 次）；
- * knownAnswers / forgotAnswers = 当日「认识」/「忘了」作答**次数**（v5 R7 起持久化，design.md §5.3）：
- *   与 counts 同一当日生命周期（隔天随 date 不符整体作废），重启不清零——完成是跨会话可达的事件，
- *   会话计数重启归零会让最真实的完成卡显示「认识了 0 次」。
- *   ⚠️ v16：**UI 战果已不再读 knownAnswers**——完成卡与设置页改用 counts 派生的**去重词数**
- *   （`todayKnownWords()`）。字段本身保留：次数是 counts 之外的独立信息，且 persist/load 需读写对称，
- *   删字段会让旧 JSON 多出一个被忽略的键（无害但无谓）。
+ * forgotAnswers = 当日「忘了」作答**次数**（忘了是可重复发生的事件，不是词的属性，保留次数口径）。
+ * knownAnswers（当日「认识」次数，v5 R7 持久化）已于 2026-09-28 删除：UI 战果自 v16 改用 counts
+ *   派生的**去重词数**（[StudyRepository.todayKnownWords]），字段再无人读——次数口径会把连击期间
+ *   每点一次「认识」都累计，与「今天学完了 N 个词」量纲不符。旧 JSON 的 knownAnswers 键 load 时
+ *   忽略（向前兼容，无需迁移）。
  * v7（design.md §12.1）：**seen 字段删除**（教读机制废除）——persist 不再写 "seen" 键；
  *   load 遇旧 JSON 的 "seen" 键直接忽略（读写不对称仅此一处，向前兼容，无需迁移）。
  */
 data class DayState(
     val date: String,
     val counts: Map<String, Int>,
-    val knownAnswers: Int = 0,
     val forgotAnswers: Int = 0,
 )
 
@@ -56,7 +54,6 @@ data class DayState(
  */
 data class DailyQueue(
     val date: String,
-    val channel: String,
     val queue: List<String>,
     val modes: List<String>,
     val answered: List<Boolean>,
@@ -143,15 +140,24 @@ class StudyRepository(
     private val quotaProvider: () -> Int = { AppSettings.DEFAULT_QUOTA },
     private val newQuotaProvider: () -> Int = { AppSettings.DEFAULT_NEW_QUOTA },
     // v9 推荐范围注入（prd 第 3 条）：**可见分区** id 集合（MainActivity 传 settings.visibleScenes()）。
-    // 推荐频道（每日任务 + 温故流）只抽这些分区的词；常用词分区（CHANNEL_COMMON）由 scopeIds
-    // 特例恒入、不受本集合影响。与配额同语义：只在重建队列 / 重洗池时读，当日队列冻结不变。
+    // 推荐频道（每日任务 + 温故流）只抽这些分区的词。与配额同语义：只在重建队列 / 重洗池时读，
+    // 当日队列冻结不变。
     private val recScenesProvider: () -> Set<String> = { allScenes().map { it.id }.toSet() },
 ) {
 
     private val prefs = context.applicationContext
         .getSharedPreferences("study_state", Context.MODE_PRIVATE)
 
-    private val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+    /**
+     * 日期口径（2026-09-28 统一）：java.time 日历日（minSdk 26 起直接可用）。
+     * 替代原 SimpleDateFormat + DAY_MS 毫秒除法——那套在有夏令时的时区会差一天，
+     * 且 daysSince（四舍五入）/ poolWeight（整除）/ dueTime（直接比较）三处算法不一致；
+     * 调度器若要 JVM 单测，届时把 LocalDate.now() 换成可注入的 Clock 再说（当前无人消费）。
+     */
+    private val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+
+    /** yyyy-MM-dd 解析；失败返回 null（调用方按各自的 fail-closed 方向兜底） */
+    private fun parseDate(s: String): LocalDate? = runCatching { LocalDate.parse(s, fmt) }.getOrNull()
 
     private val termStates = linkedMapOf<String, TermState>()
     private val queues = linkedMapOf<String, DailyQueue>()
@@ -166,13 +172,13 @@ class StudyRepository(
 
     /* ---------- 作答与间隔更新 ---------- */
 
-    fun today(): String = fmt.format(Date())
+    fun today(): String = LocalDate.now().format(fmt)
 
     /**
      * v16 当日「认识」的**去重词数**（完成卡与设置页的战果口径；持久口径：重启不清零，隔天随 DayState 作废）。
      * `counts` 的键集 = 当日作答过的词，值 ≥ 1 = 该词连击未被清零（答对过且此后没忘）——
      * 故本值 = 「今天答对过、目前还没忘掉」的词数，恒 ≤ 当日任务词数。
-     * 与 `DayState.knownAnswers`（作答**次数**，连击期间每点一次「认识」都 +1）刻意区分：
+     * 与作答**次数**口径（已删除的 knownAnswers 字段，连击期间每点一次「认识」都 +1）刻意区分：
      * 新词要连对 3 次才移出队列，次数口径会把一个词的成果重复计数，
      * 与「今天学完了 N 个词」量纲不符，v16 改为词数（设置页与完成卡统一）。
      */
@@ -231,7 +237,7 @@ class StudyRepository(
                 }
                 // 当日学习阶段的认识只推进连击，跨日间隔等下次复习检验再更新
             }
-            day = d.copy(counts = d.counts + (id to count), knownAnswers = d.knownAnswers + 1)
+            day = d.copy(counts = d.counts + (id to count))
         } else {
             when {
                 // 新词第一次就不认识是正常的：进入学习状态，不记遗忘、不降难度
@@ -297,23 +303,17 @@ class StudyRepository(
         return (prevDays * ease).roundToInt().coerceIn(1, cap)
     }
 
-    /** 到期日时间戳（lastSeen + days）；lastSeen 解析失败按最早处理 */
-    private fun dueTime(state: TermState): Long =
-        runCatching { fmt.parse(state.lastSeen)?.time }.getOrNull()
-            ?.plus(state.days * DAY_MS) ?: Long.MIN_VALUE
-
-    /** 是否到期：lastSeen + days ≤ 今天；空 lastSeen 视为立即到期 */
+    /** 是否到期：lastSeen + days ≤ 今天（日历日差）；空 lastSeen / 解析失败视为立即到期（fail-closed 到队首） */
     fun isDue(state: TermState): Boolean {
         if (state.lastSeen.isEmpty()) return true
-        val todayTime = runCatching { fmt.parse(today())?.time }.getOrNull() ?: return true
-        return dueTime(state) <= todayTime
+        val last = parseDate(state.lastSeen) ?: return true
+        return ChronoUnit.DAYS.between(last, LocalDate.now()) >= state.days
     }
 
-    /** 距 lastSeen 的整天数（四舍五入，抵消夏令时的 ±1 小时）；日期解析失败返回 null */
+    /** 距 lastSeen 的整天数（日历日差，无夏令时歧义）；日期解析失败返回 null */
     private fun daysSince(lastSeen: String): Int? {
-        val last = runCatching { fmt.parse(lastSeen)?.time }.getOrNull() ?: return null
-        val now = runCatching { fmt.parse(today())?.time }.getOrNull() ?: return null
-        return ((now - last).toDouble() / DAY_MS).roundToInt()
+        val last = parseDate(lastSeen) ?: return null
+        return ChronoUnit.DAYS.between(last, LocalDate.now()).toInt()
     }
 
     /** 逾期程度 = 已过天数 ÷ 间隔（≥ 1 即到期，越大越该先复习）；日期解析失败视为最该复习 */
@@ -384,10 +384,8 @@ class StudyRepository(
     }
 
     /** today 的前一天（yyyy-MM-dd）；解析失败返回 null（streak 视为断掉，fail-closed 到 0/重计） */
-    private fun dayBefore(today: String): String? = runCatching {
-        val d = fmt.parse(today) ?: return null
-        fmt.format(Date(d.time - DAY_MS))
-    }.getOrNull()
+    private fun dayBefore(today: String): String? =
+        parseDate(today)?.minusDays(1)?.format(fmt)
 
     /** 作答事务需要一并提交的连续学习天数变更；当天已记账时返回 null。 */
     private data class StreakUpdate(val count: Int, val lastDate: String)
@@ -407,23 +405,21 @@ class StudyRepository(
      * v16：`todayKnownWords` 走去重词数口径（见 [todayKnownWords]），不再用 knownAnswers 次数。
      *
      * v16 **总览范围口径 = 当前可学的词**（QYJ 2026-09-21 拍板）：分子分母都只算
-     * [scopeIds]`(CHANNEL_DAILY)`（常用词 + **可见分区**）——与调度器的推荐范围同一函数，
-     * 隐藏分区后分母不再包含那些词。原口径的分母是全词库（v15 口径，549 条），而缺省全隐藏时用户实际
-     * 只学得到常用词那几十条，"已学 3 / 549" 对用户没有意义。
-     * **隐藏分区里已学过的词也一并不计**（数字会随隐藏而下降）——这是 QYJ 选定的代价，
+     * [scopeIds]`(CHANNEL_DAILY)`（**可见分区**）——与调度器的推荐范围同一函数，
+     * 删除词库后分母不再包含那些词（v29 起显隐 = 词库导入/删除，无隐藏分区形态）。
+     * **已删词库里已学过的词不计**（数字会随删除下降）——这是 QYJ 选定的代价，
      * 换来分子分母同口径、永不出现 X > N。
-     * 调用方须在**显隐变化后重取**本快照（分母依赖可见分区）。
+     * 调用方须在**词库增删后重取**本快照（分母依赖可见分区）。
      *
-     * 分区进度列表 = **可管理分区**（排除 rec / fav / daily，与 `AppSettings.manageableIds` 同一判据）：
-     * 设置页把这些行与显隐开关合并成一张卡，常用词不可显隐、不在该卡出现，
-     * 但它的词**计入总览分母**（恒入推荐范围）。
+     * 分区进度列表 = **可管理分区**（排除 rec / fav，与 `AppSettings.manageableIds` 同一判据）：
+     * 设置页「我的词库」卡按此渲染每行进度。
      */
     fun studyStats(): StudyStats {
         // 当前可学范围（与 buildQueue / poolIds 的推荐范围同源，口径不会漂）
         val currentIds = scopeIds(CHANNEL_DAILY)
         val learnedIds = currentIds.filter { termStates.containsKey(it) }
         val scenes = allScenes()
-            .filter { it.id != CHANNEL_DAILY && it.id != CHANNEL_FAV && it.id != CHANNEL_COMMON }
+            .filter { it.id != CHANNEL_DAILY && it.id != CHANNEL_FAV }
             .map { scene ->
                 val ids = STUDY_TERMS.filter { it.scene == scene.id }
                 SceneProgress(scene, ids.count { termStates.containsKey(it.id) }, ids.size)
@@ -448,8 +444,9 @@ class StudyRepository(
 
     /**
      * 范围（每日任务队列 + 池型频道抽取共用）：
-     * - 每日任务频道（`rec`）= **可见分区**的词（v9 `recScenesProvider`，隐藏分区排除——prd 第 3 条）
-     *   + 常用词分区（v9 `CHANNEL_COMMON` **恒入**——不进显隐管理、只作推荐内容源，prd 第 4 条特例）；
+     * - 每日任务频道（`rec`）= **可见分区**的词（v9 `recScenesProvider`，隐藏分区排除——prd 第 3 条）。
+     *   v9 曾有「常用词分区（CHANNEL_COMMON）恒入推荐范围」的特例，v23 内置词退役后该特例
+     *   恒为空集，2026-09-28 随常量一并删除；
      * - 收藏频道（`fav`，v6）= 收藏词 id（**有序**，不在这里洗牌——洗牌交给 poolIds 的 weightedShuffle）；
      * - 场景频道（池型）= 该场景词条。
      */
@@ -458,9 +455,7 @@ class StudyRepository(
             CHANNEL_DAILY -> {
                 // provider 构建集合有成本，提到 filter 外只算一次（每次比较都调用会放大 n 倍）
                 val recScenes = recScenesProvider()
-                STUDY_TERMS
-                    .filter { it.scene == CHANNEL_COMMON || it.scene in recScenes }
-                    .map { it.id }
+                STUDY_TERMS.filter { it.scene in recScenes }.map { it.id }
             }
             CHANNEL_FAV -> favoriteIds.toList()
             else -> STUDY_TERMS.filter { it.scene == channel }.map { it.id }
@@ -468,9 +463,8 @@ class StudyRepository(
 
     /**
      * 推荐范围当前是否为空（2026-09-23 复审修复 #2）——**可见范围**口径，供空态判别：
-     * 全部分区隐藏时 `STUDY_TERMS` 仍非空，但 rec 一张卡都抽不到，空态判据若用
-     * `STUDY_TERMS.isEmpty()` 会落到总结卡「今日任务完成 0 个词」。内部走 `scopeIds`
-     * 的同一套特例（CHANNEL_COMMON 恒入），口径与 buildQueue 完全一致。
+     * 词库全删光时 `STUDY_TERMS` 为空，空态判据若只看队列会误判；内部走 `scopeIds`，
+     * 口径与 buildQueue 完全一致。
      */
     fun recScopeEmpty(): Boolean = scopeIds(CHANNEL_DAILY).isEmpty()
 
@@ -529,7 +523,7 @@ class StudyRepository(
             cardIds.add(newCardId())
         }
         return DailyQueue(
-            today(), CHANNEL_DAILY, queue, modes, answered, 0,
+            today(), queue, modes, answered, 0,
             confirmed = false,
             cardIds = cardIds,
         )
@@ -671,10 +665,8 @@ class StudyRepository(
      */
     private fun poolWeight(id: String): Double {
         val st = termStates[id] ?: return SCENE_NEW_WEIGHT            // 未学词：固定中等权重 2.0
-        val last = runCatching { fmt.parse(st.lastSeen)?.time }.getOrNull()
-        val now = runCatching { fmt.parse(today())?.time }.getOrNull()
-        val daysAgo = if (last == null || now == null) 0L else ((now - last) / DAY_MS).coerceAtLeast(0L)
-        return 1.0 + 2.0 * st.lapses + minOf(daysAgo, 60L) / 30.0
+        val daysAgo = (daysSince(st.lastSeen) ?: 0).coerceAtLeast(0).toDouble()
+        return 1.0 + 2.0 * st.lapses + minOf(daysAgo, 60.0) / 30.0
     }
 
     /* ---------- 连击层当日状态（v8：连击计数 0–3，隔天作废；design.md §13.1） ---------- */
@@ -735,8 +727,7 @@ class StudyRepository(
                     .put("date", d.date)
                     .put("counts", JSONObject().apply { d.counts.forEach { (k, v) -> put(k, v) } })
                     // v7：seen 键已废除（教读机制删除），persist 不再写；旧 JSON 的 seen 键 load 时忽略
-                    // v5 R7 当日战果（读写对称；旧版本读到多余 key 无害）
-                    .put("knownAnswers", d.knownAnswers)
+                    // v5 R7「knownAnswers」键已随字段删除（2026-09-28）：不再写，旧 JSON 读时忽略
                     .put("forgotAnswers", d.forgotAnswers),
             )
             val qs = JSONObject()
@@ -798,11 +789,10 @@ class StudyRepository(
                         cj.keys().forEach { k -> counts[k] = cj.optInt(k) }
                     }
                     // v7：旧 JSON 的 "seen" 键**读时忽略**（教读机制已删除，读写不对称仅此一处，向前兼容）
-                    // v5 R7 当日战果：旧 JSON 无这两键 → 缺省 0（无需迁移代码，读写对称）
+                    // 旧 JSON 的 "knownAnswers" 键读时忽略（2026-09-28 字段删除，向前兼容）
                     day = DayState(
                         date,
                         counts,
-                        dj.optInt("knownAnswers", 0),
                         dj.optInt("forgotAnswers", 0),
                     )
                 }
@@ -810,7 +800,7 @@ class StudyRepository(
             obj.optJSONObject("queues")?.let { qs ->
                 qs.keys().forEach { ch ->
                     // R10：队列型频道只有每日任务——旧版本写下的**分区队列条目直接忽略**，
-                    // 下次 persist() 自然消失（一次性清理，不需要迁移代码；DailyQueue.channel 字段保留）
+                    // 下次 persist() 自然消失（一次性清理，不需要迁移代码）
                     if (ch != CHANNEL_DAILY) return@forEach
                     val qj = qs.optJSONObject(ch) ?: return@forEach
                     val queue = mutableListOf<String>()
@@ -834,7 +824,6 @@ class StudyRepository(
                     while (answered.size < queue.size) answered.add(false)
                     queues[ch] = normalizeQueue(DailyQueue(
                         qj.optString("date"),
-                        ch,
                         queue,
                         modes,
                         answered,
@@ -881,15 +870,6 @@ class StudyRepository(
          *  无完成卡）。刻意**不进 SCENES**——否则会被当成可调度场景参与毕业判定
          *  （design.md §11.1）。 */
         const val CHANNEL_FAV = "fav"
-
-        /**
-         * v9 常用词分区 id（prd 第 4 条）：「日常生活常用词」默认分区——高频字词、非固定场景。
-         * 在 SCENES 里（参与分区毕业判定），但**不进 AppSettings 显隐管理**（order/hidden 均不含
-         * daily；不可开关、频道栏不出现，2026-09-20 口径细化）；它的词**恒入推荐范围**
-         * （scopeIds 特例）——软件默认只有推荐 + 收藏两个频道时，推荐才有内容（QYJ 拍板：
-         * 只作推荐内容源，用户不可手动开启/关闭）。
-         */
-        const val CHANNEL_COMMON = "daily"
 
         /** v8 连击目标（恢复 v4 语义，prd v8 第 1 条）：当日同一个词累计 3 次「认识」→ 移出当日队列；
          *  任意一次「忘了」→ 清零。v7 曾随追加机制一并删除，v8 恢复但重复卡改由 `answerCard`
@@ -951,9 +931,6 @@ class StudyRepository(
         /** 分区抽词权重：**未学词**的固定中等权重（R10 D5）——比刚复习过的词（1.0）更靠前、
          *  比忘过/久未复习的词靠后，让未学词也能被浏览到但不是压倒性优先（design.md §3.1） */
         const val SCENE_NEW_WEIGHT = 2.0
-
-        /** 一天的毫秒数（到期日 = lastSeen + days * DAY_MS，原型口径） */
-        const val DAY_MS = 24L * 60 * 60 * 1000
 
         /** v14 streak 持久化 key（独立 prefs，不进主 state JSON，design.md §16.1） */
         private const val KEY_STREAK = "streak_count"

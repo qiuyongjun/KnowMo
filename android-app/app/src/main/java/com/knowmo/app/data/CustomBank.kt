@@ -140,7 +140,7 @@ object CustomBanks {
     fun termById(id: String): Term? = termsIndex[id]
 
     private fun rebuildTermsIndex() {
-        termsIndex = (BUILTIN_TERMS + banks.values.flatMap { it.terms }).associateBy { it.id }
+        termsIndex = banks.values.flatMap { it.terms }.associateBy { it.id }
     }
 
     fun find(id: String): CustomBank? = banks[id]
@@ -571,14 +571,15 @@ object CustomBanks {
     }
 
     /**
-     * 自定义库 id 的禁区 = 固定频道（rec/fav/daily）+ 内置在用分区。
+     * 自定义库 id 的禁区 = 固定频道（rec/fav）+ 内置在用分区。
      * **刻意不含已退役分区 id**（迁移通道，见类 KDoc）；[SCENES] 是运行时求值，
      * 不把自定义库自己的 id 算进去（同 id 重导 = 替换更新）。
+     * 原 `daily`（CHANNEL_COMMON）随 2026-09-28 恒空特例删除——CSV 派生 id 带「c」前缀，
+     * 本来就撞不上这些值，检查纯防御。
      */
     private fun forbiddenBankIds(): Set<String> =
         setOf(
             StudyRepository.CHANNEL_DAILY,
             StudyRepository.CHANNEL_FAV,
-            StudyRepository.CHANNEL_COMMON,
         ) + SCENES.map { it.id }.toSet()
 }

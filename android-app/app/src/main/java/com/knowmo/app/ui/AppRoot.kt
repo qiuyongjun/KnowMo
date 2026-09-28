@@ -110,13 +110,11 @@ private const val AUTO_ADVANCE_MIN_MS = 1500L
  *    （**完成卡保留在首位**）+ 装载温故流——上滑进入推荐浏览、回滑仍可看完成卡战果，
  *    但任务卡已被移除、**回不去**。当日重启：confirmed == true 直接进浏览模式（完成卡在首位）；
  *    false 走断点恢复（仍锁滑）。
- * 6. **推荐范围收窄**（v9 第 3/4 条，v29 修订）：推荐频道（每日任务 + 温故流）只含**已装词库分区**
+ * 6. **推荐范围收窄**（v9 第 3 条，v29 修订）：推荐频道（每日任务 + 温故流）只含**已装词库分区**
  *    的词（`recScenesProvider` 注入，MainActivity 传 settings.visibleScenes()；v29 起可见 = 已导入，
- *    分区显隐开关已废）+ **常用词分区**（`CHANNEL_COMMON`，恒入推荐——QYJ 拍板的内容源特例）。
- *    已删除词库的词两个入口都抽不到。
- *    ⚠️ v17：`CHANNEL_COMMON` 同时成了**第三个固定频道**（默认显示、不可移除，见 Common.kt 的
- *    ChannelBar）。它是**池型频道**（channel != CHANNEL_DAILY → 走 appendPoolPages 分支），
- *    浏览零写入；其词仍在推荐范围内，两条入口并存。
+ *    分区显隐开关已废）；已删除词库的词抽不到。
+ *    v9 的「常用词分区恒入推荐」特例（CHANNEL_COMMON）随 2026-09-28 死代码清理删除——
+ *    v23 起内置词退役，特例恒为空集；v17 一度存在的第三个固定频道同批退役（见 Common.kt）。
  * 7. 不展示"第 x/y 张"进度条，进度由完成卡和语音表达
  * 8. 分区完成（design.md §9.5，days >= 15）→ 频道栏加「学完」后缀（v16 起用文字，不再用 🎓），即时可逆
  *    （间隔层只由每日任务作答写入）
@@ -286,10 +284,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // （分区显隐开关已废，可见 = 已导入）。回退由既有的 LaunchedEffect(channel, bankTick)
     // 装载分支自然接管（重建队列 / 重建池型页）。
     LaunchedEffect(orderedScenes) {
-        // ⚠️ 固定频道推荐 / 收藏不来自词库分区，必须放行；CHANNEL_COMMON 保留判断以防固定频道再加
+        // ⚠️ 固定频道推荐 / 收藏不来自词库分区，必须放行（原 CHANNEL_COMMON 判断随
+        // 2026-09-28 恒空特例删除；固定频道再加时在此补）
         if (channel != StudyRepository.CHANNEL_DAILY &&
             channel != StudyRepository.CHANNEL_FAV &&
-            channel != StudyRepository.CHANNEL_COMMON &&
             channel !in orderedScenes.map { it.id }
         ) {
             channel = StudyRepository.CHANNEL_DAILY

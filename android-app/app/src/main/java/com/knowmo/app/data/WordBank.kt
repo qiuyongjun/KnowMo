@@ -12,8 +12,6 @@ package com.knowmo.app.data
  * 进度重计（v23 拍板接受）。
  */
 
-/** 内置词库（v23 起恒为空；自定义词库由 [STUDY_TERMS] 动态并入） */
-val BUILTIN_TERMS: List<Term> = emptyList()
-
-/** 全库词条 = 内置（恒空）+ 自定义词库（动态并入）。消费方无需感知「内置 / 自定义」区别。 */
-val STUDY_TERMS: List<Term> get() = BUILTIN_TERMS + CustomBanks.terms
+/** 全库词条 = 已导入的自定义词库（v23 起零内置词；官方词库 CSV 导入后同样是自定义分区，
+ *  消费方无需感知来源）。原「内置 + 自定义」并集随 2026-09-28 死代码清理一并删除。 */
+val STUDY_TERMS: List<Term> get() = CustomBanks.terms

@@ -36,6 +36,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -75,6 +76,9 @@ import com.knowmo.app.ui.theme.OrangeDark
 import com.knowmo.app.ui.theme.PageGutter
 import com.knowmo.app.ui.theme.cardShadow
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 词库行高：**必须固定** —— 拖动让位是按「行高 × 跨过几行」算位移的，行高不固定算法即失效 */
 private val BANK_ROW_H = 76.dp
@@ -124,6 +128,11 @@ fun SettingsScreen(
     // v22.1：字节入口 + 取 DISPLAY_NAME；v24（QYJ 2026-09-23）起 DISPLAY_NAME 只用于
     // 生成命名对话框的预填建议——库名 = 库身份，由用户命名决定（见 CustomBanks KDoc）
     val context = LocalContext.current
+    // 导入 / 更新的 IO 都在协程里跑（2026-09-28 P0-5）：SAF 文件可能在云盘提供方上、
+    // 官方导入要读 assets + 逐库写盘，主线程同步做会卡死界面甚至 ANR。
+    // importing 期间各导入入口的 onClick 直接忽略（官方导入幂等，但没必要重复做）。
+    val scope = rememberCoroutineScope()
+    var importing by remember { mutableStateOf(false) }
     var confirmDeleteId by remember { mutableStateOf<String?>(null) }
     // 官方词库「导入 / 更新」合一的两段确认（v29）：已装的库会被官方版覆盖（含家属自己
     // 导入的同名 CSV），必须第二击确认，不做成一按就覆盖。
@@ -132,29 +141,36 @@ fun SettingsScreen(
     var importOk by remember { mutableStateOf(false) }
     var pendingImport by remember { mutableStateOf<PendingImport?>(null) }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        // 读文件放 IO 协程（2026-09-28 P0-5）：读云盘文件同步做会卡主线程
         if (uri != null) {
-            val bytes = runCatching {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            }.getOrNull()
-            val fileName = runCatching {
-                context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                    val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+            importing = true
+            scope.launch {
+                val bytes = withContext(Dispatchers.IO) {
+                    runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
                 }
-            }.getOrNull().orEmpty()
-            when {
-                bytes == null -> {
-                    importOk = false
-                    importMessage = "读不到文件内容，请重试。"
+                val fileName = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+                        }
+                    }.getOrNull().orEmpty()
                 }
-                // .csv 扩展名兜底（MIME 白名单里 octet-stream 仍可能选到别的文件）：
-                // 库 id 不再依赖文件名，格式校验留在选文件这一步（原在 CustomBanks.import）
-                !fileName.endsWith(".csv", ignoreCase = true) -> {
-                    importOk = false
-                    importMessage = "仅支持 CSV 词库文件：用 Excel 填三列（词 / 拼音 / 用途），另存为 CSV 即可"
+                importing = false
+                when {
+                    bytes == null -> {
+                        importOk = false
+                        importMessage = "读不到文件内容，请重试。"
+                    }
+                    // .csv 扩展名兜底（MIME 白名单里 octet-stream 仍可能选到别的文件）：
+                    // 库 id 不再依赖文件名，格式校验留在选文件这一步（原在 CustomBanks.import）
+                    !fileName.endsWith(".csv", ignoreCase = true) -> {
+                        importOk = false
+                        importMessage = "仅支持 CSV 词库文件：用 Excel 填三列（词 / 拼音 / 用途），另存为 CSV 即可"
+                    }
+                    // v24：选好文件先暂存，弹命名对话框——确认库名后才入库
+                    else -> pendingImport = PendingImport(bytes, CustomBanks.suggestBankName(fileName))
                 }
-                // v24：选好文件先暂存，弹命名对话框——确认库名后才入库
-                else -> pendingImport = PendingImport(bytes, CustomBanks.suggestBankName(fileName))
             }
         }
     }
@@ -287,36 +303,46 @@ fun SettingsScreen(
                 // importOfficial 不再跳过已装库（skipInstalled=false）：已装的同 id 库走
                 // 替换更新、进度保留。两段确认保留：家属改过的同名库会被官方版覆盖。
                 SolidButton(
-                    label = if (confirmUpdateOfficial) "再点一次，确认更新" else "导入 / 更新官方词库",
+                    label = when {
+                        confirmUpdateOfficial -> "再点一次，确认更新"
+                        importing -> "正在导入…"
+                        else -> "导入 / 更新官方词库"
+                    },
                     container = if (confirmUpdateOfficial) OrangeDark else BluePrimary,
                     shape = ControlShape,
                     onClick = {
+                        if (importing) return@SolidButton
                         confirmDeleteId = null
                         if (!confirmUpdateOfficial) {
                             confirmUpdateOfficial = true
                         } else {
                             confirmUpdateOfficial = false
-                            val result = CustomBanks.importOfficial(context)
-                            val termCount = result.imported.sumOf { it.bank.terms.size }
-                            // 跨库重词跳过总数：与手动导入同口径，不再静默丢词
-                            val skippedRepeatCount = result.imported.sumOf { it.skippedRepeats }
-                            val newCount = result.imported.count { it.isNew }
-                            val updatedCount = result.imported.size - newCount
-                            importOk = result.imported.isNotEmpty()
-                            importMessage = when {
-                                result.imported.isEmpty() && result.failed.isEmpty() ->
-                                    "没有找到官方词库文件。"
-                                result.imported.isEmpty() ->
-                                    "官方词库导入失败：" + result.failed.joinToString("；")
-                                else ->
-                                    "官方词库装好了：" + listOfNotNull(
-                                        if (newCount > 0) "新装 $newCount 个" else null,
-                                        if (updatedCount > 0) "更新 $updatedCount 个" else null,
-                                    ).joinToString("、") + "，共 $termCount 条词。" +
-                                        (if (skippedRepeatCount > 0) "另有 $skippedRepeatCount 条与已装词库重复，已跳过。" else "") +
-                                        (if (result.failed.isNotEmpty()) "另有 ${result.failed.size} 个失败：${result.failed.joinToString("；")}" else "")
+                            // 导入放 IO 协程（2026-09-28 P0-5）：读 assets + 逐库校验写盘
+                            importing = true
+                            scope.launch {
+                                val result = withContext(Dispatchers.IO) { CustomBanks.importOfficial(context) }
+                                val termCount = result.imported.sumOf { it.bank.terms.size }
+                                // 跨库重词跳过总数：与手动导入同口径，不再静默丢词
+                                val skippedRepeatCount = result.imported.sumOf { it.skippedRepeats }
+                                val newCount = result.imported.count { it.isNew }
+                                val updatedCount = result.imported.size - newCount
+                                importOk = result.imported.isNotEmpty()
+                                importMessage = when {
+                                    result.imported.isEmpty() && result.failed.isEmpty() ->
+                                        "没有找到官方词库文件。"
+                                    result.imported.isEmpty() ->
+                                        "官方词库导入失败：" + result.failed.joinToString("；")
+                                    else ->
+                                        "官方词库装好了：" + listOfNotNull(
+                                            if (newCount > 0) "新装 $newCount 个" else null,
+                                            if (updatedCount > 0) "更新 $updatedCount 个" else null,
+                                        ).joinToString("、") + "，共 $termCount 条词。" +
+                                            (if (skippedRepeatCount > 0) "另有 $skippedRepeatCount 条与已装词库重复，已跳过。" else "") +
+                                            (if (result.failed.isNotEmpty()) "另有 ${result.failed.size} 个失败：${result.failed.joinToString("；")}" else "")
+                                }
+                                importing = false
+                                onBanksChanged()
                             }
-                            onBanksChanged()
                         }
                     },
                 )
@@ -396,21 +422,26 @@ fun SettingsScreen(
                         ?.let { "「${it.name}」（${it.terms.size} 条）" }
                 },
                 onConfirm = { title ->
-                    runCatching { CustomBanks.import(context, pending.bytes, title) }
-                        .onSuccess { outcome ->
-                            importOk = true
-                            importMessage = "已导入「${outcome.bank.name}」（${outcome.bank.terms.size} 条）。" +
-                                // 跨库重词跳过提示：面馆私有库与官方常用字词库有交集属常态，家属需要知道没全收
-                                (if (outcome.skippedRepeats > 0) "另有 ${outcome.skippedRepeats} 条与已装词库重复，已跳过。" else "") +
-                                (if (outcome.isNew) "已自动显示，可回学习界面开始。" else "替换更新完成。")
-                            // v29：导入即显示，无「首次入库默认显示」的落位逻辑
-                            onBanksChanged()
-                        }
-                        .onFailure { e ->
-                            importOk = false
-                            importMessage = e.message ?: "导入失败，请重试。"
-                        }
+                    // 解析 + 写盘放 IO 协程（2026-09-28 P0-5，与官方导入同口径）；对话框先收起
                     pendingImport = null
+                    importing = true
+                    scope.launch {
+                        runCatching { withContext(Dispatchers.IO) { CustomBanks.import(context, pending.bytes, title) } }
+                            .onSuccess { outcome ->
+                                importOk = true
+                                importMessage = "已导入「${outcome.bank.name}」（${outcome.bank.terms.size} 条）。" +
+                                    // 跨库重词跳过提示：面馆私有库与官方常用字词库有交集属常态，家属需要知道没全收
+                                    (if (outcome.skippedRepeats > 0) "另有 ${outcome.skippedRepeats} 条与已装词库重复，已跳过。" else "") +
+                                    (if (outcome.isNew) "已自动显示，可回学习界面开始。" else "替换更新完成。")
+                                // v29：导入即显示，无「首次入库默认显示」的落位逻辑
+                                onBanksChanged()
+                            }
+                            .onFailure { e ->
+                                importOk = false
+                                importMessage = e.message ?: "导入失败，请重试。"
+                            }
+                        importing = false
+                    }
                 },
                 onDismiss = { pendingImport = null },
             )
