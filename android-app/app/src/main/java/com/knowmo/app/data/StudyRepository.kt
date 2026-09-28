@@ -770,6 +770,7 @@ class StudyRepository(
 
     private fun load() {
         val raw = prefs.getString("state", null) ?: return
+        var ok = false
         runCatching {
             val obj = JSONObject(raw)
             obj.optJSONObject("terms")?.let { ts ->
@@ -849,6 +850,19 @@ class StudyRepository(
             obj.optJSONArray("favorites")?.let { fa ->
                 for (i in 0 until fa.length()) favoriteIds.add(fa.optString(i))
             }
+            ok = true
+        }
+        // 解析失败（2026-09-28 修复）：把原字符串备份到独立 key。不备份的话内存里是空状态，
+        // 下一次 persist() 会用空状态覆盖 "state"——用户全部学习进度**静默清零**。
+        // 刻意**不拦截**后续 persist（拦截会让用户「看起来在学、重启全丢」，失败形态更糟且无现场）：
+        // 新进度照常累积，损坏现场原样保留在备份 key，人工恢复 = 把值拷回 "state" 即可。
+        // 触发面：prefs 存储损坏 / 手改 / 备份还原出坏数据（SharedPreferences 自身写整份 XML，
+        // 半截写入被 rename 原子性挡住，正常使用走不到这里）。
+        if (!ok) {
+            prefs.edit()
+                .putString(KEY_STATE_CORRUPT_BACKUP, raw)
+                .putString(KEY_STATE_CORRUPT_BACKUP_DATE, today())
+                .apply()
         }
     }
 
@@ -912,7 +926,8 @@ class StudyRepository(
         const val DAILY_POOL_QUOTA = 10
 
         /** v6 R14 每日新词配额缺省值（newQuotaProvider 兜底；设置页「每天学几个新词」注入）——
-         *  新词速率恒定，不被到期复习挤占（主流「新学/复习分开配置」的口径） */
+         *  v28 起语义是**新词上限**而非固定速率：复习优先占预算，复习积压时新词自动降速到保底 1 个
+         *  （buildQueue KDoc；v16「新词固定几个」的旧承诺已撤回） */
         const val DAILY_NEW_QUOTA = 5
 
         /** v8 间隔封顶分级（prd v8 第 4 条）：普通词 30 天（v5 以来的口径不变）；
@@ -943,5 +958,11 @@ class StudyRepository(
         /** v14 streak 持久化 key（独立 prefs，不进主 state JSON，design.md §16.1） */
         private const val KEY_STREAK = "streak_count"
         private const val KEY_STREAK_LAST_DATE = "last_study_date"
+
+        /** 主状态 JSON 解析失败时的原始备份 key（2026-09-28 修复，见 [load]）：
+         *  值 = 损坏的原始字符串原样保存，人工恢复 = 拷回 "state"；
+         *  配套日期 key 记录备份发生时间，便于辨认现场新旧。 */
+        private const val KEY_STATE_CORRUPT_BACKUP = "state_corrupt_backup"
+        private const val KEY_STATE_CORRUPT_BACKUP_DATE = "state_corrupt_backup_date"
     }
 }

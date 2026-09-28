@@ -186,7 +186,7 @@ object CustomBanks {
         val bank = parsed.bank
         val d = dir ?: File(context.applicationContext.filesDir, DIR_NAME).also { dir = it }
         d.mkdirs()
-        File(d, bank.id + ".json").writeText(toJson(bank), Charsets.UTF_8)
+        atomicWriteJson(File(d, bank.id + ".json"), toJson(bank))
         val isNew = !banks.containsKey(bank.id)
         banks[bank.id] = bank
         rebuildTermsIndex()
@@ -199,8 +199,28 @@ object CustomBanks {
      */
     fun delete(id: String) {
         banks.remove(id)
-        dir?.let { d -> File(d, "$id.json").delete() }
+        dir?.let { d ->
+            File(d, "$id.json").delete()
+            File(d, "$id.json.tmp").delete()   // 原子写残留的临时文件一并清掉
+        }
         rebuildTermsIndex()
+    }
+
+    /**
+     * 原子替换写 JSON（2026-09-28 修复）：原 `writeText` 直接写目标文件，写到一半崩溃会留下
+     * 损坏的 JSON——下次 [load] 会把该库**静默丢掉**且无任何提示。改为先写同目录 `.tmp` 临时
+     * 文件、再 `renameTo` 上位：同目录同分区的 rename 是原子操作，任何时刻崩溃，目标文件
+     * 要么是旧完整版、要么是新完整版。残留 `.tmp` 不会被装载（load 只收 `*.json`），
+     * 下次导入同名库时被覆盖，删除词库时一并清理。失败抛原异常——「先写盘成功再进注册表」
+     * 的导入契约（见 [import] KDoc）不变。
+     */
+    private fun atomicWriteJson(target: File, text: String) {
+        val tmp = File(target.parentFile, target.name + ".tmp")
+        tmp.writeText(text, Charsets.UTF_8)
+        if (!tmp.renameTo(target)) {
+            tmp.delete()
+            throw IllegalStateException("词库文件写入失败（无法替换 ${target.name}），请重试")
+        }
     }
 
     /**

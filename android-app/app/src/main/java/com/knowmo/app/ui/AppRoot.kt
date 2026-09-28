@@ -14,7 +14,6 @@ import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -378,13 +377,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 "上滑进入推荐模式，随便看看吧。"
         Page.Guide ->
             // v6 空收藏引导；v23 区分零词库（全库无词 → 导入引导）。
-            // 2026-09-23 复审修复（#2）：第三种空态——推荐频道上词库在、但可见范围为空
-            // （分区全隐藏），旧判据会把它当「空收藏」念出与现场无关的话术。
-            when {
-                STUDY_TERMS.isEmpty() -> EMPTY_BANK_GUIDE_SPEECH
-                channel == StudyRepository.CHANNEL_DAILY -> HIDDEN_ALL_GUIDE_SPEECH
-                else -> FAV_GUIDE_SPEECH
-            }
+            // 2026-09-28 清理：原第三种空态「词库在但推荐可见范围为空」自 v29 起不可达——
+            // 显隐 = 词库导入/删除（visibleScenes() = orderedScenes()），STUDY_TERMS 非空
+            // ⟺ rec 推荐范围非空，「分区全隐藏」的引导话术与分支一并删除。
+            if (STUDY_TERMS.isEmpty()) EMPTY_BANK_GUIDE_SPEECH else FAV_GUIDE_SPEECH
     }
 
     /** 池型追加（v5 R10 §5.7-2）：从池里顺序取 count 张追加到**尾部**；池空用 `repo.poolIds(channel)`
@@ -917,10 +913,11 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         inBrowse = browseMode,
                     )
                     Page.Guide ->
-                        // 空态文案三分（2026-09-23 复审修复 #2，与 cardSpeech 同一判据）：
-                        // 全库无词 → 导入引导（v23.1 起带「一键导入」按钮，修复 #1：官方词库
-                        // 随 APK 分发，家属不用再去 GitHub 下载 CSV）；推荐频道 + 有词 →
-                        // 分区全隐藏引导；否则空收藏引导
+                        // 空态文案两分（与 cardSpeech 同一判据）：全库无词 → 导入引导
+                        // （v23.1 起带「一键导入」按钮，官方词库随 APK 分发）；否则空收藏引导。
+                        // 2026-09-28 清理：原「推荐频道 + 有词 → 分区全隐藏引导」分支自 v29 起
+                        // 不可达（显隐 = 词库导入/删除，可见范围恒等于全部已装词库），
+                        // 随 HIDDEN_ALL_* 文案一并删除。
                         if (STUDY_TERMS.isEmpty()) {
                             GuideCard(
                                 EMPTY_BANK_GUIDE_TITLE, EMPTY_BANK_GUIDE_BODY, "一键导入官方词库",
@@ -928,11 +925,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                             ) {
                                 importOfficialBanks()
                             }
-                        } else if (channel == StudyRepository.CHANNEL_DAILY) {
-                            GuideCard(
-                                HIDDEN_ALL_GUIDE_TITLE, HIDDEN_ALL_GUIDE_BODY,
-                                icon = Icons.Filled.Settings, iconTint = BluePrimary, haloColor = BlueBg,
-                            )
                         } else {
                             GuideCard(FAV_GUIDE_TITLE, FAV_GUIDE_BODY)
                         }

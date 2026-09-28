@@ -17,8 +17,9 @@ import org.json.JSONObject
  *   存储 JSON 里残留的旧分区 id 会被 `manageableIds()` 过滤掉，无需任何迁移。
  * - quota = 每日学习词数量（3/5/10/15/20，缺省 10）。**只被 StudyRepository.buildQueue 在重建队列时读**——
  *   当日队列冻结不变、次日生效（design.md §11.1 的注入语义由 MainActivity 组装 quotaProvider 完成）；
- * - quotaNew = 每天学几个新词（1/3/5/10，缺省 5，v6 R14 新词配额独立：新词速率恒定、不被到期复习
- *   挤占；新词上限同时受 quota 总量约束）。同样只在 buildQueue 重建队列时读（次日生效）。
+ * - quotaNew = 每天学几个新词（1/3/5/10，缺省 5，v6 R14 新词配额独立；v28 起语义是**新词上限**
+ *   而非固定速率——复习优先占预算，积压时新词自动降速到保底 1 个；新词上限同时受 quota 总量约束）。
+ *   同样只在 buildQueue 重建队列时读（次日生效）。
  *   v9：visibleScenes() 同样被 MainActivity 注入 StudyRepository.recScenesProvider（推荐范围过滤，
  *   prd v9 第 3 条）——只在重建队列 / 重洗池时读。
  * 顺序改动**即时生效**：UI 回调写库后重读 orderedScenes 触发重组（AppRoot）。

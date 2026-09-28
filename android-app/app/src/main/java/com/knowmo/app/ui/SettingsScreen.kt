@@ -244,7 +244,7 @@ fun SettingsScreen(
                 HorizontalDivider(color = AppLine, thickness = 1.dp)
                 Spacer(Modifier.height(18.dp))
                 CardTitle("每天学几个新词")
-                Text("新词固定几个，不被复习挤掉。改完明天生效。", fontSize = 17.sp, color = AppText2)
+                Text("复习多的时候，新词会自动少排一些，每天至少 1 个。改完明天生效。", fontSize = 17.sp, color = AppText2)
                 Spacer(Modifier.height(10.dp))
                 QuotaSelector(selected = quotaNew, options = AppSettings.NEW_QUOTA_OPTIONS, onSelect = onSetQuotaNew)
             }
