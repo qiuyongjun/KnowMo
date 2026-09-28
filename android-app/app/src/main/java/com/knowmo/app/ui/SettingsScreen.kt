@@ -33,6 +33,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -566,6 +567,8 @@ private fun BankRows(
     var draggingId by remember { mutableStateOf<String?>(null) }
     var dragFrom by remember { mutableStateOf(0) }
     var dragDy by remember { mutableStateOf(0f) }
+    // ⚠️ 临时诊断（实机拖动排查，2026-09-28，定位后删除）：拖动松手时显示走了哪个分支
+    var dragDebug by remember { mutableStateOf("") }
     val latestOrdered by rememberUpdatedState(orderedScenes)
     val latestOnMoveTo by rememberUpdatedState(onMoveTo)
     val rowPx = with(LocalDensity.current) { BANK_ROW_H.toPx() }
@@ -576,6 +579,14 @@ private fun BankRows(
             .coerceIn(0, (latestOrdered.size - 1).coerceAtLeast(0))
 
     val dragTo = if (draggingId == null) -1 else landingIndex(dragFrom)
+
+    // 诊断：onMoveTo 之后若 AppRoot 状态真的更新了，列表实例会变 → 这里读出新首行，
+    // 与拖动时显示的「move(A→B)」对得上 = 下游正常；对不上/不出现 = moveSceneTo 或状态失效
+    LaunchedEffect(orderedScenes) {
+        if (dragDebug.startsWith("end:")) {
+            dragDebug += " ｜ 新首行=${orderedScenes.firstOrNull()?.name}"
+        }
+    }
 
     orderedScenes.forEachIndexed { i, s ->
         val isDragging = s.id == draggingId
@@ -613,15 +624,22 @@ private fun BankRows(
                             // 起点下标**现算**：闭包里的 `i` 是手势 block 创建时的值，重排后即失效
                             dragFrom = latestOrdered.indexOfFirst { it.id == s.id }.coerceAtLeast(0)
                             dragDy = 0f
+                            dragDebug = "start: ${s.name}"
                         },
                         onDrag = { change, amount ->
                             change.consume()      // 别让父级 verticalScroll 同时跟着滚
                             dragDy += amount.y
                         },
                         onDragEnd = {
-                            val target = latestOrdered.getOrNull(landingIndex(dragFrom))
-                            if (target != null && target.id != s.id) {
-                                latestOnMoveTo(s.id, latestOrdered.indexOf(target))
+                            val landing = landingIndex(dragFrom)
+                            val target = latestOrdered.getOrNull(landing)
+                            when {
+                                target == null -> dragDebug = "end: landing=$landing 越界"
+                                target.id == s.id -> dragDebug = "end: landing=$landing ==自身（位移不足半行）"
+                                else -> {
+                                    latestOnMoveTo(s.id, latestOrdered.indexOf(target))
+                                    dragDebug = "end: from=$dragFrom landing=$landing → move(${s.name}→${target.name})"
+                                }
                             }
                             draggingId = null
                             dragDy = 0f
@@ -629,11 +647,21 @@ private fun BankRows(
                         onDragCancel = {
                             draggingId = null
                             dragDy = 0f
+                            dragDebug = "cancel: from=$dragFrom（手势中途被夺走）"
                         },
                     )
                 },
         )
         if (i < orderedScenes.lastIndex) HorizontalDivider(color = AppLine, thickness = 1.dp)
+    }
+    if (dragDebug.isNotEmpty()) {
+        Text(
+            dragDebug,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            color = OrangeDark,
+            modifier = Modifier.padding(top = 6.dp),
+        )
     }
 }
 
