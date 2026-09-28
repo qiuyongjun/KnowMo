@@ -84,9 +84,18 @@ class AppSettings(context: Context) {
      * 落点由调用方按「目标词库在 order 里的下标」给出（`orderedScenes.indexOf(targetScene)`）。
      * 裁剪上界用 `order.lastIndex`：`removeAt(i)` 后长度恰为 lastIndex，
      * `MutableList.add(lastIndex, …)` 是合法插入点（等价于追加到末尾）。
+     *
+     * 2026-09-28 实机修复：order 与显示列表可能失同步——order 缺某个已导入词库的 id 时，
+     * 该词库经 [orderedScenes] 的 missing 补尾仍会**显示**在末尾，但旧实现
+     * `order.indexOf(id) < 0` 直接**静默返回**：拖它永远无效、无任何提示
+     * （实机症状：拖末尾的「手机微信」到「常用字词」前不生效，诊断行确认 move 已发、列表未变）。
+     * 落位前先按 [orderedScenes] 的显示 id 序重对齐 order——与 [load] 的「known + 补尾」
+     * 同一语义（多余的退役 id 一并清除），把「order 必须是显示全集」的不变量在变更点自愈。
      */
     fun moveSceneTo(id: String, targetIndex: Int) {
-        if (order.isEmpty()) return   // 防空区间：coerceIn(0, -1) 会抛异常
+        val displayed = orderedScenes().map { it.id }
+        if (displayed.isEmpty()) return   // 防空区间：coerceIn(0, -1) 会抛异常
+        if (order != displayed) order = displayed
         val i = order.indexOf(id)
         if (i < 0) return
         val j = targetIndex.coerceIn(0, order.lastIndex)
