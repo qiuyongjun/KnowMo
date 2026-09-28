@@ -460,7 +460,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 if (snapGuided == favs.isEmpty() && kept.isNotEmpty()) {
                     browseMode = snap.browseMode
                     pages = kept
-                    freePool = snap.pool.filter { it in favs }
+                    // 池按词条 id 对账（2026-09-28 CI 修复：原写法 `it in favs` 把 Term 传给
+                    // Set<String>.contains，类型参数无法统一——v29 批次未经编译的笔误）
+                    freePool = snap.pool.filter { it.id in favs }
                     restoreTo = snap.page.coerceIn(0, maxOf(0, kept.lastIndex))
                     restored = true
                 }
