@@ -85,7 +85,13 @@ data class CsvParseResult(val bank: CustomBank, val skippedRepeats: Int)
 
 object CustomBanks {
 
-    private val banks = linkedMapOf<String, CustomBank>()
+    /** 并发模型（2026-09-30 修复）：导入/删除统一在 [ioLock] 上串行——Guide 一键导入与设置页
+     *  导入/删除是两套互不感知的 UI 守卫，曾可并发进入（banks 非线程安全；同 id 的 .tmp
+     *  并发写会损坏存储文件）。banks 写时复制整体发布（旧 Map 发布后不再原地改动），
+     *  主线程读（bankRows / scenes 等）免锁也不会 CME；[load] 仅 onCreate 单线程调用，锁外例外。 */
+    @Volatile
+    private var banks: Map<String, CustomBank> = linkedMapOf()
+    private val ioLock = Any()
     private var dir: File? = null
 
     /** 自定义分区调色板（与内置分区底色同语言的浅色系；按库 id 稳定取色） */
@@ -160,13 +166,16 @@ object CustomBanks {
     fun load(context: Context) {
         val d = File(context.applicationContext.filesDir, DIR_NAME)
         dir = d
-        banks.clear()
+        // 装载仅在 onCreate 单线程执行（先于组合与一切导入协程），就地累积即可——
+        // parse 的跨库重词校验要读到「本批已装载」的累积视图
+        val loaded = linkedMapOf<String, CustomBank>()
+        banks = loaded
         if (!d.isDirectory) return
         d.listFiles { f -> f.isFile && f.extension == "json" }
             ?.sortedBy { it.name }
             ?.forEach { f ->
                 runCatching { parse(f.readText()) }
-                    .onSuccess { banks[it.id] = it }
+                    .onSuccess { loaded[it.id] = it }
             }
         rebuildTermsIndex()
     }
@@ -181,24 +190,24 @@ object CustomBanks {
      * = 明确想学；重导替换则**不动**用户手动改过的显隐）。
      * 文件扩展名校验不在内（库名 ≠ 文件名）：SAF 选文件的 `.csv` 兜底由调用方做。
      */
-    fun import(context: Context, bytes: ByteArray, bankTitle: String): ImportOutcome {
+    fun import(context: Context, bytes: ByteArray, bankTitle: String): ImportOutcome = synchronized(ioLock) {
         val parsed = parseCsv(decode(bytes), bankTitle)
         val bank = parsed.bank
         val d = dir ?: File(context.applicationContext.filesDir, DIR_NAME).also { dir = it }
         d.mkdirs()
         atomicWriteJson(File(d, bank.id + ".json"), toJson(bank))
         val isNew = !banks.containsKey(bank.id)
-        banks[bank.id] = bank
+        banks = LinkedHashMap(banks).apply { put(bank.id, bank) }
         rebuildTermsIndex()
-        return ImportOutcome(bank, isNew, parsed.skippedRepeats)
+        ImportOutcome(bank, isNew, parsed.skippedRepeats)
     }
 
     /**
      * 删除词库：移除文件与注册表条目。**刻意不删** TermState / 收藏（见类 KDoc「与学习状态的关系」）——
      * 重导同 id 的文件学习进度自动恢复。
      */
-    fun delete(id: String) {
-        banks.remove(id)
+    fun delete(id: String) = synchronized(ioLock) {
+        banks = LinkedHashMap(banks).apply { remove(id) }
         dir?.let { d ->
             File(d, "$id.json").delete()
             File(d, "$id.json.tmp").delete()   // 原子写残留的临时文件一并清掉
@@ -237,26 +246,30 @@ object CustomBanks {
      *   （调用方按空结果提示，不抛异常阻塞空态引导页）。
      */
     fun importOfficial(context: Context, skipInstalled: Boolean = false): OfficialImportResult {
-        val appContext = context.applicationContext
-        val names = runCatching { appContext.assets.list("").orEmpty().filter { it.endsWith(".csv", ignoreCase = true) } }
-            .getOrElse { return OfficialImportResult(emptyList(), emptyList()) }
-        val imported = mutableListOf<ImportOutcome>()
-        val failed = mutableListOf<String>()
-        var skippedExisting = 0
-        for (name in names.sorted()) {
-            // 跳过判定用与 import 相同的 id 派生链（文件名 → 预填库名 → 库 id），
-            // 保证「这里跳过的」与「真导入会覆盖的」是同一个库
-            if (skipInstalled && banks.containsKey(bankIdForName(suggestBankName(name)))) {
-                skippedExisting++
-                continue
+        // 整个循环持锁：skipInstalled 的跳过判定与逐份导入之间不插入并发的装/删，否则判定失效；
+        // 内部逐份调 import，synchronized 可重入、天然安全
+        return synchronized(ioLock) {
+            val appContext = context.applicationContext
+            val names = runCatching { appContext.assets.list("").orEmpty().filter { it.endsWith(".csv", ignoreCase = true) } }
+                .getOrElse { return@synchronized OfficialImportResult(emptyList(), emptyList()) }
+            val imported = mutableListOf<ImportOutcome>()
+            val failed = mutableListOf<String>()
+            var skippedExisting = 0
+            for (name in names.sorted()) {
+                // 跳过判定用与 import 相同的 id 派生链（文件名 → 预填库名 → 库 id），
+                // 保证「这里跳过的」与「真导入会覆盖的」是同一个库
+                if (skipInstalled && banks.containsKey(bankIdForName(suggestBankName(name)))) {
+                    skippedExisting++
+                    continue
+                }
+                runCatching {
+                    val bytes = appContext.assets.open(name).use { it.readBytes() }
+                    import(appContext, bytes, suggestBankName(name))
+                }.onSuccess { imported.add(it) }
+                    .onFailure { e -> failed.add("${name.removeSuffix(".csv")}：${e.message ?: "读取失败"}") }
             }
-            runCatching {
-                val bytes = appContext.assets.open(name).use { it.readBytes() }
-                import(appContext, bytes, suggestBankName(name))
-            }.onSuccess { imported.add(it) }
-                .onFailure { e -> failed.add("${name.removeSuffix(".csv")}：${e.message ?: "读取失败"}") }
+            OfficialImportResult(imported, failed, skippedExisting)
         }
-        return OfficialImportResult(imported, failed, skippedExisting)
     }
 
     /**

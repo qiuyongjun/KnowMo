@@ -306,14 +306,17 @@ fun SettingsScreen(
                         orderedScenes = orderedScenes,
                         progressById = progressById,
                         confirmDeleteId = confirmDeleteId,
-                        // importing 期间拒绝删除（2026-09-30 修复）：CustomBanks 的 map/索引非线程安全，
-                        // 导入协程与删除并发会写坏注册表/词库文件；确认态也不置位，防导入完成后误点确认直接删库
+                        // importing 期间拒绝删除（2026-09-30 修复）：确认态也不置位，防导入完成后误点确认直接删库；
+                        // 删除移入 IO 协程（2026-09-30 修复）：CustomBanks 的导入/删除已在数据层互斥，
+                        // 主线程直删会在导入持锁时阻塞 UI
                         onRequestDelete = { if (!importing) confirmDeleteId = it },
                         onDelete = { id ->
                             if (!importing) {
-                                CustomBanks.delete(id)
                                 confirmDeleteId = null
-                                onBanksChanged()
+                                scope.launch {
+                                    withContext(NonCancellable + Dispatchers.IO) { CustomBanks.delete(id) }
+                                    onBanksChanged()
+                                }
                             }
                         },
                         onMoveTo = onMoveTo,
