@@ -23,6 +23,9 @@ node_modules/
 # --- Trae IDE ---
 .trae/
 
+# --- 脚本产物（tools/_wordbank_csv.md 由 tools/check_wordbank_csv.py 生成，不入库） ---
+tools/_wordbank_csv.md
+
 # --- OS ---
 Thumbs.db
 Desktop.ini
