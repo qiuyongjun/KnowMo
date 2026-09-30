@@ -219,6 +219,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // 当前频道完整重装载（rec 的 ensureQueue 按新日期重建队列；池型频道按 D6 跨日口径重洗）。
     var sessionDate by remember { mutableStateOf(repo.today()) }
     var dayTick by remember { mutableStateOf(0) }
+    // 频道播报（与首卡合并成一句播；主消费者 = 跳页 effect，停稳 collector 只兜底）。
+    // 声明必须在 checkDayRollover 之前——后者跨日时写入 "新的一天。"；前向引用会编译失败。
+    var pendingAnnounce by remember { mutableStateOf<String?>(null) }
     fun checkDayRollover() {
         val today = repo.today()
         if (today == sessionDate) return
@@ -271,7 +274,6 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
     var freePool by remember { mutableStateOf<List<Term>>(emptyList()) } // 池型抽取池：顺序抽取，池空重洗（两个频道类型共用）
     var restoreTo by remember { mutableStateOf<Int?>(null) }             // 断点/频道切换的目标页
-    var pendingAnnounce by remember { mutableStateOf<String?>(null) }    // 频道播报（与首卡合并成一句播；主消费者 = 跳页 effect，停稳 collector 只兜底）
     var firstChannelLoad by remember { mutableStateOf(true) }
     // v5 R8 作答后自动前进（§5.5）：本次刚作答的卡 seq；-1 = 没有待办的自动前进。
     // 用作答卡的 seq 作 effect key（而非布尔）——既能触发，又能在收尾时置回 -1 取消

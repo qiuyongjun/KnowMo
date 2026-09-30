@@ -25,6 +25,12 @@ class TTSSpeaker(context: Context) {
     private val appContext = context.applicationContext
     private var tts: TextToSpeech? = null
 
+    // 引擎世代（2026-09-30 修复）：createEngine 每次重建递增——init 回调里比对世代丢弃过期回调。
+    // 不能直接 `tts !== engine`：`engine` 是 TextToSpeech 构造器自身初始化表达式中的局部 val，
+    // Kotlin 禁止在该 lambda 内引用它（Unresolved reference）。
+    @Volatile
+    private var engineGeneration = 0
+
     @Volatile
     var ready: Boolean = false
         private set
@@ -59,13 +65,15 @@ class TTSSpeaker(context: Context) {
 
     /** 创建引擎连接并挂回调（构造与 [recheckLanguage] 重建共用） */
     private fun createEngine() {
+        engineGeneration++
+        val myGen = engineGeneration
         val engine = TextToSpeech(appContext) { status ->
             // 世代守卫（2026-09-30 修复）：[recheckLanguage] 重建时旧实例的 init 回调可能晚到
             //（慢引擎真实存在）——晚到回调会把 ready 污染到刚重建、尚未就绪的新实例上，把
             // pendingQueue 补播打到未完成初始化的新实例（speak 返回 ERROR，内容静默丢失）；
             // shutdown 之后更是会 ready=true 而 tts 已为 null → speak() 置位 speaking 却无引擎
-            // 发声，awaitQuiet() 白等 20s。非本世代引擎的回调一律丢弃。
-            if (tts !== engine) return@TextToSpeech
+            // 发声，awaitQuiet() 白等 20s。非本世代的回调一律丢弃。
+            if (myGen != engineGeneration) return@TextToSpeech
             ready = status == TextToSpeech.SUCCESS
             if (ready) {
                 refreshLanguageState()
