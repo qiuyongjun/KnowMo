@@ -77,8 +77,12 @@ import com.knowmo.app.ui.theme.PageGutter
 import com.knowmo.app.ui.theme.cardShadow
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** 导入词库的大小上限：词库是几 KB 级的小文件，2MB 已远超单库 500 词条所需，再大必是选错文件 */
+private const val IMPORT_MAX_BYTES = 2L * 1024 * 1024
 
 /** 词库行高：**必须固定** —— 拖动让位是按「行高 × 跨过几行」算位移的，行高不固定算法即失效 */
 private val BANK_ROW_H = 76.dp
@@ -145,32 +149,46 @@ fun SettingsScreen(
         if (uri != null) {
             importing = true
             scope.launch {
-                val bytes = withContext(Dispatchers.IO) {
-                    runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
-                }
-                val fileName = withContext(Dispatchers.IO) {
+                // ⚠️ 必须先 query 验名/验大小、通过后才 readBytes（2026-09-30 修复）：MIME 白名单含
+                // octet-stream，文件选择器里几百 MB 的视频/安装包都能被选中——先读后验会把整份文件读进堆直接 OOM。
+                // SIZE 列个别云盘提供方可能缺失，缺失时放行、由扩展名与后续解析兜底。
+                val (fileName, fileSize) = withContext(Dispatchers.IO) {
                     runCatching {
                         context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
-                        }
-                    }.getOrNull().orEmpty()
+                            val nameIdx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                            val sizeIdx = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                            if (nameIdx >= 0 && c.moveToFirst()) {
+                                val size = if (sizeIdx >= 0 && !c.isNull(sizeIdx)) c.getLong(sizeIdx) else null
+                                c.getString(nameIdx).orEmpty() to size
+                            } else "" to null
+                        } ?: "" to null
+                    }.getOrDefault("" to null)
                 }
-                importing = false
                 when {
-                    bytes == null -> {
-                        importOk = false
-                        importMessage = "读不到文件内容，请重试。"
-                    }
                     // .csv 扩展名兜底（MIME 白名单里 octet-stream 仍可能选到别的文件）：
                     // 库 id 不再依赖文件名，格式校验留在选文件这一步（原在 CustomBanks.import）
                     !fileName.endsWith(".csv", ignoreCase = true) -> {
                         importOk = false
                         importMessage = "仅支持 CSV 词库文件：用 Excel 填三列（词 / 拼音 / 用途），另存为 CSV 即可"
                     }
-                    // v24：选好文件先暂存，弹命名对话框——确认库名后才入库
-                    else -> pendingImport = PendingImport(bytes, CustomBanks.suggestBankName(fileName))
+                    fileSize != null && fileSize > IMPORT_MAX_BYTES -> {
+                        importOk = false
+                        importMessage = "这个文件太大了，是不是选错了？词库只是几 KB 的小文件"
+                    }
+                    else -> {
+                        val bytes = withContext(Dispatchers.IO) {
+                            runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+                        }
+                        if (bytes == null) {
+                            importOk = false
+                            importMessage = "读不到文件内容，请重试。"
+                        } else {
+                            // v24：选好文件先暂存，弹命名对话框——确认库名后才入库
+                            pendingImport = PendingImport(bytes, CustomBanks.suggestBankName(fileName))
+                        }
+                    }
                 }
+                importing = false
             }
         }
     }
@@ -288,11 +306,15 @@ fun SettingsScreen(
                         orderedScenes = orderedScenes,
                         progressById = progressById,
                         confirmDeleteId = confirmDeleteId,
-                        onRequestDelete = { confirmDeleteId = it },
+                        // importing 期间拒绝删除（2026-09-30 修复）：CustomBanks 的 map/索引非线程安全，
+                        // 导入协程与删除并发会写坏注册表/词库文件；确认态也不置位，防导入完成后误点确认直接删库
+                        onRequestDelete = { if (!importing) confirmDeleteId = it },
                         onDelete = { id ->
-                            CustomBanks.delete(id)
-                            confirmDeleteId = null
-                            onBanksChanged()
+                            if (!importing) {
+                                CustomBanks.delete(id)
+                                confirmDeleteId = null
+                                onBanksChanged()
+                            }
                         },
                         onMoveTo = onMoveTo,
                     )
@@ -320,7 +342,10 @@ fun SettingsScreen(
                             // 导入放 IO 协程（2026-09-28 P0-5）：读 assets + 逐库校验写盘
                             importing = true
                             scope.launch {
-                                val result = withContext(Dispatchers.IO) { CustomBanks.importOfficial(context) }
+                                // NonCancellable（2026-09-30 修复）：导入一旦开始就做完——中途退出设置页
+                                // 取消协程会让写盘半途而废，且 onBanksChanged 不执行 = 新库不进频道栏
+                                //（数据已落盘、界面不知道，直到重启 App 才出现）
+                                val result = withContext(NonCancellable + Dispatchers.IO) { CustomBanks.importOfficial(context) }
                                 val termCount = result.imported.sumOf { it.bank.terms.size }
                                 // 跨库重词跳过总数：与手动导入同口径，不再静默丢词
                                 val skippedRepeatCount = result.imported.sumOf { it.skippedRepeats }
@@ -354,21 +379,24 @@ fun SettingsScreen(
                         .clip(ControlShape)
                         .background(AppSurface)
                         .clickable {
-                            confirmDeleteId = null
-                            confirmUpdateOfficial = false
-                            // 白名单要兜住各应用给 CSV 标的 MIME：微信常见 text/x-csv 与
-                            // application/vnd.ms-excel，缺了会在文件选择器里显示灰色不可选
-                            importLauncher.launch(
-                                arrayOf(
-                                    "text/csv",
-                                    "text/comma-separated-values",
-                                    "text/x-csv",
-                                    "text/plain",
-                                    "application/octet-stream",
-                                    "application/vnd.ms-excel",
-                                ),
-                            )
-                        },
+                        // importing 守卫（2026-09-30 修复）：官方导入进行中不起第二个导入——
+                        // CustomBanks 非线程安全，并发写会坏注册表/词库文件
+                        if (importing) return@clickable
+                        confirmDeleteId = null
+                        confirmUpdateOfficial = false
+                        // 白名单要兜住各应用给 CSV 标的 MIME：微信常见 text/x-csv 与
+                        // application/vnd.ms-excel，缺了会在文件选择器里显示灰色不可选
+                        importLauncher.launch(
+                            arrayOf(
+                                "text/csv",
+                                "text/comma-separated-values",
+                                "text/x-csv",
+                                "text/plain",
+                                "application/octet-stream",
+                                "application/vnd.ms-excel",
+                            ),
+                        )
+                    },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text("导入词库文件", fontSize = 22.sp, fontWeight = FontWeight.Black, color = AppText2)
@@ -426,13 +454,21 @@ fun SettingsScreen(
                     pendingImport = null
                     importing = true
                     scope.launch {
-                        runCatching { withContext(Dispatchers.IO) { CustomBanks.import(context, pending.bytes, title) } }
-                            .onSuccess { outcome ->
+                        // NonCancellable + runCatching 移入 IO 段（2026-09-30 修复）：① 导入一旦开始
+                        // 就做完，中途退出设置页取消协程会写盘半途而废；② runCatching 在外层会吞掉
+                        // CancellationException（协程反模式）且让 onBanksChanged 不执行——
+                        // 数据落盘、界面不知道，新库直到重启 App 才出现在频道栏。
+                        val outcome = withContext(NonCancellable + Dispatchers.IO) {
+                            runCatching { CustomBanks.import(context, pending.bytes, title) }
+                        }
+                        importing = false
+                        outcome
+                            .onSuccess { r ->
                                 importOk = true
-                                importMessage = "已导入「${outcome.bank.name}」（${outcome.bank.terms.size} 条）。" +
+                                importMessage = "已导入「${r.bank.name}」（${r.bank.terms.size} 条）。" +
                                     // 跨库重词跳过提示：面馆私有库与官方常用字词库有交集属常态，家属需要知道没全收
-                                    (if (outcome.skippedRepeats > 0) "另有 ${outcome.skippedRepeats} 条与已装词库重复，已跳过。" else "") +
-                                    (if (outcome.isNew) "已自动显示，可回学习界面开始。" else "替换更新完成。")
+                                    (if (r.skippedRepeats > 0) "另有 ${r.skippedRepeats} 条与已装词库重复，已跳过。" else "") +
+                                    (if (r.isNew) "已自动显示，可回学习界面开始。" else "替换更新完成。")
                                 // v29：导入即显示，无「首次入库默认显示」的落位逻辑
                                 onBanksChanged()
                             }
@@ -440,7 +476,6 @@ fun SettingsScreen(
                                 importOk = false
                                 importMessage = e.message ?: "导入失败，请重试。"
                             }
-                        importing = false
                     }
                 },
                 onDismiss = { pendingImport = null },

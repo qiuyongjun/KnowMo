@@ -24,6 +24,7 @@ class CustomBanksParseTest {
 
     /* ---------- 正常路径 ---------- */
 
+    @Test
     fun parseCsv_normalRows_buildsTermsWithPinyinPairs() {
         val r = CustomBanks.parseCsv(
             csv("地铁站,dì tiě zhàn,看到这仨字就是坐地铁", "公交站,gōng jiāo zhàn,等公共汽车的牌子"),
@@ -42,6 +43,7 @@ class CustomBanksParseTest {
         assertTrue("词条 id 须以库 id 为前缀", t.id.startsWith(r.bank.id + "-"))
     }
 
+    @Test
     fun parseCsv_headerVariants_allRecognized() {
         for (h in listOf("词,拼音,用途", "词语,拼音,用途", "text,pinyin,usage", "TEXT,PINYIN,USAGE")) {
             val r = CustomBanks.parseCsv("$h\r\n地铁站,dì tiě zhàn,坐地铁\r\n", "测试库")
@@ -49,11 +51,13 @@ class CustomBanksParseTest {
         }
     }
 
+    @Test
     fun parseCsv_noHeader_alsoWorks() {
         val r = CustomBanks.parseCsv("地铁站,dì tiě zhàn,坐地铁\r\n", "测试库")
         assertEquals(1, r.bank.terms.size)
     }
 
+    @Test
     fun parseCsv_quotedTipWithComma_rfc4180Parsed() {
         val r = CustomBanks.parseCsv("地铁,dì tiě,\"坐地铁、买票，都很常用\"\r\n", "测试库")
         assertEquals("坐地铁、买票，都很常用", r.bank.terms[0].tip)
@@ -61,6 +65,7 @@ class CustomBanksParseTest {
 
     /* ---------- 词条 id 派生（可复算契约） ---------- */
 
+    @Test
     fun parseCsv_termId_fromWordAndPinyin_notFromTip() {
         val a = CustomBanks.parseCsv(csv("地铁站,dì tiě zhàn,坐地铁"), "测试库").bank.terms[0].id
         val b = CustomBanks.parseCsv(csv("地铁站,dì tiě zhàn,换一句用途说明"), "测试库").bank.terms[0].id
@@ -69,6 +74,7 @@ class CustomBanksParseTest {
         assertNotEquals("改拼音 = 新词", a, c)
     }
 
+    @Test
     fun parseCsv_sameTitleSameBankId_differentTitleDifferentId() {
         val a = CustomBanks.parseCsv(csv("地铁站,dì tiě zhàn,坐地铁"), "我的库").bank.id
         val b = CustomBanks.parseCsv(csv("地铁站,dì tiě zhàn,坐地铁"), "我的库").bank.id
@@ -79,6 +85,7 @@ class CustomBanksParseTest {
 
     /* ---------- fail-closed 校验（任一不合格整库拒绝） ---------- */
 
+    @Test
     fun parseCsv_syllableCountMismatch_throws() {
         val e = assertThrows(IllegalArgumentException::class.java) {
             CustomBanks.parseCsv(csv("地铁站,dìtiě zhàn,坐地铁"), "测试库")
@@ -86,6 +93,7 @@ class CustomBanksParseTest {
         assertTrue(e.message!!.contains("音节数"))
     }
 
+    @Test
     fun parseCsv_missingTip_throws() {
         val e = assertThrows(IllegalArgumentException::class.java) {
             CustomBanks.parseCsv("地铁站,dì tiě zhàn,\r\n", "测试库")
@@ -93,6 +101,7 @@ class CustomBanksParseTest {
         assertTrue(e.message!!.contains("用途"))
     }
 
+    @Test
     fun parseCsv_wordTooLong_throws() {
         val e = assertThrows(IllegalArgumentException::class.java) {
             CustomBanks.parseCsv(csv("火车站售票大厅门口,huo che zhan shou piao da ting men kou,x"), "测试库")
@@ -100,6 +109,7 @@ class CustomBanksParseTest {
         assertTrue(e.message!!.contains("1~8"))
     }
 
+    @Test
     fun parseCsv_duplicateWordInBank_throws() {
         val e = assertThrows(IllegalArgumentException::class.java) {
             CustomBanks.parseCsv(csv("地铁站,dì tiě zhàn,坐地铁", "地铁站,dì tiě zhàn,再来一次"), "测试库")
@@ -107,6 +117,7 @@ class CustomBanksParseTest {
         assertTrue(e.message!!.contains("重复"))
     }
 
+    @Test
     fun parseCsv_emptySheet_throws() {
         val e = assertThrows(IllegalArgumentException::class.java) {
             CustomBanks.parseCsv("", "测试库")
@@ -114,6 +125,16 @@ class CustomBanksParseTest {
         assertTrue(e.message!!.contains("空"))
     }
 
+    @Test
+    fun parseCsv_headerOnly_throws() {
+        // 只有表头时 dataRows 非空（逃过空表检查），须在此兜住——否则空库导入成功、下次启动装载复校验失败后静默消失
+        val e = assertThrows(IllegalArgumentException::class.java) {
+            CustomBanks.parseCsv("词,拼音,用途\r\n", "测试库")
+        }
+        assertTrue(e.message!!.contains("空"))
+    }
+
+    @Test
     fun parseCsv_overMaxTerms_throws() {
         val rows = (1..(CustomBanks.MAX_TERMS + 3)).map { i ->
             val text = "词" + i.toString().padStart(4, '0')   // 恒 5 字
@@ -125,6 +146,7 @@ class CustomBanksParseTest {
         assertTrue(e.message!!.contains("超过单库上限"))
     }
 
+    @Test
     fun parseCsv_blankTitle_throws() {
         val e = assertThrows(IllegalArgumentException::class.java) {
             CustomBanks.parseCsv(csv("地铁站,dì tiě zhàn,坐地铁"), "   ")
@@ -134,6 +156,7 @@ class CustomBanksParseTest {
 
     /* ---------- suggestBankName：副本后缀清洗 + 截断 ---------- */
 
+    @Test
     fun suggestBankName_stripsCopySuffixes() {
         assertEquals("常用字词", CustomBanks.suggestBankName("常用字词.csv"))
         assertEquals("常用字词", CustomBanks.suggestBankName("常用字词(1).csv"))
@@ -142,11 +165,13 @@ class CustomBanksParseTest {
         assertEquals("常用字词", CustomBanks.suggestBankName("常用字词 - 副本(2).csv"))
     }
 
+    @Test
     fun suggestBankName_truncatesToEightChars() {
         assertEquals(8, CustomBanks.suggestBankName("十个字以上的长文件名.csv").length)
         assertEquals("十个字以上的长文", CustomBanks.suggestBankName("十个字以上的长文件名.csv"))
     }
 
+    @Test
     fun suggestBankName_keepsPlainNumberSuffix() {
         // 刻意不剥「名字 2」：无括号纯数字可能是有意命名的不同词库
         assertEquals("词库 2", CustomBanks.suggestBankName("词库 2.csv"))

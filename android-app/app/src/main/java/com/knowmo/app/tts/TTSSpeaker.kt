@@ -59,10 +59,18 @@ class TTSSpeaker(context: Context) {
 
     /** 创建引擎连接并挂回调（构造与 [recheckLanguage] 重建共用） */
     private fun createEngine() {
-        tts = TextToSpeech(appContext) { status ->
+        val engine = TextToSpeech(appContext) { status ->
+            // 世代守卫（2026-09-30 修复）：[recheckLanguage] 重建时旧实例的 init 回调可能晚到
+            //（慢引擎真实存在）——晚到回调会把 ready 污染到刚重建、尚未就绪的新实例上，把
+            // pendingQueue 补播打到未完成初始化的新实例（speak 返回 ERROR，内容静默丢失）；
+            // shutdown 之后更是会 ready=true 而 tts 已为 null → speak() 置位 speaking 却无引擎
+            // 发声，awaitQuiet() 白等 20s。非本世代引擎的回调一律丢弃。
+            if (tts !== engine) return@TextToSpeech
             ready = status == TextToSpeech.SUCCESS
             if (ready) {
                 refreshLanguageState()
+                // 走成员 tts（守卫通过后 tts === engine）而非局部 engine：万一构造器同步回调
+                //（真实实现恒异步，纯防御），局部变量尚未赋值，成员形式安全跳过不会 NPE
                 tts?.setSpeechRate(rate)
                 // 按序补播就绪前排队的请求（QUEUE_ADD 接续，不互相打断）
                 pendingQueue.forEach { text ->
@@ -77,8 +85,9 @@ class TTSSpeaker(context: Context) {
                 chineseVoice = ChineseVoiceState.MISSING
             }
         }
+        tts = engine
         // v5 R8：朗读开始/结束 → speaking 置位/清除（awaitQuiet 靠它挂起轮询；onDone / onError / onStop 都要覆盖）
-        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             // ⚠️ onStart 必须**置 true**，不能留空：`speak()` 是 QUEUE_FLUSH，冲掉上一句时框架会先给**上一句**
             //   发 onStop（「flushed from the queue」也走 onStop）→ `speaking` 被清成 false，而紧接着开始的
             //   这一句若不在 onStart 置回 true，它整段播放期间 `speaking` 都是 false：`awaitQuiet()` 立刻返回，

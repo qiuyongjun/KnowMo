@@ -419,9 +419,13 @@ object CustomBanks {
             checkAndBuildTerm(errs, seenIds, seenTexts, existingTexts, parsed, id, "📚", label, tid, text2, pinyin, tip)
         }
 
-        // 行都在但全被跳过/无有效词 → 空库不可导（装载端要求 ≥1 条）
-        if (parsed.isEmpty() && errs.isEmpty() && body.isNotEmpty()) {
-            errs.add("${body.size} 条词全部与已装词库重复，没有需要导入的新词")
+        // 空结果不可导（装载端要求 ≥1 条，否则导入成功的空库下次启动装载复校验失败、静默消失）：
+        // body 为空 = 只有表头（表头行使 dataRows 非空、逃过上面的空表检查）；body 非空但全被跳过 = 与已装库重复
+        if (parsed.isEmpty() && errs.isEmpty()) {
+            errs.add(
+                if (body.isEmpty()) "表格是空的：至少要有一行词"
+                else "${body.size} 条词全部与已装词库重复，没有需要导入的新词"
+            )
         }
 
         abortIfErrors(errs)

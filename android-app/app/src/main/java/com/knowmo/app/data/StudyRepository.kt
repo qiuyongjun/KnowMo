@@ -720,15 +720,17 @@ class StudyRepository(
                     .put("restoreTo", st.restoreTo))   // v6 R14：忘了的减半目标，旧数据缺省 0
             }
             obj.put("terms", ts)
-            val d = currentDay()
+            // ⚠️ 序列化 day 现状、不走 currentDay()（2026-09-30 修复）：currentDay 带跨日重置副作用，
+            //    answerCard 事务中段跨零点时它会先把刚写入的连击/战果清掉再序列化（内存磁盘双丢）。
+            //    跨日重置的职责留在事务入口的 currentDay() 读取点，persist 只序列化。
             obj.put(
                 "day",
                 JSONObject()
-                    .put("date", d.date)
-                    .put("counts", JSONObject().apply { d.counts.forEach { (k, v) -> put(k, v) } })
+                    .put("date", day.date)
+                    .put("counts", JSONObject().apply { day.counts.forEach { (k, v) -> put(k, v) } })
                     // v7：seen 键已废除（教读机制删除），persist 不再写；旧 JSON 的 seen 键 load 时忽略
                     // v5 R7「knownAnswers」键已随字段删除（2026-09-28）：不再写，旧 JSON 读时忽略
-                    .put("forgotAnswers", d.forgotAnswers),
+                    .put("forgotAnswers", day.forgotAnswers),
             )
             val qs = JSONObject()
             queues.toMap().forEach { (ch, rawQueue) ->

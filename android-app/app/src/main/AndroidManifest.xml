@@ -20,7 +20,12 @@
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="portrait"
+            android:configChanges="uiMode|orientation|screenSize"
             android:windowSoftInputMode="adjustResize">
+            <!-- configChanges（2026-09-30 修复）：主题是固定浅色适老配色、无深色资源差异，
+                 夜间模式自动切换（uiMode，老人睡前高频）与分屏（screenSize）无需重建 Activity——
+                 重建会丢全部 remember 会话态（浏览位置/池快照）并掐断正在播的语音。自处理后
+                 onDestroy 只在真正 finish 时到达，tts.shutdown() 时机随之正确。 -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -41,8 +41,11 @@ import com.knowmo.app.tts.TTSSpeaker
 import com.knowmo.app.ui.theme.AppSurface
 import com.knowmo.app.ui.theme.BlueBg
 import com.knowmo.app.ui.theme.BluePrimary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** feed 页：词条卡（mode 由调度器运行时计算：新学/复习/浏览）或总结卡。
  *  seq = 本会话内的出现序号：v8 起每日队列**首排每词一张卡**，连击未满 3 的词由 `answerCard`
@@ -64,6 +67,10 @@ private const val POOL_BATCH = 2
 
 /** 停稳判定后的播报去抖（ms）：滑动进行中不播，停稳后再等这么久，快速连滑不闪播 */
 private const val SETTLE_SPEECH_DELAY_MS = 200L
+
+/** 收藏频道取消收藏的延迟移卡窗口（ms）：窗口内重新收藏则不移卡——老年用户普遍双击确认，
+ *  即时移卡会让「双击取消又收藏」的词从收藏页消失（池型不重洗，卡回不来） */
+private const val FAV_REMOVE_DELAY_MS = 500L
 
 /**
  * v21.1 作答夸奖池（QYJ 2026-09-22 反馈）：连击未满时「认识」的播报从池中**随机取一条**——
@@ -220,8 +227,10 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         revealed.clear()
         results.clear()
         dayTick++
-        // 静默换卡会让老人困惑「怎么内容突然变了」；跨日重装载前先播一句
-        tts.speak("新的一天。")
+        // 静默换卡会让老人困惑「怎么内容突然变了」；跨日播报走 pendingAnnounce 通道（2026-09-30 修复）：
+        // dayTick 触发的重装载 → 跳页 effect 消费 announce 与落点卡拼成**一句**播出——直接 speak
+        // 会在跳页期间被停稳 collector 的 tts.stop() 掐断（程序跳页 isScrollInProgress 同为 true）
+        pendingAnnounce = "新的一天。"
     }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -269,6 +278,19 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     var advanceAfterSpeechSeq by remember { mutableStateOf(-1) }
 
     val pagerState = rememberPagerState(pageCount = { pages.size })
+
+    // 程序跳页豁免（2026-09-30 修复）：scrollToPage 期间 isScrollInProgress 同为 true，停稳 collector
+    // 的 tts.stop() 只该打断「用户滑动」的朗读——程序跳页（断点恢复/移卡校正/转浏览）常伴随刚发出的
+    // 语音反馈（取消收藏/导入成功播报），被 stop 掐断 = 老人只听到半个字。所有程序跳页统一走包装置位。
+    val programmaticScroll = remember { mutableStateOf(false) }
+    suspend fun jumpToPage(target: Int) {
+        programmaticScroll.value = true
+        try {
+            pagerState.scrollToPage(target)
+        } finally {
+            programmaticScroll.value = false
+        }
+    }
 
     // v6：打开设置页播报「已打开设置」（prd v6 第 2 条；keyed showSettings，关闭不播）。
     // v14：打开时重取学习统计快照（覆盖上次打开之后的作答变化——今日战果/streak/分区进度）。
@@ -416,7 +438,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         browseMode = true
         val target = (pagerState.currentPage - doneIdx).coerceIn(0, pages.size - 1)
         pages = pages.filter { it is Page.Done || (it is Page.TermPage && it.cardId == null) }
-        pagerState.scrollToPage(target)
+        // jumpToPage 豁免：校正下标的滚动若触发 tts.stop()，会掐断刚起播的完成卡战果播报
+        jumpToPage(target)
         advanceAfterSpeechSeq = -1
     }
 
@@ -544,10 +567,18 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // - 用户已抢滑离目标页 → 不播不消费，交还给停稳 collector（它的 announce 消费逻辑兜底）。
     LaunchedEffect(pages, restoreTo) {
         val target = restoreTo ?: return@LaunchedEffect
-        restoreTo = null
-        if (pages.isEmpty()) return@LaunchedEffect
+        // ⚠️ restoreTo 是本 effect 自己的 key，不能像旧版首行就清（2026-09-30 修复）：
+        //    惯性滚动中 scrollToPage 挂起等 scroll mutex，key 已变会让本协程在挂起点被取消、
+        //    跳页丢失——落点被 clamp 到任意页，任务频道若落在已答卡上 = 锁滑 + 按钮已替换 +
+        //    自动前进失效 = 界面死锁。改为跳页完成后**比较再清**（advanceAfterSpeechSeq effect
+        //    同款 Gotcha 处理）：等待期间 target 被新跳页覆盖时不误删。
+        if (pages.isEmpty()) {
+            if (restoreTo == target) restoreTo = null
+            return@LaunchedEffect
+        }
         val idx = target.coerceIn(0, pages.lastIndex)
-        pagerState.scrollToPage(idx)
+        jumpToPage(idx)
+        if (restoreTo == target) restoreTo = null
         val announce = pendingAnnounce ?: return@LaunchedEffect
         if (pagerState.currentPage != idx) return@LaunchedEffect
         pendingAnnounce = null
@@ -626,7 +657,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         pages = if (kept.isEmpty()) listOf(Page.Guide) else kept
         val target = (cur - removedBefore).coerceIn(0, pages.lastIndex)
         if (!currentRemoved && target == cur) return   // 落点未变，不必跳页
-        uiScope.launch { pagerState.scrollToPage(target) }
+        // jumpToPage 豁免：此跳页若触发 tts.stop()，会掐断调用点刚播报的「已取消收藏」
+        uiScope.launch { jumpToPage(target) }
     }
 
     /** 词库结构变化后的统一刷新（2026-09-23 抽取：设置页导入/删除与空态一键导入共用，
@@ -644,18 +676,31 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         bankTick++
     }
 
+    /** 导入进行中标志：GuideCard 按钮文案与点击忽略的判断都读它 */
+    var officialImporting by remember { mutableStateOf(false) }
+
     /** 一键导入官方词库（2026-09-23 修复 #1）：assets 里的官方 CSV 逐库走与手动导入
      *  相同的 parseCsv 校验入库，成功后同一套刷新。结果用语音反馈——空态场景下老人
      *  看着引导页，导入成功后 bankTick 会把 Guide 页换成真正的任务卡。
      *  skipInstalled = 只补缺不覆盖：本卡只在**零词库**空态出现（没有可覆盖的库），
-     *  防御性保留；设置页的合并入口用 skipInstalled = false（v29：有就更新、没有就导入）。 */
+     *  防御性保留；设置页的合并入口用 skipInstalled = false（v29：有就更新、没有就导入）。
+     *  2026-09-30 修复：全量解析 + 写盘移到 IO 协程（主线程同步做要卡几百 ms——460 词，
+     *  老人「点没反应就狂点」叠加重复导入）；busy 期间点击忽略、按钮文案换「正在导入…」。 */
     fun importOfficialBanks() {
-        val result = CustomBanks.importOfficial(context, skipInstalled = true)
-        applyBanksChanged()
-        when {
-            result.imported.isNotEmpty() -> tts.speak("词库装好了，可以开始学习了。")
-            result.skippedExisting > 0 -> tts.speak("词库已经装好了。")
-            else -> tts.speak("词库没有装上，请家人帮忙看看。")
+        if (officialImporting) return
+        officialImporting = true
+        uiScope.launch {
+            // NonCancellable：导入一旦开始就做完——AppRoot 重组/重建取消协程会让写盘半途而废
+            val result = withContext(NonCancellable + Dispatchers.IO) {
+                CustomBanks.importOfficial(context, skipInstalled = true)
+            }
+            officialImporting = false
+            applyBanksChanged()
+            when {
+                result.imported.isNotEmpty() -> tts.speak("词库装好了，可以开始学习了。")
+                result.skippedExisting > 0 -> tts.speak("词库已经装好了。")
+                else -> tts.speak("词库没有装上，请家人帮忙看看。")
+            }
         }
     }
 
@@ -736,7 +781,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 //（设置页是全屏 overlay，期间停稳事件只来自程序跳页，屏蔽无副作用）。
                 if (showSettings) return@collect
                 if (scrolling) {
-                    tts.stop()
+                    // 用户滑动打断朗读；程序跳页（jumpToPage 置位豁免）不掐——否则会切掉
+                    // 刚随跳页一起发出的语音反馈（见 jumpToPage 声明处注释）
+                    if (!programmaticScroll.value) tts.stop()
                     return@collect
                 }
                 delay(SETTLE_SPEECH_DELAY_MS)
@@ -888,10 +935,16 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                             favorites = repo.favorites().toSet()
                             // 关键操作语音反馈（适老化硬约束：按钮点击朗读含义）
                             tts.speak(if (added) "已收藏" else "已取消收藏")
-                            // v20：收藏频道内取消收藏 → 该词的卡即时移出收藏页（removeFavoriteCards）；
-                            // 其他频道浏览卡不动（v6「不重排已出卡」口径保留），下次装载/重洗自然生效
+                            // v20：收藏频道内取消收藏 → 该词的卡移出收藏页（removeFavoriteCards）；
+                            // 其他频道浏览卡不动（v6「不重排已出卡」口径保留），下次装载/重洗自然生效。
+                            // 延迟移卡（2026-09-30 修复）：老年用户普遍双击确认——第一次点取消、第二次点
+                            // 重新收藏，若即时移卡，第二次收藏后卡片已不在收藏页（池型会话内不重洗、
+                            // 卡回不来），「刚收藏的词消失了」是信任打击。窗口内又收藏回来就不移。
                             if (!added && channel == StudyRepository.CHANNEL_FAV) {
-                                removeFavoriteCards(p.t.id)
+                                uiScope.launch {
+                                    delay(FAV_REMOVE_DELAY_MS)
+                                    if (!repo.isFavorite(p.t.id)) removeFavoriteCards(p.t.id)
+                                }
                             }
                         },
                         // v8：防泄题分流删除（design.md §13.2）——点卡片一律重听「词 + 用途」
@@ -920,7 +973,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         // 随 HIDDEN_ALL_* 文案一并删除。
                         if (STUDY_TERMS.isEmpty()) {
                             GuideCard(
-                                EMPTY_BANK_GUIDE_TITLE, EMPTY_BANK_GUIDE_BODY, "一键导入官方词库",
+                                EMPTY_BANK_GUIDE_TITLE, EMPTY_BANK_GUIDE_BODY,
+                                if (officialImporting) "正在导入…" else "一键导入官方词库",
                                 icon = Icons.Filled.Add, iconTint = BluePrimary, haloColor = BlueBg,
                             ) {
                                 importOfficialBanks()
