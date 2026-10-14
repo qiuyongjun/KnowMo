@@ -81,6 +81,8 @@ fun TermCard(
     mode: CardMode,
     revealed: Boolean,
     resultText: String?,
+    /** 结果条对错（2026-10-14：取代原 emoji 前缀解析——图标/配色按它渲染，不再依赖文案内容） */
+    resultKnown: Boolean,
     isFavorite: Boolean,
     onSpeakTerm: () -> Unit,
     onSpeakWord: (String) -> Unit,
@@ -244,7 +246,7 @@ fun TermCard(
                         )
                     }
                 } else {
-                    resultText?.let { AnswerResultBar(it) }
+                    resultText?.let { AnswerResultBar(it, resultKnown) }
                 }
             }
         } else {
@@ -258,13 +260,12 @@ fun TermCard(
 
 /**
  * 作答结果条：展示层去掉 👍/💪 emoji、改矢量图标承载正/误语义（适老化硬约束：
- * 关键语义不用 emoji 表达）；startsWith 判定保留——AppRoot 话术仍含 emoji 前缀。
+ * 关键语义不用 emoji 表达）。对错由调用方按 `known` 显式传入（2026-10-14：不再 `startsWith("👍")`
+ * 解析文案前缀——那是个跨文件隐式契约，改 AppRoot 文案即断）。
  * 与作答按钮同高同圆角，在原位置替换按钮；超长升级文案自动换行（Text 用非填充 weight 收窄）。
  */
 @Composable
-private fun AnswerResultBar(msg: String) {
-    val known = msg.startsWith("👍")
-    val display = if (known) msg.removePrefix("👍").trim() else msg.removeSuffix("💪").trim()
+private fun AnswerResultBar(msg: String, known: Boolean) {
     val fg = if (known) GreenKnown else OrangeDark
     Row(
         Modifier
@@ -293,7 +294,7 @@ private fun AnswerResultBar(msg: String) {
         }
         Spacer(Modifier.width(12.dp))
         Text(
-            display,
+            msg,
             fontSize = 22.sp,
             lineHeight = 30.sp,
             fontWeight = FontWeight.Bold,

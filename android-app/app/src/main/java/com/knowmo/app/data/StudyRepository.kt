@@ -1,9 +1,11 @@
 package com.knowmo.app.data
 
 import android.content.Context
+import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.time.Clock
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
@@ -46,6 +48,9 @@ data class DayState(
  * modes / answered 与 queue 平行等长：
  * modes 记录每张卡生成时的形态（新学/复习）；
  * answered 记录**该卡实例**是否已作答——断点恢复按卡逐卡还原（design.md §9.1）。
+ * `position` 字段已于 2026-10-14 删除（代码审查：写入并持久化但从不被消费——断点恢复走
+ * answered[] + UI 的 frontierIndex()，字段是死数据，还让每次翻页多一次全量序列化）；
+ * 旧 JSON 的 position 键 load 时自然忽略，无需迁移。
  * v7（design.md §12.1）：**confirmed** = 总结卡（原完成卡）是否已被用户点「确认」——
  * 确认后当日重启 / 切频道回来直接进温故流浏览模式（browseMode），不重放考试卡与总结卡；
  * 旧 JSON 无 "confirmed" 键 → 缺省 false（兼容，无需迁移）；新队列构建恒 false。
@@ -57,7 +62,6 @@ data class DailyQueue(
     val queue: List<String>,
     val modes: List<String>,
     val answered: List<Boolean>,
-    val position: Int,
     val confirmed: Boolean = false,
     /** 卡实例 id；旧 JSON 没有该字段时由仓库按日期/下标补齐。 */
     val cardIds: List<String> = emptyList(),
@@ -119,9 +123,34 @@ data class StudyStats(
 )
 
 /**
+ * StudyRepository 主状态持久化接口（2026-10-14 随可测性重构抽出；默认实现 = SharedPreferences）：
+ * JVM 单测注入内存版（见 [StudyRepository] 类 KDoc「可测性」）。saveState 的两个 streak 参数
+ * 非空时随**同一次写入**提交——对应作答事务「只产生一次持久化」的既有语义。
+ */
+interface StudyStateStore {
+    /** 主状态 JSON（旧 "state" 键）；无数据返回 null */
+    fun loadState(): String?
+    fun saveState(stateJson: String, streakCount: Int? = null, streakLastDate: String? = null)
+    fun streakCount(): Int
+    fun streakLastDate(): String?
+    /** 主状态 JSON 解析失败时的现场备份（原文 + 日期，语义见 [StudyRepository.load]） */
+    fun backupCorrupt(raw: String, date: String)
+}
+
+/**
  * 学习状态仓库：词的记忆状态（[TermState]）+ 当日连击（[DayState]）+ 每日任务队列（[DailyQueue]）+ 收藏。
- * 主状态以一份 JSON 存在 SharedPreferences（"state"：terms / day / queues / favorites）；
- * 作答日志另存 [ReviewLog]，连续学习天数存独立 key。
+ * 主状态以一份 JSON 经 [StudyStateStore] 持久化（默认实现 = SharedPreferences "state"：
+ * terms / day / queues / favorites）；作答日志另存 [ReviewLog]，连续学习天数存 store 的独立 key。
+ *
+ * **线程契约（2026-10-14 明确，改前先读）**：本类所有公开方法只允许在**主线程**调用——
+ * 内部 termStates / queues / day / favoriteIds 都是无同步的可变集合。当前全部调用点
+ * （AppRoot 作答回调 / SettingsScreen 的刷新回调）都在主线程，成立；JVM 单测单线程同理。
+ * 与 CustomBanks 不同（那边导入/删除有 ioLock，可从 IO 协程进）——将来若真有后台调用需求，
+ * 先给本类加锁再挪调用点，别裸搬。
+ *
+ * **可测性（2026-10-14）**：[clock] / [store] / [reviewLog] 均可注入——调度核心（buildQueue /
+ * answerCard / nextInterval）的 JVM 单测由此而生（StudyRepositoryScheduleTest）；默认参数下
+ * 行为与旧版完全一致（MainActivity 无感）。
  *
  * 调度规则（历史决策见 git 历史）：
  * - 频道分两类：每日任务频道 [CHANNEL_DAILY] 是唯一的**队列型**频道（当日队列、作答、完成卡）；
@@ -135,7 +164,8 @@ data class StudyStats(
  * - 推荐范围 = 可见分区的词（recScenesProvider）；删除词库不删学习状态与收藏（id 不复用，重导即恢复）。
  */
 class StudyRepository(
-    context: Context,
+    // JVM 单测注入 null + 内存 store（见类 KDoc「可测性」）；生产调用点恒传 Activity Context
+    context: Context? = null,
     // 每天学习量（词）与新词上限：只在重建当日队列时读，改设置次日生效
     private val quotaProvider: () -> Int = { AppSettings.DEFAULT_QUOTA },
     private val newQuotaProvider: () -> Int = { AppSettings.DEFAULT_NEW_QUOTA },
@@ -143,16 +173,30 @@ class StudyRepository(
     // 推荐频道（每日任务 + 温故流）只抽这些分区的词。与配额同语义：只在重建队列 / 重洗池时读，
     // 当日队列冻结不变。
     private val recScenesProvider: () -> Set<String> = { allScenes().map { it.id }.toSet() },
+    // 日期口径（2026-10-14 注入化，原「届时再说」兑现）：调度的一切日期判断走它
+    private val clock: Clock = Clock.systemDefaultZone(),
+    store: StudyStateStore? = null,
+    reviewLog: ReviewLog? = null,
 ) {
 
-    private val prefs = context.applicationContext
-        .getSharedPreferences("study_state", Context.MODE_PRIVATE)
+    private val store: StudyStateStore = store ?: PrefsBackedStore(
+        requireNotNull(context) { "StudyRepository：未注入 store 时必须提供 Context" }
+            .applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+    )
+
+    private val reviewLog: ReviewLog = reviewLog
+        ?: ReviewLog(
+            File(
+                requireNotNull(context) { "StudyRepository：未注入 reviewLog 时必须提供 Context" }
+                    .applicationContext.filesDir, "review_log.csv",
+            ),
+        )
 
     /**
      * 日期口径（2026-09-28 统一）：java.time 日历日（minSdk 26 起直接可用）。
      * 替代原 SimpleDateFormat + DAY_MS 毫秒除法——那套在有夏令时的时区会差一天，
      * 且 daysSince（四舍五入）/ poolWeight（整除）/ dueTime（直接比较）三处算法不一致；
-     * 调度器若要 JVM 单测，届时把 LocalDate.now() 换成可注入的 Clock 再说（当前无人消费）。
+     * 2026-10-14 起 LocalDate.now() 全部改为注入的 [clock]（JVM 单测可拨钟，见类 KDoc「可测性」）。
      */
     private val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 
@@ -164,15 +208,34 @@ class StudyRepository(
     private var day = DayState("", emptyMap())
     // v6 收藏：词 id **有序**集合（LinkedHashSet 保持收藏先后）；与学习状态独立，只随 toggleFavorite 变
     private val favoriteIds = linkedSetOf<String>()
-    private val reviewLog = ReviewLog(File(context.applicationContext.filesDir, "review_log.csv"))
 
     init {
         load()
     }
 
+    /** 默认持久化实现：SharedPreferences（study_state）；key 常量在 companion */
+    private class PrefsBackedStore(private val prefs: SharedPreferences) : StudyStateStore {
+        override fun loadState(): String? = prefs.getString("state", null)
+        override fun saveState(stateJson: String, streakCount: Int?, streakLastDate: String?) {
+            val editor = prefs.edit().putString("state", stateJson)
+            if (streakCount != null && streakLastDate != null) {
+                editor.putInt(KEY_STREAK, streakCount).putString(KEY_STREAK_LAST_DATE, streakLastDate)
+            }
+            editor.apply()
+        }
+        override fun streakCount(): Int = prefs.getInt(KEY_STREAK, 0)
+        override fun streakLastDate(): String? = prefs.getString(KEY_STREAK_LAST_DATE, null)
+        override fun backupCorrupt(raw: String, date: String) {
+            prefs.edit()
+                .putString(KEY_STATE_CORRUPT_BACKUP, raw)
+                .putString(KEY_STATE_CORRUPT_BACKUP_DATE, date)
+                .apply()
+        }
+    }
+
     /* ---------- 作答与间隔更新 ---------- */
 
-    fun today(): String = LocalDate.now().format(fmt)
+    fun today(): String = LocalDate.now(clock).format(fmt)
 
     /**
      * v16 当日「认识」的**去重词数**（完成卡与设置页的战果口径；持久口径：重启不清零，隔天随 DayState 作废）。
@@ -307,13 +370,13 @@ class StudyRepository(
     fun isDue(state: TermState): Boolean {
         if (state.lastSeen.isEmpty()) return true
         val last = parseDate(state.lastSeen) ?: return true
-        return ChronoUnit.DAYS.between(last, LocalDate.now()) >= state.days
+        return ChronoUnit.DAYS.between(last, LocalDate.now(clock)) >= state.days
     }
 
     /** 距 lastSeen 的整天数（日历日差，无夏令时歧义）；日期解析失败返回 null */
     private fun daysSince(lastSeen: String): Int? {
         val last = parseDate(lastSeen) ?: return null
-        return ChronoUnit.DAYS.between(last, LocalDate.now()).toInt()
+        return ChronoUnit.DAYS.between(last, LocalDate.now(clock)).toInt()
     }
 
     /** 逾期程度 = 已过天数 ÷ 间隔（≥ 1 即到期，越大越该先复习）；日期解析失败视为最该复习 */
@@ -376,8 +439,8 @@ class StudyRepository(
      * 旧安装无 key → 0，不回填历史（prd v14：显示 0 不崩溃）。
      */
     fun studyStreak(): Int {
-        val last = prefs.getString(KEY_STREAK_LAST_DATE, null) ?: return 0
-        val count = prefs.getInt(KEY_STREAK, 0)
+        val last = store.streakLastDate() ?: return 0
+        val count = store.streakCount()
         if (count <= 0) return 0
         val t = today()
         return if (last == t || last == dayBefore(t)) count else 0
@@ -393,9 +456,9 @@ class StudyRepository(
     /** 计算连续学习天数，不在这里写库，避免一次作答产生多个持久化步骤。 */
     private fun nextStreakUpdate(): StreakUpdate? {
         val t = today()
-        if (prefs.getString(KEY_STREAK_LAST_DATE, null) == t) return null
-        val last = prefs.getString(KEY_STREAK_LAST_DATE, null)
-        val next = if (last != null && last == dayBefore(t)) prefs.getInt(KEY_STREAK, 0) + 1 else 1
+        if (store.streakLastDate() == t) return null
+        val last = store.streakLastDate()
+        val next = if (last != null && last == dayBefore(t)) store.streakCount() + 1 else 1
         return StreakUpdate(next, t)
     }
 
@@ -523,7 +586,7 @@ class StudyRepository(
             cardIds.add(newCardId())
         }
         return DailyQueue(
-            today(), queue, modes, answered, 0,
+            today(), queue, modes, answered,
             confirmed = false,
             cardIds = cardIds,
         )
@@ -613,14 +676,8 @@ class StudyRepository(
         }
     }
 
-    /** 断点位置落库（只有每日任务频道；池型频道顺序随机、页码无意义，不落库） */
-    fun saveQueuePosition(position: Int) {
-        val q = queues[CHANNEL_DAILY] ?: return
-        val p = position.coerceIn(0, q.queue.size)
-        if (q.position == p) return
-        queues[CHANNEL_DAILY] = q.copy(position = p)
-        persist()
-    }
+    // saveQueuePosition 已于 2026-10-14 删除（代码审查）：position 字段从未被消费（断点恢复走
+    // answered[] + UI 层 frontierIndex()），写入只让每次翻页多一次全量序列化。
 
     /* ---------- 池型频道抽取（R10 §3.1 / §5.7） ---------- */
 
@@ -744,7 +801,6 @@ class StudyRepository(
                         .put("modes", JSONArray(q.modes))
                         .put("answered", JSONArray(q.answered))
                         .put("cardIds", JSONArray(q.cardIds))
-                        .put("position", q.position)
                         // v7 总结卡确认标记（旧版本读到多余 key 无害）
                         .put("confirmed", q.confirmed),
                 )
@@ -752,17 +808,12 @@ class StudyRepository(
             obj.put("queues", qs)
             // v6 收藏：顶层 "favorites" 有序数组（LinkedHashSet 保序）；与学习状态独立
             obj.put("favorites", JSONArray(favoriteIds.toList()))
-            val editor = prefs.edit().putString("state", obj.toString())
-            streakUpdate?.let {
-                editor.putInt(KEY_STREAK, it.count)
-                    .putString(KEY_STREAK_LAST_DATE, it.lastDate)
-            }
-            editor.apply()
+            store.saveState(obj.toString(), streakUpdate?.count, streakUpdate?.lastDate)
         }
     }
 
     private fun load() {
-        val raw = prefs.getString("state", null) ?: return
+        val raw = store.loadState() ?: return
         var ok = false
         runCatching {
             val obj = JSONObject(raw)
@@ -829,10 +880,9 @@ class StudyRepository(
                         queue,
                         modes,
                         answered,
-                        qj.optInt("position", 0),
                         // v7 总结卡确认标记：旧 JSON 无 "confirmed" 键 → 缺省 false（读写对称）
-                        qj.optBoolean("confirmed", false),
-                        cardIds,
+                        confirmed = qj.optBoolean("confirmed", false),
+                        cardIds = cardIds,
                     ))
                 }
             }
@@ -850,14 +900,14 @@ class StudyRepository(
         // 触发面：prefs 存储损坏 / 手改 / 备份还原出坏数据（SharedPreferences 自身写整份 XML，
         // 半截写入被 rename 原子性挡住，正常使用走不到这里）。
         if (!ok) {
-            prefs.edit()
-                .putString(KEY_STATE_CORRUPT_BACKUP, raw)
-                .putString(KEY_STATE_CORRUPT_BACKUP_DATE, today())
-                .apply()
+            store.backupCorrupt(raw, today())
         }
     }
 
     companion object {
+        /** 主状态 SharedPreferences 名（[PrefsBackedStore] 用；注入 store 的 JVM 单测不触达） */
+        private const val PREFS_NAME = "study_state"
+
         /** 队列卡形态标注（持久化用；与 UI 层 CardMode 对应；自由刷页不落库，由 UI 运行时追加） */
         const val MODE_NEW = "NEW"
         const val MODE_REVIEW = "REVIEW"

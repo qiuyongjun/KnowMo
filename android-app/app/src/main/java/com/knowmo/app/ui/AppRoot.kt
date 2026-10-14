@@ -62,6 +62,13 @@ sealed interface Page {
     data object Guide : Page
 }
 
+/**
+ * 作答反馈（UI 展示用）：文案 + 对错。TermCard 的结果条按它渲染图标/配色，
+ * **不再解析文案前缀**（2026-10-14 修复：原用 "👍"/"💪" emoji 前缀作隐式契约，改文案即断；
+ * emoji 现在仅作纯视觉点缀时进文案，不承担语义）。
+ */
+private data class AnswerFeedback(val text: String, val known: Boolean)
+
 /** 池型频道的预追加页数（v5 R10：温故流与分区共用同一条追加逻辑；临近队尾 / 确认后装载时预追加，池空重洗） */
 private const val POOL_BATCH = 2
 
@@ -173,7 +180,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // 「非首次装载」推断（bankTick 重载不是切频道），改为 onSelect 里显式置位
     var switchAnnounce by remember { mutableStateOf(false) }
     val revealed = remember { mutableStateMapOf<Int, Boolean>() }      // seq -> 任务卡是否已作答（v8：不再控制拼音显隐——卡片恒全展开，只控制按钮隐藏/结果文案；浏览卡不写这里）
-    val results = remember { mutableStateMapOf<Int, String>() }        // seq -> 反馈文案
+    val results = remember { mutableStateMapOf<Int, AnswerFeedback>() }        // seq -> 反馈（文案 + 对错，渲染图标不再解析文案前缀）
     var seqGen by remember { mutableStateOf(0) }                       // 页出现序号发生器（只在 effect/回调中递增）
     val spokenKeys = remember { mutableSetOf<String>() }               // 自动朗读去重（频道 + 页身份）
     // v18：最近一次停稳落点页的去重键。**离开该页就清掉它的 spokenKeys 键** —— 否则回滑 /
@@ -229,6 +236,8 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         channelSnapshots.clear()   // 快照的 date 判定本会作废，clear 让语义显式
         revealed.clear()
         results.clear()
+        // spokenKeys 不在这里清——dayTick++ 触发的装载 effect（LaunchedEffect(channel, bankTick, dayTick)）
+        // 首行 spokenKeys.clear() 会清，且按频道顺序更准确（旧口径保留）
         dayTick++
         // 静默换卡会让老人困惑「怎么内容突然变了」；跨日播报走 pendingAnnounce 通道（2026-09-30 修复）：
         // dayTick 触发的重装载 → 跳页 effect 消费 announce 与落点卡拼成**一句**播出——直接 speak
@@ -345,7 +354,7 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     /** frontier = 第一张待处理卡的下标（无待处理卡时取总结卡下标；都没有则 0）。
      *  不变量：列表**只追加不重排**且（考试阶段）不允许越过未处理的卡——锁滑 + 作答自动前进
      *  结构性地保证了这一点（v5 R7 前向拦截已删），所以「在哪儿」就等于「做到哪儿了」
-     *  ——断点（restoreTo / saveQueuePosition）直接取它即可。 */
+     *  ——断点（restoreTo，UI 会话态）直接取它即可（仓库侧 position 字段已删除，见 StudyRepository）。 */
     fun frontierIndex(): Int {
         val firstPending = pages.indexOfFirst { isPending(it) }
         if (firstPending >= 0) return firstPending
@@ -567,13 +576,16 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
     // - announce == null（App 首次装载）不播——欢迎语已在装载分支按队列状态播过；
     // - 先记 spokenKeys 去重键再 speak，挡住停稳 collector 稍后对同一页的迟到事件（不重播）；
     // - 用户已抢滑离目标页 → 不播不消费，交还给停稳 collector（它的 announce 消费逻辑兜底）。
-    LaunchedEffect(pages, restoreTo) {
+    // ⚠️ key 只有 restoreTo、**刻意不含 pages**（2026-10-14 修复，与 2026-09-30 那次同源）：
+    //    jumpToPage 在惯性滚动中会挂起等 scroll mutex，翻页监听若在此期间追加了池型页
+    //    （pages 变更），key 含 pages 会让本协程在挂起点被取消、跳页丢失——落点被 clamp 到
+    //    任意页，任务频道若落在已答卡上 = 锁滑 + 按钮已替换 + 自动前进失效 = 界面死锁。
+    //    pages 改在体内读 State 委托 getter（同停稳 effect 口径）。
+    LaunchedEffect(restoreTo) {
         val target = restoreTo ?: return@LaunchedEffect
         // ⚠️ restoreTo 是本 effect 自己的 key，不能像旧版首行就清（2026-09-30 修复）：
-        //    惯性滚动中 scrollToPage 挂起等 scroll mutex，key 已变会让本协程在挂起点被取消、
-        //    跳页丢失——落点被 clamp 到任意页，任务频道若落在已答卡上 = 锁滑 + 按钮已替换 +
-        //    自动前进失效 = 界面死锁。改为跳页完成后**比较再清**（advanceAfterSpeechSeq effect
-        //    同款 Gotcha 处理）：等待期间 target 被新跳页覆盖时不误删。
+        //    等待期间 target 被新跳页覆盖时不误删——跳页完成后**比较再清**
+        //    （advanceAfterSpeechSeq effect 同款 Gotcha 处理）。
         if (pages.isEmpty()) {
             if (restoreTo == target) restoreTo = null
             return@LaunchedEffect
@@ -592,17 +604,17 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
         if (spokenKeys.add(key)) tts.speak(announce + cardSpeech(p))
     }
 
-    // 翻页落库（仅队列型任务阶段）+ 临近队尾预追加池型页（v5 R10 §5.7-2）。
-    // - **队列型任务阶段**（每日任务 && !browseMode）：断点写 frontier；浏览页追加的触发是
+    // 翻页监听（2026-10-14 起不再落库：原 saveQueuePosition 写的 position 字段从未被消费——
+    // 断点恢复走 answered[] + frontierIndex()，写入只让每次翻页多一次全量序列化，已删）：
+    // - **队列型任务阶段**（每日任务 && !browseMode）：浏览页追加的触发是
     //   `doneIdx >= 0 && idx >= doneIdx - 1`——任务阶段锁滑，此分支实际只在自动前进到完成卡时可达；
     //   **v9：到达完成卡（idx >= doneIdx）→ `enterBrowse` 转浏览模式**（上滑引导已播，
     //   任务卡移除、完成卡保留在首位）；
-    // - **browseMode / 池型（分区/收藏）**：**不落库**（页码无意义）+ 临近队尾即追加 = **无限流**（D2）。
+    // - **browseMode / 池型（分区/收藏）**：临近队尾即追加 = **无限流**（D2）。
     // 追加只发生在**列表尾部**，与「只追加不重排」的既有不变量一致。
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage }.collect { idx ->
             if (channel == StudyRepository.CHANNEL_DAILY && !browseMode) {
-                repo.saveQueuePosition(frontierIndex())
                 val doneIdx = pages.indexOfFirst { it is Page.Done }
                 if (doneIdx >= 0 && idx >= doneIdx - 1) appendPoolPages(POOL_BATCH)
                 if (doneIdx >= 0 && idx >= doneIdx) enterBrowse(doneIdx)
@@ -743,21 +755,23 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                 // v28：目标连击数从 AnswerResult 读——复习检验 1 次「认识」即过关，
                 // 不能再用固定的 DAILY_COMBO_TARGET(3) 判断，否则复习卡会说成「真棒」而漏报复习计划
                 val target = result.target
+                // 文案不再带 emoji 前缀承担语义（2026-10-14：结果条按 AnswerFeedback.known 渲染图标，
+                // 不再 startsWith 解析）；保留 ⭐/🎉 等纯视觉点缀时另作处理，此处保持纯文字
                 val (msg, spoken) = when {
                     count < target -> {
                         val praise = ANSWER_PRAISE.random()
-                        "👍 $praise" to "$praise。"
+                        praise to "$praise。"
                     }
                     upgraded && daysAfter == 1 ->
-                        "👍 这个词学会啦！明天再来复习" to "这个词学会啦！明天再来复习。"
+                        "这个词学会啦！明天再来复习" to "这个词学会啦！明天再来复习。"
                     upgraded ->
-                        "👍 这个词学会啦！${daysAfter} 天后再来复习" to "这个词学会啦！${daysAfter}天后再来复习。"
-                    else -> "👍 这个词学会啦" to "这个词学会啦。"
+                        "这个词学会啦！${daysAfter} 天后再来复习" to "这个词学会啦！${daysAfter}天后再来复习。"
+                    else -> "这个词学会啦" to "这个词学会啦。"
                 }
-                results[p.seq] = msg
+                results[p.seq] = AnswerFeedback(msg, known = true)
                 tts.speak("${termSpeech(t)}。$spoken")
             } else {
-                results[p.seq] = "没关系，再学一遍 💪"
+                results[p.seq] = AnswerFeedback("没关系，再学一遍", known = false)
                 tts.speak("${termSpeech(t)}。没关系，再学一遍。")
             }
             insertRepeatCard(t, p, result)
@@ -927,7 +941,9 @@ fun AppRoot(repo: StudyRepository, tts: TTSSpeaker, settings: AppSettings) {
                         // v8：revealed = 已作答（控制按钮隐藏/结果文案）；拼音/提示**恒显示**
                         //（防泄题契约废除，design.md §13.2——自评模式下无密可泄）
                         revealed = p.mode == CardMode.FREE || revealed[p.seq] == true,
-                        resultText = results[p.seq],
+                        resultText = results[p.seq]?.text,
+                        // 结果条按 known 渲染图标/配色（2026-10-14：不再解析文案 emoji 前缀）
+                        resultKnown = results[p.seq]?.known == true,
                         // v6 收藏星按钮：全卡型可见；只写 favorites（独立于 TermState/DayState，
                         // 收藏分区零写入不破坏）。v20：取消收藏在 **fav 频道内即时移除**该词的卡；
                         // 其他频道不重排已出卡，后续装载/重洗自然不再抽到该词。

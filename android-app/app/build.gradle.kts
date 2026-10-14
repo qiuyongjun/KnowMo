@@ -82,4 +82,8 @@ dependencies {
 
     // JVM 单测（2026-09-28 第 2 批）：CustomBanks 解析纯逻辑的回归防线，CI 跑 testDebugUnitTest
     testImplementation("junit:junit:4.13.2")
+    // StudyRepository 调度核心单测（2026-10-14 第 3 批）：persist/load 用 org.json —— android.jar
+    // 在单测里是「抛 Stub!」的桩，必须换真实现，否则任何走 JSONObject 的断言全炸。
+    // 仅 testImplementation，运行时依赖不变（App 真机用平台的 org.json）。
+    testImplementation("org.json:json:20240303")
 }

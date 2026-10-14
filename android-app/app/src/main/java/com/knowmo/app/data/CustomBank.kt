@@ -152,6 +152,16 @@ object CustomBanks {
     fun find(id: String): CustomBank? = banks[id]
 
     /**
+     * 单测注入（internal，2026-10-14 随可测性重构加入）：直接安装词库注册表，绕过文件 IO / Context。
+     * 调用方负责用完后 `installForTest(emptyList())` 复位，避免污染同一 JVM 内的其它单测
+     * （如 parseCsv 测试依赖空注册表判重语义）。生产路径不调用。
+     */
+    internal fun installForTest(banks: List<CustomBank>) = synchronized(ioLock) {
+        this.banks = LinkedHashMap<String, CustomBank>().apply { banks.forEach { put(it.id, it) } }
+        rebuildTermsIndex()
+    }
+
+    /**
      * 导入命名对话框的预填建议（v24）：文件名去扩展名 + 剥副本后缀 + 截到显示名上限 8 字
      * （所见即所得，确认后不会再被截断）。**只是建议**——库名（= 库身份）由用户输入决定。
      * 文件名拿不出建议名时返回空串，对话框要求用户自己起一个。
@@ -500,10 +510,22 @@ object CustomBanks {
     }
 
     /**
-     * 编码探测：UTF-8 BOM → 严格 UTF-8（解码失败不吞错）→ GBK。
-     * GBK 兜底是给老版 Excel「另存为 CSV」的默认编码；带 BOM 时剥掉前 3 字节。
+     * 编码探测：UTF-16 BOM → UTF-8 BOM → 严格 UTF-8（解码失败不吞错）→ GBK。
+     * UTF-16（Excel「Unicode 文本」另存的形态）在 GBK 兜底前识别（2026-10-14 修复）——
+     * 否则 UTF-16 字节被 GBK 解成乱码后报「拼音配对不符」，家属排障会被带偏（真问题是编码）。
+     * GBK 兜底是给老版 Excel「另存为 CSV」的默认编码；带 BOM 时剥掉前导字节。
      */
     private fun decode(bytes: ByteArray): String {
+        // UTF-16 LE / BE（UTF-32 LE 的 BOM 以 FF FE 00 00 开头，会先命中 UTF-16LE 分支误判——
+        // UTF-32 文件极罕见，且即便误判也比 GBK 兜底的乱码报错更靠近真因，不专门处理）
+        if (bytes.size >= 2) {
+            if (bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte()) {
+                return String(bytes, 2, bytes.size - 2, Charsets.UTF_16LE)
+            }
+            if (bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte()) {
+                return String(bytes, 2, bytes.size - 2, Charsets.UTF_16BE)
+            }
+        }
         if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {
             return String(bytes, 3, bytes.size - 3, Charsets.UTF_8)
         }
